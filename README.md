@@ -90,8 +90,6 @@ For two-party-consent jurisdictions (Germany, Switzerland, certain US states), N
 | BT Module B | AG | HFP control + bi-directional audio |
 | MCU | Router | Dual PCM/I2S, DMA, USB/Wi-Fi |
 
-Suggested platforms: CSR8675, QCC512x, AB5301A; ESP32-S3, STM32H743, RP2040.
-
 ## Legal Model
 - **One-party consent:** Israel, China, UK, France, India, most US states, etc.
 - **Two-party consent:** Germany, Switzerland, California, Pennsylvania, etc.
