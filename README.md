@@ -1,5 +1,7 @@
 # OpenVoiceBridge: Bluetooth Audio Bridge
 
+![OpenVoiceBridge preview](./preview.png)
+
 An open hardware–software platform that gives end users controlled, transparent access to their own call audio for real-time translation, captioning, accessibility, language learning, and AI-assisted communication. The system does not modify smartphones or mobile OS internals and operates strictly within standard Bluetooth profiles.
 
 ## Executive Summary
