@@ -1,0 +1,17 @@
+# build artifacts
+build/
+
+# vscode
+.vscode/
+
+# cmake
+CMakeFiles/
+CMakeCache.txt
+
+# binaries
+*.bin
+*.elf
+*.map
+
+# logs
+*.log
