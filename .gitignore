@@ -15,3 +15,17 @@ CMakeCache.txt
 
 # logs
 *.log
+
+# ESP-IDF
+build/
+sdkconfig
+sdkconfig.old
+
+# Python
+__pycache__/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
