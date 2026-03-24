@@ -16,6 +16,9 @@ CMakeCache.txt
 # logs
 *.log
 
+# audio captures
+*.wav
+
 # ESP-IDF
 build/
 sdkconfig

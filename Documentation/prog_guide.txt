@@ -1,0 +1,2300 @@
+RBeTle1a0se366.0progTreacmhmnionlgogusyerCgou.i,dLetd. Shenzhen Feasycom
+1
+
+Table of contents .,Ltd. 1 Introduction
+
+1
+
+o 1.1 Description . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 1
+
+C 1.2 Module Default Settings . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 1
+
+gy 2 Hardware Description
+
+2
+
+lo 2.1 Pin Diagram . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 2
+
+o 2.2 Pin Description . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 3
+
+n 2.3 Hardware Design Notes . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+
+ch 3 Function Description
+
+5
+
+Te 3.1 Compare related products . . . . . . . . . . . . . . . . . . . . . . . . . . . . 5
+
+3.2 Profiles & Features . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 3.3 GATT Default service and characteristic . . . . . . . . . . . . . . . . . . . . .
+com 4 Command Description sy 4.1 Terms . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . a 4.2 Command Format . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . e 4.3 Event Format . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . F 5 Commands Table en 5.1 General Commands . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+h5.1.1 AT+HELP - Firmware Function/Command Summary . . . . . . . . . z5.1.2 AT+SEP - Get/Set Event/Response Separator . . . . . . . . . . . . . n 5.1.3 AT+VER - Get Firmware Version . . . . . . . . . . . . . . . . . . . he 5.1.4 AT+BAUD - Get/Set Uart Baudrate . . . . . . . . . . . . . . . . . . S 5.1.5 AT+I2CREG - Read/Write I2C Register . . . . . . . . . . . . . . . .
+
+6 7
+8 8 8 9
+11 11 11 12 13 13 14
+
+5.1.6 AT+I2SCFG - Get/Set I2S Settings . . . . . . . . . . . . . . . . . . . 15
+
+5.1.7 AT+MICGAIN - Get/Set Analog Input Gain . . . . . . . . . . . . . . 16
+
+5.1.8 AT+SPKVOL - Get/Set Analog Output Volume . . . . . . . . . . . . 17
+
+5.1.9 AT+REBOOT - Soft Reboot . . . . . . . . . . . . . . . . . . . . . . 17
+
+i
+
+5.1.10 AT+RESTORE - Restore Factory Settings . . . . . . . . . . . . . . . 17
+
+5.1.11 AT+BTEN - Bluetooth On/Off . . . . . . . . . . . . . . . . . . . . . 18
+
+5.1.12 AT+PROFILE - Bluetooth Profile Selection . . . . . . . . . . . . . . 18
+
+5.1.13 AT+AUTOCONN - Power On Auto Reconnect Profile Selection . . . 19
+
+5.1.14 5.1.15 5.1.16 5.1.17 5.1.18 5.1.19 5.1.20 5.1.21 5.1.22 5.1.23 5.1.24 5.1.25 5.1.26 5.1.27 5.1.28
+
+AT+STAT - Get All Profile State . . . . . . . . . . . . . . . . . . . . 19
+. AT+DEVSTAT - Read Device State . . . . . . . . . . . . . . . . . . 20 td AT+ADDR - Get BR/EDR MAC Address . . . . . . . . . . . . . . . 20
+AT+LEADDR - Get BLE MAC Address . . . . . . . . . . . . . . . . 21
+.,L AT+NAME - Get/Set BR/EDR Local Name . . . . . . . . . . . . . . 21 o AT+LENAME - Get/Set BLE Local Name . . . . . . . . . . . . . . . 22 C AT+SSP - Get/Set BR/EDR Pairing Mode . . . . . . . . . . . . . . . 22
+AT+PIN - Get/Set BR/EDR Pin Code . . . . . . . . . . . . . . . . . 23
+gy AT+CFM - Accept/Reject Remote Pairing Request . . . . . . . . . . 23 lo AT+COD: Get/Set Device Class . . . . . . . . . . . . . . . . . . . . 23 o AT+PAIR: Get/Set BR/EDR/BLE Visibility . . . . . . . . . . . . . . 24 n AT+PAGE: Get/Set BR/EDR Connectability . . . . . . . . . . . . . . 25 h AT+SCAN - Scan Nearby Devices . . . . . . . . . . . . . . . . . . . 25 c AT+RSSI: Get BR/EDR Signal Strength . . . . . . . . . . . . . . . . 26 Te AT+PLIST - Get/Delete Paired List . . . . . . . . . . . . . . . . . . 26
+
+5.1.29 AT+DSCA - Release All Connections . . . . . . . . . . . . . . . . .
+m 5.1.30 AT+AUDROUTE - Audio Route Manager . . . . . . . . . . . . . . . o 5.1.31 AT+TPMODE - Turn On/Off Throughput Mode . . . . . . . . . . . . c 5.1.32 AT+LINKCFG - Auto search link configuration . . . . . . . . . . . . sy 5.1.33 AT+TXPOWER - tx power configuration . . . . . . . . . . . . . . . . a 5.2 HFP Commands . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . e 5.2.1 AT+HFPSTAT - Read HFP State . . . . . . . . . . . . . . . . . . . . F 5.2.2 AT+HFPSR - Get/Set HFP Sample Rate . . . . . . . . . . . . . . . . en 5.2.3 AT+HFPCFG - Get/Set HFP Configuration . . . . . . . . . . . . . . h5.2.4 AT+HFPCONN - Establish HFP Connection . . . . . . . . . . . . . . z5.2.5 AT+HFPDISC - Release HFP Connection . . . . . . . . . . . . . . . n 5.2.6 AT+HFPDIAL - Dial/Redial Phone Number . . . . . . . . . . . . . . he 5.2.7 AT+HFPDTMF - Send DTMF code . . . . . . . . . . . . . . . . . . S 5.2.8 AT+HFPANSW - Pick Up Incoming Call . . . . . . . . . . . . . . .
+
+27 27 28 28 28 29 29 30 30 30 31 31 31 32
+
+5.2.9 AT+HFPCHUP - Reject/Hung up Call . . . . . . . . . . . . . . . . . 32
+
+5.2.10 AT+HFPMCAL - Three way calling Control . . . . . . . . . . . . . . 32
+
+5.2.11 AT+HFPADTS - Transfer Voice Audio Between Local and Remote
+
+Device . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 32
+
+ii
+
+5.2.12 AT+HFPVR - Start/Stop Voice Recognition of Remote Device . . . . 33
+
+5.2.13 AT+HFPINFO - Read HFP information . . . . . . . . . . . . . . . . 33
+
+5.2.14 AT+MICMUTE - Mute Mic . . . . . . . . . . . . . . . . . . . . . . 33
+
+5.3 A2DP/AVRCP Commands . . . . . . . . . . . . . . . . . . . . . . . . . . . . 33
+
+5.3.1 5.3.2 5.3.3 5.3.4 5.3.5 5.3.6 5.3.7 5.3.8 5.3.9 5.3.10 5.3.11 5.3.12 5.3.13 5.3.14 5.3.15
+
+AT+A2DPSTAT - Read A2DP State . . . . . . . . . . . . . . . . . . 33
+. AT+A2DPCONN - Establish A2DP Connection . . . . . . . . . . . . 34 td AT+A2DPDISC - Release A2DP Connection . . . . . . . . . . . . . 34
+AT+A2DPINFO - Read A2DP information . . . . . . . . . . . . . . 34
+.,L AT+AVRCPSTAT - Read AVRCP State . . . . . . . . . . . . . . . . 34 o AT+AVRCPCFG - Get/Set AVRCP Configuration . . . . . . . . . . . 34 C AT+PLAYPAUSE - Track Play/Pause . . . . . . . . . . . . . . . . . 35
+AT+PLAY - Track Play . . . . . . . . . . . . . . . . . . . . . . . . . 35
+gy AT+PAUSE - Track Pause . . . . . . . . . . . . . . . . . . . . . . . 35 lo AT+STOP - Track Stop . . . . . . . . . . . . . . . . . . . . . . . . . 35 o AT+FORWARD - Track Forward . . . . . . . . . . . . . . . . . . . 36 n AT+BACKWARD - Track Backward . . . . . . . . . . . . . . . . . . 36 h AT+REPEAT - Set Media Player Repeat Mode . . . . . . . . . . . . 36 c AT+SHUFFLE - Set Media Player Shuffle Mode . . . . . . . . . . . . 36 Te AT+GETMP - List Media Players of Remote Device . . . . . . . . . . 37
+
+5.3.16 AT+SETMP - Select Media Player . . . . . . . . . . . . . . . . . . .
+m 5.3.17 AT+GETFD - List Sub Folders/Tracks of Selected Folder . . . . . . . o 5.3.18 AT+SETFD - Select and Enter Folder . . . . . . . . . . . . . . . . . c 5.3.19 AT+GETNP - List Tracks in Now Playing List . . . . . . . . . . . . . sy 5.3.20 AT+ADDMP - Add Track to Media Player . . . . . . . . . . . . . . . a 5.4 PBAP Commands . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . e 5.4.1 AT+PBSTAT - Read PBAP state . . . . . . . . . . . . . . . . . . . . F 5.4.2 AT+PBCONN - Establish PBAP Connection . . . . . . . . . . . . . . en 5.4.3 AT+PBDISC - Release PBAP Connection . . . . . . . . . . . . . . . h5.4.4 AT+PBDOWN - Download Phonebook . . . . . . . . . . . . . . . . z5.4.5 AT+PBABORT - Abort Downloading . . . . . . . . . . . . . . . . . n5.5 SPP Commands . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . he 5.5.1 AT+SPPSTAT - Read SPP State . . . . . . . . . . . . . . . . . . . . S 5.5.2 AT+SPPCONN - Establish SPP Connection . . . . . . . . . . . . . .
+
+37 38 38 38 38 39 39 39 39 40 40 41 41 41
+
+5.5.3 AT+SPPDISC - Release SPP Connection . . . . . . . . . . . . . . . . 41
+
+5.5.4 AT+SPPSEND - Send Data Via SPP . . . . . . . . . . . . . . . . . . 41
+
+5.6 GATT Commands . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 42
+
+5.6.1 AT+GATTSTAT - Read GATT State . . . . . . . . . . . . . . . . . . 42
+
+iii
+
+5.6.2 AT+GATTDISC - Release GATT Connection . . . . . . . . . . . . . 42
+
+5.6.3 AT+GATTSEND - Send Data Via GATT . . . . . . . . . . . . . . . 42
+
+5.7 HID Commands . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 42
+
+5.7.1 AT+HIDSTAT - Read HID State . . . . . . . . . . . . . . . . . . . . 43
+
+6
+
+5.7.2
+. 5.7.3 td 5.7.4
+5.7.5
+.,L 5.7.6 o 5.7.7
+
+AT+HIDCONN - Establish HID Connection . . . . . . . . . . . . . . 43 AT+HIDDISC - Release HID Connection . . . . . . . . . . . . . . . 43 AT+HIDMODE - Get/Set HID Input Mode . . . . . . . . . . . . . . 43 AT+HIDDLY - Get/Set HID Report Period . . . . . . . . . . . . . . 44 AT+HIDSEND - Send HID Keyboard Report . . . . . . . . . . . . . 44 AT+HIDCMD - Send HID User Report . . . . . . . . . . . . . . . . 45
+
+C Events Table
+
+46
+
+y 6.1 General Events . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 46
+
+g 6.1.1 +PWRSTAT - Powering State . . . . . . . . . . . . . . . . . . . . . . 46
+
+lo 6.1.2 +SCAN - Scan Result . . . . . . . . . . . . . . . . . . . . . . . . . . 47
+
+o 6.1.3 +PAIRREQ - Pair Request . . . . . . . . . . . . . . . . . . . . . . . 47
+
+hn 6.1.4 +PAIRED - Pair Result . . . . . . . . . . . . . . . . . . . . . . . . . 48
+
+c 6.1.5 +CODEC - Codec ID . . . . . . . . . . . . . . . . . . . . . . . . . . 48
+
+Te 6.2 HFP Events . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 48
+
+6.2.1 +HFPSTAT - HFP State . . . . . . . . . . . . . . . . . . . . . . . . 6.2.2 +HFPDEV - HFP Remote Device Information . . . . . . . . . . . . .
+om 6.2.3 +HFPAUDIO - HFP Voice Audio State . . . . . . . . . . . . . . . . . c 6.2.4 +HFPSIG - HFP Remote Device Network Signal Strength . . . . . . . sy 6.2.5 +HFPROAM - HFP Remote Device Roaming State . . . . . . . . . . a 6.2.6 +HFPBATT - HFP Remote Device Battery Level . . . . . . . . . . . e 6.2.7 +HFPNET - HFP Remote Device Network Operator Selection . . . . F 6.2.8 +HFPMANU - HFP Remote Device Manufacture . . . . . . . . . . . n 6.2.9 +HFPNUM - HFP Remote Device Phone Subscriber Number . . . . . e6.2.10 +HFPIBR - HFP Remote Device In-band-ring Support . . . . . . . . . zh6.2.11 +HFPRING - HFP Remote Device Ringing . . . . . . . . . . . . . . n6.3 A2DP/AVRCP Events . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . e 6.3.1 +A2DPSTAT - A2DP State . . . . . . . . . . . . . . . . . . . . . . . Sh 6.3.2 +A2DPDEV - A2DP Remote Device Information . . . . . . . . . . .
+
+49 50 50 50 50 51 51 51 51 51 52 52 52 52
+
+6.3.3 +AVRCPSTAT - AVRCP State . . . . . . . . . . . . . . . . . . . . . 53
+
+6.3.4 +PLAYSTAT - Media Player State . . . . . . . . . . . . . . . . . . . 53
+
+6.3.5 +PLAYMODE - Media Player Repeat/ Shuffle Mode . . . . . . . . . 54
+
+6.3.6 +TRACKSTAT - Media Player Play Progress . . . . . . . . . . . . . 54
+
+iv
+
+6.3.7 +TRACKINFO - Media Track Information . . . . . . . . . . . . . . . 55
+
+6.3.8 +BROWSTAT - Media Browsing State . . . . . . . . . . . . . . . . . 55
+
+6.3.9 +BROWDATA - Media Player Filesystem Browsing Data . . . . . . . 56
+
+6.3.10 +BIPSTAT - BIP State . . . . . . . . . . . . . . . . . . . . . . . . . 57
+
+7
+
+6.3.11 +COVERART - Media Track Cover Art Download Success . . . . . . 57
+. 6.4 Phonebook Access Events . . . . . . . . . . . . . . . . . . . . . . . . . . . . 57 td 6.4.1 +PBSTAT - PBAP State . . . . . . . . . . . . . . . . . . . . . . . . 58
+6.4.2 +PBCNT - Phonebook Entries of Remote Device . . . . . . . . . . . 58
+.,L 6.4.3 +PBDATA - Phonebook Data . . . . . . . . . . . . . . . . . . . . . . 59 o 6.5 SPP Events . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 60
+C 6.5.1 +SPPSTAT - SPP State . . . . . . . . . . . . . . . . . . . . . . . . . 61
+6.5.2 +SPPDATA - SPP Received Incoming Data . . . . . . . . . . . . . . 61
+gy 6.6 GATT Events . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 61 lo 6.6.1 +GATTSTAT - GATT State . . . . . . . . . . . . . . . . . . . . . . 61 o 6.6.2 +GATTDATA - GATT Received Incoming Data . . . . . . . . . . . . 62
+n 6.7 HID Events . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 62 h 6.7.1 +HIDSTAT - HID State . . . . . . . . . . . . . . . . . . . . . . . . . 62
+
+Tec Application scenarios
+
+63
+
+7.1 profiles initializing and change parameter . . . . . . . . . . . . . . . . . . . . 7.2 Sink mode connection . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+om 7.3 Source mode connection . . . . . . . . . . . . . . . . . . . . . . . . . . . . . c 7.4 HFP three way calling operations . . . . . . . . . . . . . . . . . . . . . . . . . sy 7.5 AVRCP filesystem browsing . . . . . . . . . . . . . . . . . . . . . . . . . . . a 7.6 AVRCP Cover Art image retrieval . . . . . . . . . . . . . . . . . . . . . . . . e 7.7 Phonebook/Contact photo downloading . . . . . . . . . . . . . . . . . . . . . n F 8 Appendix Shenzhe 8.1 Download PDF Document . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+
+63 64 66 69 70 71 71
+73 73
+
+v
+
+. Chapter 1 .,Ltd Introduction gy Co [] nolo 1.1 Description ech This design guide is suitable for engineers to develop FSC-BT1036 series Bluetooth modules, T also suitable for BT955, BT936B, BT909C, BT906 series modules
+
+om 1.2 Module Default Settings asyc Name e LE-Name F Pin Code n Secure Simple Pairing Mode Shenzhe UART Baudrate
+
+FSC-BT1036-XXXX FSC-BT1036-LE-XXXX 0000 ON 115200/8/N/1
+
+1
+
+. Chapter 2 .,Ltd Hardware Description gy Co 2.1 Pin Diagram Technolo FSC-BT1036C as an example: Shenzhen Feasycom
+2
+
+2.2 Pin Description
+
+BT1036 programming user guide, Release 6.0
+
+Pin Pin Name Type
+
+Pin Descriptions
+
+4
+
+I2S_CLK I/O
+
+5
+
+I2S_IN
+
+I
+
+6
+
+I2S_OUT O
+
+7
+
+I2S_WS I/O
+
+8
+
+RESET
+
+I
+
+13 UART_TX O
+
+14 UART_RX I
+
+15 UART_CTS I/O
+
+16 UART_RTS I/O
+
+17 LED0
+
+I/O
+
+18 LED1
+
+I/O
+
+I2S BCLK I2S DATA IN
+td. I2S DATA OUT
+I2S SYNC
+.,L External reset input: active Low o UART TX
+UART RX
+C UART CTS gy UART RTS(default: PA mute pin) olo Output square wave in pairing mode, Techn output high level when bluetooth is connected
+
+sycom 32 GND
+
+GND
+
+33 VDD
+
+VDD
+
+ea 40 MIC_RP Audio
+
+F 41 MIC_RN Audio
+
+43 MIC_LP Audio
+
+en 44 MIC_LN Audio
+
+h 45 MIC_BASE Audio
+
+z46 SPK_RN Audio
+
+en47 SPK_RP Audio
+
+Sh48 SPK_LN Audio
+
+SPP/GATT is not connected to output low level, connected to output high level
+GND Power supply for I/O ports, DC 3.3V MIC0/Line_IN differential R input, positive MIC0/Line_IN differential R input, negative MIC0/Line_IN differential L input, positive MIC0/Line_IN differential L input, negative MIC Power Supplies Headphone/speaker differential R output, negative Headphone/speaker differential R output, positive Headphone/speaker differential L output, negative
+
+49 SPK_LP Audio
+
+Headphone/speaker differential L output, positive
+
+51 EXT_ANT ANT
+
+Change the 0 ohm resistance near the antenna, you can connect an external Bluetooth antenna
+
+2.2. Pin Description
+
+3
+
+BT1036 programming user guide, Release 6.0
+2.3 Hardware Design Notes
+· The simple test of the module only needs to connect VDD/GND/UART_RX/UART_TX to use
+· After drawing the schematic diagram, please send it to Feasycom for review,so as to
+Technology Co.,Ltd. avoid the Bluetooth distance not reaching the best effect Shenzhen Feasycom
+
+2.3. Hardware Design Notes
+
+4
+
+FCuhnacpttieorn3Description gy Co.,Ltd. 3.1 Compare related products
+
+nolo Module BT Tx ch Power
+e BT1036A 5.2 10dBm T BT1036B 5.2 10dBm
+BT1036C 5.2 10dBm
+m BT955 5.2 10dBm
+
+Size(W*L*H mm) 10*11.9*1.8 13*26.9*2.4 13*26.9*1.8 13*26.9*1.8
+
+syco BT936A 4.2 8.5dBm 10*11.9*1.8
+
+ea BT936B 4.2 8.5dBm 13*26.9*2.4
+
+n F BT909C 4.2 20dBm 13*26.9*2.4
+
+zhe BT966 nBT901 SheBT906
+
+5.0 12dBm 4.2 8.5dBm 4.2 8.5dBm
+
+13*26.9*2.4 10*11.9*1.8 13*26.9*2.4
+
+Chip
+
+Audio
+
+FSC2061 Stereo Input/Output FSC2061 Stereo Input/Output FSC2061 Stereo Input/Output FSC2081 Mono Input/Stereo Out-
+put CSR8811 Mono Input/Stereo Out-
+put CSR8811 Mono Input/Stereo Out-
+put CSR8811 Mono Input/Stereo Out-
+put CYW20706 Stereo Input/Output CSR8811 No CSR8811 Mono Input/Stereo Out-
+put
+
+BT909 4.2 20dBm 13*26.9*2.4
+
+CSR8811 No
+
+BT1026C 5.1 9dBm
+
+13*26.9*1.8
+
+QCC3024 Stereo Input/Output
+
+BT1026D 5.1 9dBm
+
+13*26.9*1.8
+
+QCC3034 Stereo Input/Output
+
+5
+
+BT1036 programming user guide, Release 6.0
+Note: · BT90X series modules have been discontinued. Corresponding replacement modules:: BT901->BT936A, BT906->BT936B,BT909->BT909C · BT966 series modules have been discontinued. Corresponding replacement modules::
+td. BT966->BT1036B, BT966C->BT1036C .,L · Among them, BT1026C/BT1026D only support audio sink mode, not support source
+mode.
+o · Other modules can use the AT+PROFILE command to configure audio sink mode or C audio source modesink and source cannot exist at the same time. ology 3.2 Profiles & Features chn · SPP (Serial Port Profile) Te · GATTS (Generic Attribute Profile LE-Peripheral role)
+· GATTC (Generic Attribute Profile LE-Central role)
+om · HFP-HF (Hands-Free Profile) c · HFP-AG (Hands-Free-AG Profile) asy · A2DP-Sink (Advanced Audio Distribution Profile) e · A2DP-Source (Advanced Audio Distribution Profile) F · AVRCP-Controller (Audio/Video remote controller Profile) en · AVRCP-Target (Audio/Video remote controller Profile) zh · HID-DEVICE (Human Interface Profile) Shen· PBAP (Phonebook Access Profile)
+
+3.2. Profiles & Features
+
+6
+
+BT1036 programming user guide, Release 6.0
+3.3 GATT Default service and characteristic
+
+Type
+
+UUID
+
+Characteristic
+
+Description
+
+Service Write
+Notify
+
+0xFFF0 0xFFF2
+0xFFF1
+
+WriteWrite Without Re-
+td. sponse Technology Co.,L Notify
+
+throughput services app send to module
+module send to app
+
+Shenzhen Feasycom
+
+3.3. GATT Default service and characteristic
+
+7
+
+. Chapter 4 .,Ltd Command Description gy Co 4.1 Terms olo · Throughout this specification: hn · Content between { } is optional Tec · Content behind << represents a COMMAND from Host
+· Content behind >> represents a RESPONSE/EVENT to Host
+com 4.2 Command Format asy AT+Command{=Param1{,Param2{,Param3...}}}<CR><LF> Fe · All commands start with "AT", end with <CR><LF> en · <CR> means "carriage return", corresponds to hex value 0x0D zh · <LF> means "line feed", corresponds to hex value 0x0A en· If Command has Parameter, Parameter follows behind `=' Sh · If Command has multiple Parameters, Parameter must be separated by `,'
+· If Command has Response, Response starts with <CR><LF>, ends with <CR><LF> · Module will always report command's execution result by using "OK"for success or "ERR<code>"for failure
+8
+
+BT1036 programming user guide, Release 6.0
+
+Error Code Meaning
+
+001
+
+Failed
+
+002
+
+Invalid parameter
+
+003 004
+td. 005
+006
+.,L 007 o 008
+Others
+
+Invalid state Command mismatch Busy Command not supported Profile not turned on No memory Reserved for future use
+
+logy C Example:Read module's BR/EDR local name o << AT+VER n >> +VER=FSC-BT1036-XXXX Tech >> OK
+
+Example:Pick up an incoming call when no call incoming actually
+m << AT+HFPANSW o >> ERR003 easyc 4.3 Event Format n F <CR><LF>+Indication{=Param1{,Param2{,Param3...}}}<CR><LF> zhe · All Events start with <CR><LF>, end with <CR><LF> en· If Event has Parameter, Parameter follow behind `=' Sh · If Event has multiple Parameters, Parameter must be separated by `,'
+
+· Use command AT+SEP to replace default separator for conflict prevention
+
+Example: Received "1234567890"from mobile phone via SPP profile
+
+4.3. Event Format
+
+9
+
+>> +SPPDATA=10,1234567890
+
+BT1036 programming user guide, Release 6.0
+
+Example: Dial number "10086"using a mobile phone when HFP connected
+
+>> +HFPSTAT=4 >> +HFPAUDIO=1 >> +HFPSTAT=6,10086
+
+Technology Co.,Ltd.
+
+Shenzhen Feasycom
+
+4.3. Event Format
+
+10
+
+CChomapmtearn5ds Table gy Co.,Ltd. 5.1 General Commands nolo 5.1.1 AT+HELP - Firmware Function/Command Summary
+
+ech Command T Response Shenzhen Feasycom Description
+
+AT+HELP
+<FIRMWARE FUNCTION: appropriate working scenario > <OTA PATH: latest suitable firmware path on server for upgrade On-The-Air> <ENABLED PROFILES: LINKS: ON/OFF>
+... ... <COMMAND SUMMARY: DESCRIPTION: PROFILE CATEGORY>
+Using help command to get the basic summary information
+
+11
+
+BT1036 programming user guide, Release 6.0
+5.1.2 AT+SEP - Get/Set Event/Response Separator
+
+Command
+
+AT+SEP{=Param}
+
+Param
+. Response y Co.,Ltd Description
+
+hex value 0x01~0xFF, default: `,', specially, using `0'instead of `xFF'for convenience
++SEP=Param
+The parameter of events/responses may contain value same to the default separator, using this command to replace default separator for conflict prevention (replace the default separator `,'to hex value `xFF'typically)
+
+nolog Example:Read module's paired record (device name contains `,'already) ch << AT+PLIST Te >> +PLIST=1,32808,1C5CF226D773, Tony, iPhone12
+
+>> +PLIST=2,40, A0BC30075421, Samsung S8
+m >> +PLIST=E o >> OK syc Example: Replace separator to `0xFF' a << AT+SEP=0 e >> OK F Example: Read module's paired record again n << AT+PLIST he >> +PLIST=1<FF>32808<FF>1C5CF226D773<FF>Tony, iPhone12 z >> +PLIST=2<FF>40<FF> A0BC30075421<FF>Samsung S8 en>> +PLIST=E Sh>> OK
+
+5.1. General Commands
+
+12
+
+BT1036 programming user guide, Release 6.0
+5.1.3 AT+VER - Get Firmware Version
+
+Command
+
+AT+VER
+
+Response Param1
+. Param2 td Param3 .,L Note
+
++VER=Param1,Param2,Param3 Module type Firmware version Data of production The date of production in response will not be changed after firmware upgrade
+
+y Co Example: log << AT+VER o >> +VER=BT1036,V2.6.1,20220922 n >> OK Tech 5.1.4 AT+BAUD - Get/Set Uart Baudrate
+
+om Command c Param n Feasy Response e Param Shenzh Description
+
+AT+BAUD{=Param}
+2400/4800/9600/19200/38400/57600/115200(default)/128000/ 230400/256000/460800/512000/921600/1382400
++BAUD=Param1,Param2,Param3 All baudrates supported by current module
+Module will change baudrate to target value immediately or after reboot depending on firmware
+
+Example:Query baudrates supported by current module then change baudrate from 115200 bps to 921600 bps
+
+5.1. General Commands
+
+13
+
+BT1036 programming user guide, Release 6.0
+
+<< AT+BAUD
+
+>> +BAUD=2400,4800,9600,19200,38400,57600,115200,128000,230400,256000,
+
+460800,512000,921600,1382400
+
+>> OK
+td. << AT+BAUD=921600
+>> OK
+.,L Module switch baudrate to 921600 immediately, host change baudrate as well, query module's o name at new baudrate C << AT+NAME y >> +NAME=FSC-BT91036-1F26 g >> OK
+
+nolo 5.1.5 AT+I2CREG - Read/Write I2C Register
+
+Tech Command
+
+AT+I2CREG=Param1, Param2, Param3 {,Param4}
+
+Param1
+m Param2 o Param3 syc Param4
+Response
+ea Param en F Description
+
+i2c bus address, 2 byes hex string i2c register address, 2/4 byes hex string bytes to read/write (1~64) value to write +I2CREG=Param i2c read return value
+Command can be used only if module's build-in codec is disabled, the i2c bus is master by default.
+
+Shenzh Example:Read external i2c slave device, address:0x34, register 0003, bytes:2; then modify value
+
+to 0xA13B
+
+<< AT+I2CREG= 34,0003,2
+
+>> +I2CREG=805F
+
+>> OK
+
+5.1. General Commands
+
+14
+
+<< AT+I2CREG= 34,0003,2,A13B >> OK
+
+BT1036 programming user guide, Release 6.0
+
+5.1.6 AT+I2SCFG - Get/Set I2S Settings
+
+td. Command .,L Param
+BIT[0]
+o BIT[1] C BIT[2] y BIT[3-4] Technolog BIT[5-6]
+
+AT+I2SCFG{=Param} A base-10 representation of a bit field, default:0, for each bit 0:disable; 1:enable 0:master; 1:slave 0:FS=48000Hz;1:FS=44100Hz
+00: I2S standard format 10: PCM short frame format
+00: bit depth=16bits
+
+10: bit depth=32bits (only 16bits of MSB effective)
+m 11: bit depth=32bits (only used for PCM mode)
+
+syco Response n Fea Description
+
++I2SCFG=Param
+The BT90X modules support serval external codecs by default, e.g. ES8388, TLV320AIC3204 and etc. BT1036/BT955 built-in codec If +I2SCFG=0, module will auto detect on of them on booting
+
+zhe Note
+
+Use command AT+HFPSR for setting HFP voice call sample rate
+
+ShenExample:usual configuration and description
+
+5.1. General Commands
+
+15
+
+BT1036 programming user guide, Release 6.0
+
+0
+
+Analog mode, module will probe
+
+internal/external codecs via I2C on booting,
+
+and will report +CODEC= id to indicate user
+. which codec has been recognized
+
+.,Ltd 1
+
+I2S Master; Sample rate=48000Hz;
+
+Resolution=16bits; Bit clock=
+
+o 48000*16*2ch=1.536Mhz
+
+C 3
+
+I2S Slave; Sample rate=48000Hz;
+
+y Resolution=16bits; Bit clock=
+
+g 48000*16*2ch=1.536Mhz
+
+lo 65
+
+I2S Master; Sample rate=48000Hz;
+
+o Resolution=32bits; Bit clock=
+
+n 48000*32*2ch=3.072Mhz
+
+ch 67
+
+I2S Slave; Sample rate=48000Hz;
+
+eResolution=32bits; Bit clock=
+
+T48000*32*2ch=3.072Mhz
+
+113
+
+PCM Master; Sample rate=48000Hz;
+
+m Resolution=16bits; Bit clock=
+
+co 48000*16*2ch=1.536Mhz
+
+easy 5.1.7 AT+MICGAIN - Get/Set Analog Input Gain
+
+n F Command e Param Shenzh Description
+
+AT+MICGAIN{=Param} Gain (0~15, default:8)
+Adjust codec analog input gain, only work for module with codec build in (unavailable for I2S input)
+
+5.1. General Commands
+
+16
+
+BT1036 programming user guide, Release 6.0
+5.1.8 AT+SPKVOL - Get/Set Analog Output Volume
+
+Command Param1
+. Param2 .,Ltd Description
+
+AT+SPKVOL{=Param1,Param2} Volume for A2DP Streaming (0~15, default:8) Volume for HFP Call (0~15, default:8)
+Adjust codec analog output gain, only work for module with codec build in (unavailable for I2S output)
+
+gy Co 5.1.9 AT+REBOOT - Soft Reboot
+
+olo Command hn Response Tec Description
+
+AT+REBOOT OK Module release all Bluetooth connections with remote device then reboot
+
+om Example: c << AT+REBOOT sy >> OK
+
+Fea 5.1.10 AT+RESTORE - Restore Factory Settings
+
+hen Command zResponse ShenDescription
+
+AT+RESTORE OK Module restore all factory settings then reboot
+
+Example:
+
+<< AT+RESTORE
+
+>> OK
+
+5.1. General Commands
+
+17
+
+BT1036 programming user guide, Release 6.0
+5.1.11 AT+BTEN - Bluetooth On/Off
+
+Command
+
+AT+BTEN{=Param}
+
+Param
+
+0-Power off 1-Power on
+
+td. 5.1.12 AT+PROFILE - Bluetooth Profile Selection
+
+o.,L Command C Param
+BIT[0]
+gy BIT[1] lo BIT[2] o BIT[3] n BIT[4] h BIT[5] ec BIT[6] T BIT[7]
+
+AT+PROFILE{=Param} A base-10 representation of a bit field, for each bit: SPP (Serial Port Profile) GATT Server (Generic Attribute Profile) GATT Client (Generic Attribute Profile) HFP-HF (Hands-Free Profile Handsfree) HFP-AG (Hands-Free Profile Audio Gateway) A2DP Sink (Advanced Audio Distribution Profile) A2DP Source (Advanced Audio Distribution Profile) AVRCP Controller (Audio/Video remote controller Profile)
+
+BIT[8]
+m BIT[9] o BIT[10] syc BIT[15]
+Response
+Shenzhen Fea Description
+
+AVRCP Target (Audio/Video remote controller Profile) HID Keyboard (Human Interface Profile) PBAP Server (Phonebook Access Profile) iAP2 (For iOS devices) +PROFILE=Param
+GATT Server and Client, HFP Sink and Source, A2DP Sink and Source, AVRCP Controller and Target cannot be enabled simultaneously because of mutual exclusion.
+
+Example:Read current profile selection
+
+<< AT+PROFILE
+
+>> +PROFILE=1195
+
+Example:Enable SPP, GATT Server, HFP Source, A2DP Source profile, disable the others
+
+5.1. General Commands
+
+18
+
+BT1036 programming user guide, Release 6.0
+
+<< AT+PROFILE=83
+
+>> OK
+
+Example:Enable SPP, A2DP Sink, disable the others
+
+<< AT+PROFILE=33 >> OK
+
+.,Ltd. 5.1.13 AT+AUTOCONN - Power On Auto Reconnect Profile Selection
+
+Co Command y Param g Response olo Description
+
+AT+AUTOCONN{=Param} A base-10 representation of a bit field, format same with AT+PROFILE +AUTOCONN=Param Module will attempt to establish connection to devices in paired list after power on.
+
+Techn 5.1.14 AT+STAT - Get All Profile State
+
+Command
+om Response c Description
+
+AT+STAT +STAT=Param1, Param2, Param3... Query all current enabled profile's state
+
+easy Example: Read current profile selection F << AT+PROFILE en >> +PROFILE=83 h Example:Read profile state z << AT+STAT en+STAT=3,1,2,5 Sh>> OK
+
+5.1. General Commands
+
+19
+
+BT1036 programming user guide, Release 6.0
+
+o.,Ltd. 5.1.15 AT+DEVSTAT - Read Device State
+
+y C Command g Response lo Param o BIT[0] n BIT[1] ch BIT[2] Te BIT[3]
+
+AT+DEVSTAT +DEVSTAT=Param A base-10 representation of a bit field, for each bit: 0: Power Off; 1: Power On 0: BR/EDR Not Discoverable; 1: BR/EDR Discoverable 0: BLE Not Advertising; 1: BLE Advertising 0: BR/EDR Not Scanning; 1: BR/EDR Scanning
+
+BIT[4]
+
+0: BLE Not Scanning; 1: BLE Scanning
+
+om Example:usual combination and description
+
+syc 0 Device power off a 1 Device power on e 3 Device power on, BR/EDR Discoverable F 5 Device power on, BR/EDR Not Discoverable, BLE Advertising n 7 Device power on, BR/EDR Discoverable, BLE Advertising e 13 Device power on, BR/EDR Not Discoverable, BLE Advertising, Scanning nearby
+zhBR/EDR devices
+
+Shen5.1.16 AT+ADDR - Get BR/EDR MAC Address
+
+Command Response Param
+
+AT+ADDR +ADDR=Param Module's BR/EDR MAC address (12 Bytes ASCII)
+
+5.1. General Commands
+
+20
+
+BT1036 programming user guide, Release 6.0
+
+Example:
+
+<< AT+ADDR
+
+>> +ADDR=DC0D30010203
+
+>> OK
+
+td. 5.1.17 AT+LEADDR - Get BLE MAC Address
+
+o.,L Command C Response
+Param
+
+AT+LEADDR +LEADDR=Param Module's LE MAC address (12 Bytes ASCII)
+
+logy 5.1.18 AT+NAME - Get/Set BR/EDR Local Name
+
+chno Command e Param1 T Param2 Feasycom Response
+Description
+
+AT+NAME{=Param1{,Param2}} BR/EDR local name(1~31 Bytes ASCII)
+MAC address suffix(0/1,default:1) 0: Disable suffix 1: Enable suffix "-XXXX"(lower 4 bytes of MAC address) after local name
++NAME=Param Write local name if parameter exist, otherwise read current local name
+
+zhen Example:Read current BR/EDR local name en<< AT+NAME Sh>> +NAME=FSC-BT1036-XXXX
+
+>> OK
+
+Example:Change module's BR/EDR local name to "ABC",and disable suffix << AT+NAME=ABC,0
+
+5.1. General Commands
+
+21
+
+>> OK
+
+BT1036 programming user guide, Release 6.0
+
+Example:Change module's BR/EDR local name to "ABC"and enable suffix
+
+<< AT+NAME=ABC,1
+. >> OK
+
+.,Ltd 5.1.19 AT+LENAME - Get/Set BLE Local Name
+
+Co Command y Param1 Technolog Param2
+
+AT+LENAME{=Param1{,Param2}} BLE local name(1~25 Bytes ASCII)
+MAC address suffix(0/1,default:1) 0-Disable suffix 1-Enable suffix "-XXXX"(lower 4 bytes of MAC address) after local name
+
+Response
+
++LENAME=Param
+
+com 5.1.20 AT+SSP - Get/Set BR/EDR Pairing Mode
+
+asy Command Shenzhen Fe Param
+
+AT+SSP{=Param}
+Pairing mode (0~3, default:2) (0) Legacy pairing, use pin code for pairing (1) Secure simple pairing, auto pairing (2) Secure simple pairing, display yes/no in pairing (3) Secure simple pairing, passkey compare, user need to accept/reject pair request with command AT+CFM
+
+Response Note
+
++SSP=Param need reboot
+
+5.1. General Commands
+
+22
+
+BT1036 programming user guide, Release 6.0
+5.1.21 AT+PIN - Get/Set BR/EDR Pin Code
+
+Command
+
+AT+PIN{=Param}
+
+Param Response
+. Description
+
+Pin code(4~15 Bytes ASCII, default:0000) +PIN=Param Pin code only work in legacy pairing mode, see AT+SSP
+
+.,Ltd Example:Read module's pin code o << AT+PIN C >> +PIN=0000 gy >> OK olo Example: Change module's pin code to "1234" n << AT+PIN=1234 Tech >> OK
+
+5.1.22 AT+CFM - Accept/Reject Remote Pairing Request
+
+sycom Command
+Param1
+ea Param2 zhen F Description
+
+AT+CFM=Param1, Param2 12 Bytes MAC address of remote device
+0-Reject remote pairing request 1-Accept remote pairing request
+Only used for pairing request in pairing mode 3, see AT+SSP
+
+Shen5.1.23 AT+COD: Get/Set Device Class
+
+Command Param Response
+
+AT+COD=Param Class of device(6 bytes ASCII, default:240408 Handsfree device) +COD=Param
+
+5.1. General Commands
+
+23
+
+Related configuration reference: COD.
+
+BT1036 programming user guide, Release 6.0
+
+5.1.24 AT+PAIR: Get/Set BR/EDR/BLE Visibility
+
+Command Param
+Description
+
+. AT+PAIR=Param .,Ltd Mode(0-3)
+0: Leave BR/EDR/BLE discoverable mode (stop
+o advertising/broadcasting) C 1: Enter BR/EDR discoverable mode (start broadcasting) gy 2: Enter BLE discoverable mode (start advertising) lo 3: Enter BR/EDR/BLE discoverable mode (start o advertising/broadcasting) Techn Module will always be discoverable if no device connected (BR/EDR or
+
+BLE), and be undiscoverable if connected with remote device, unless received
+Shenzhen Feasycom thiscommand
+
+5.1. General Commands
+
+24
+
+BT1036 programming user guide, Release 6.0
+5.1.25 AT+PAGE: Get/Set BR/EDR Connectability
+
+Command
+
+AT+PAGE=Param
+
+Param
+logy Co.,Ltd. Description
+
+Mode(0-1) 0: Leave BR/EDR connectable mode (stop paging) 1: Enter BR/EDR connectable mode (start paging)
+Module will always be connectable mode if no device connected, and be unconnectable if connected with remote device, unless received this command
+
+Techno 5.1.26 AT+SCAN - Scan Nearby Devices
+
+Command
+m Param1 hen Feasyco Param2 nzParam3 SheDescription
+
+AT+SCAN=Param1{,Param2{,Param3}}
+scan type(0~3) 0: Stop scan 1: Scan nearby BR/EDR devices 2: Scan nearby BLE devices 3: Scan nearby BR/EDR/BLE devices
+(1~48)Scan period. unit:1.28s, default:12.8s (1~25 Bytes ASCII)Name filter. Filter scan results with name if set Format description reference: +SCAN - Scan Result
+
+5.1. General Commands
+
+25
+
+BT1036 programming user guide, Release 6.0
+5.1.27 AT+RSSI: Get BR/EDR Signal Strength
+
+Command
+
+AT+RSSI=Param
+
+Param Response
+. Param
+
+12 Bytes MAC address of current connected device +PIN=Param RSSI value (-127 ~ 0)
+
+.,Ltd 5.1.28 AT+PLIST - Get/Delete Paired List
+
+Co Command Technology Param
+
+AT+PLIST{=Param}
+(0/1~8/12 Bytes MAC address) (0) Clear all paired record (1~8) Clear specific paired record with index (MAC) Clear specific paired record with MAC address
+
+Response1
+m Param1 o Param2 syc Param3 a Param4 e Response2
+
++PLIST=Param1, Param2, Param3{,Param4} (1~8) Paired device's index A base-10 representation of a bit field, support profiles of device, see AT+PROFILE (MAC) Paired device's MAC address (UTF8) Paired device's name +PLIST=E End of the paired record
+
+hen F Example:Read module's paired record z << AT+PLIST en>> +PLIST=1,32808,1C5CF226D773, iPhone12 Sh +PLIST=2,40, A0BC30075421, Samsung S8
+
++PLIST=E
+
+>> OK
+
+Example:Clear module's paired record
+
+5.1. General Commands
+
+26
+
+<< AT+PLIST=0 >> OK
+
+BT1036 programming user guide, Release 6.0
+
+5.1.29 AT+DSCA - Release All Connections
+
+td. Command .,L Description
+
+AT+DSCA Module release all Bluetooth connections with remote device
+
+Co 5.1.30 AT+AUDROUTE - Audio Route Manager
+
+logy Command Techno Param
+
+AT+AUDROUTE{=Param}
+Note: HF1 & HF2 means peer Bluetooth headphones 0 Stop audio routing 1 Route music (a2dp streaming) from Module to HP1/HP2
+
+Shenzhen Feasycom Description
+
+simultaneously 2 Route voice call (hfp sco) between Module and HP1 3 Route voice call (hfp sco) between Module and HP2 4 Route voice call (hfp sco) between HP1 and HP2 (intercom mode) 5 Route voice call (hfp sco) from Module to HP1/HP2 simultaneously 6 Route music (a2dp streaming) from Module to HP1 only 7 Route music (a2dp streaming) from Module to HP2 only
+Some route mode require specify firmware version, refer to application note for more description: Source mode connection
+
+5.1. General Commands
+
+27
+
+BT1036 programming user guide, Release 6.0
+5.1.31 AT+TPMODE - Turn On/Off Throughput Mode
+
+Command
+
+AT+TPMODE{=Param}
+
+Param Response
+o.,Ltd. Description
+
+Throughput mode(0~1default:00: Turn Off 1: Turn On +TPMODE=Param
+When SPP/GATT profile connected and throughput mode is on, the AT command will be de-active, every byte received via physical UART will be sent to air, vice visa
+
+logy C 5.1.32 AT+LINKCFG - Auto search link configuration
+
+hno Command c Param Te Description
+
+AT+LINKCFG{=Param} Format reference AT+PROFILE command
+
+If this command module is configured,
+m it will automatically search for links according to the configured profile. easyco Example:Configure A2DP to automatically search for links F << AT+PROFILE=64 n >> OK Shenzhe 5.1.33 AT+TXPOWER - tx power configuration
+
+Command
+
+AT+TXPOWER{=Param}
+
+Param
+
+(value:0-15, default:15)
+
+5.1. General Commands
+
+28
+
+BT1036 programming user guide, Release 6.0
+
+Value Power(dBm)
+
+0
+
+-36.1
+
+1
+
+-8.2
+
+2 3 4 5 6 7 8 9 10 11 12 13 14 15
+
+-2.9 0.5
+td. 2.3
+4.1
+.,L 5.4 o 6.5
+7.2
+C 8.0 gy 8.6 lo 9.1 o 9.4 n 9.8 h 10.0 Tec 10.2
+
+m 5.2 HFP Commands syco 5.2.1 AT+HFPSTAT - Read HFP State
+
+Fea Command
+Response
+Shenzhen Description
+
+AT+HFPSTAT +HFPSTAT=Param1{,Param2{,Param3}} Format description reference: +HFPSTAT - HFP State
+
+5.2. HFP Commands
+
+29
+
+BT1036 programming user guide, Release 6.0
+5.2.2 AT+HFPSR - Get/Set HFP Sample Rate
+
+Command
+
+AT+HFPSR{=Param}
+
+Param
+. Response o.,Ltd Description
+
+Sample rate (Hz) for HFP voice call, available value: 0/8000/16000/48000 +HFPSR=Param
+Resample HFP voice call to specify rate in I2S mode, the parameter will override settings in AT+I2SCFG for voice call
+
+logy C 5.2.3 AT+HFPCFG - Get/Set HFP Configuration
+
+no Command ch Param Te BIT[0]
+
+AT+HFPCFG{=Param} A base-10 representation of a bit field, default:2, for each bit: When the HFP is abnormally disconnected,Reconnect to last discon-
+
+BIT[1]
+com BIT[2]
+
+nected device 0-disable echo cancellation, 1-enable echo cancellation 0-HFP 3-way-calling function disable, 1-HFP 3-way-calling function enable
+
+easy 5.2.4 AT+HFPCONN - Establish HFP Connection
+
+en F Command h Param zDescription
+
+AT+HFPCONN{=Param} MAC address of target device (12 Bytes ASCII) Reconnect to last HFP device if parameter not exist
+
+ShenExample:Connect to last HFP device
+
+<< AT+HFPCONN
+
+>> OK
+
+Example:Connect to specific HFP device with MAC address
+
+5.2. HFP Commands
+
+30
+
+BT1036 programming user guide, Release 6.0
+
+<< AT+HFPCONN=1C5CF226D773 >> OK
+
+. 5.2.5 AT+HFPDISC - Release HFP Connection
+
+.,Ltd Command
+Description
+
+AT+HFPDISC Release current HFP connection with remote device
+
+Co 5.2.6 AT+HFPDIAL - Dial/Redial Phone Number
+
+logy Command o Param n Description
+
+AT+HFPDIAL{=Param} Phone number (1~25 Bytes ASCII) Dial specific number if parameter exist, otherwise redial
+
+Tech Example:Redial
+<< AT+HFPDIAL
+m >> OK co Example:Dial number "075527924639" sy << AT+HFPDIAL=075527924639 a >> OK
+
+n Fe 5.2.7 AT+HFPDTMF - Send DTMF code
+
+zhe Command ShenParam
+
+AT+HFPDTMF{=Param} DTMF (0~9/#/*)
+
+Example:Send DTMF code "#"while talking
+
+<< AT+HFPDTMF=#
+
+>> OK
+
+5.2. HFP Commands
+
+31
+
+BT1036 programming user guide, Release 6.0
+5.2.8 AT+HFPANSW - Pick Up Incoming Call
+
+Command
+
+AT+HFPANSW
+
+Description
+
+Pick up an incoming call
+
+td. 5.2.9 AT+HFPCHUP - Reject/Hung up Call
+
+o.,L Command C Description
+
+AT+HFPCHUP Reject incoming call or hung up outgoing/active call
+
+logy 5.2.10 AT+HFPMCAL - Three way calling Control
+
+no Command Tech Param
+
+AT+HFPMCAL=Param 0: Release held call or reject waiting call
+
+sycom Description
+
+1: Release active call and accept another call 2: Hold active call and accept another call
+refer to application note for more description: HFP three way calling operations
+
+Fea 5.2.11 AT+HFPADTS - Transfer Voice Audio Between Local and Reen mote Device
+
+nzh Command SheParam
+
+AT+HFPADTS=Param 1: Transfer voice audio from module to remote device
+
+2: Transfer voice audio from remote device to module
+
+Description
+
+Transfer voice audio between module and remote device by default if no parameter set
+
+5.2. HFP Commands
+
+32
+
+BT1036 programming user guide, Release 6.0
+5.2.12 AT+HFPVR - Start/Stop Voice Recognition of Remote Device
+
+Command
+
+AT+HFPVR=Param
+
+Param
+. Description
+
+0-Stop 1-Start Start/Stop Voice Recognition of Remote Device (such as Siri for iOS devices)
+
+.,Ltd 5.2.13 AT+HFPINFO - Read HFP information
+
+Co Command gy Description
+
+AT+HFPINFO Return the current HFP status, signal strength, battery, device name, etc.
+
+nolo 5.2.14 AT+MICMUTE - Mute Mic
+
+ech Command T Param
+Description
+
+AT+MICMUTE=Param 0-unmute 1-mute mute mic when call active
+
+sycom 5.3 A2DP/AVRCP Commands ea 5.3.1 AT+A2DPSTAT - Read A2DP State
+
+en F Command h Response ShenzDescription
+
+AT+A2DPSTAT +A2DPSTAT=Param Format description reference: +A2DPSTAT - A2DP State
+
+5.3. A2DP/AVRCP Commands
+
+33
+
+BT1036 programming user guide, Release 6.0
+5.3.2 AT+A2DPCONN - Establish A2DP Connection
+
+Command
+
+AT+A2DPCONN{=Param}
+
+Param Description
+
+MAC address of target device (12 Bytes ASCII) Reconnect to last A2DP device if parameter not exist
+
+.,Ltd. 5.3.3 AT+A2DPDISC - Release A2DP Connection
+
+o Command C Description
+
+AT+A2DPDISC Release current A2DP connection with remote device
+
+logy 5.3.4 AT+A2DPINFO - Read A2DP information
+
+hno Command Tec Description
+
+AT+A2DPINFO Return the current A2DP status, remote device name , etc.
+
+m 5.3.5 AT+AVRCPSTAT - Read AVRCP State
+
+syco Command a Response e Description
+
+AT+AVRCPSTAT +AVRCPSTAT=Param Format description reference: +AVRCPSTAT - AVRCP State
+
+en F 5.3.6 AT+AVRCPCFG - Get/Set AVRCP Configuration
+
+enzh Command hParam S BIT[0]
+
+AT+AVRCPCFG{=Param} A base-10 representation of a bit field, default:3, for each bit: Auto get track ID3 information (title, artist, album) on track
+
+changed.default:1
+
+BIT[1-3]
+
+Auto get track play progress if value > 0. default:1 second
+
+BIT[4]
+
+Browsing function enable/disable
+
+BIT[5]
+
+Auto pull media cover art image to specify folder
+
+5.3. A2DP/AVRCP Commands
+
+34
+
+BT1036 programming user guide, Release 6.0
+
+Example: Read AVRCP configuration
+
+<< AT+AVRCPCFG
+
+>> +AVRCPCFG=1
+
+OK Example: Get track play progress every 5 second
+td. << AT+AVRCPCFG=9
+>> OK
+
+Co.,L 5.3.7 AT+PLAYPAUSE - Track Play/Pause
+
+gy Command olo Description
+
+AT+PLAYPAUSE Send play or pause command to remote media player according to current play status
+
+Techn 5.3.8 AT+PLAY - Track Play
+
+m Command o Description
+
+AT+PLAY Send play command to remote media player
+
+asyc 5.3.9 AT+PAUSE - Track Pause
+
+Fe Command en Description
+
+AT+PAUSE Send pause command to remote media player
+
+Shenzh 5.3.10 AT+STOP - Track Stop
+
+Command
+
+AT+STOP
+
+Description
+
+Send stop command to remote media player
+
+5.3. A2DP/AVRCP Commands
+
+35
+
+BT1036 programming user guide, Release 6.0
+5.3.11 AT+FORWARD - Track Forward
+
+Command
+
+AT+FORWARD
+
+Description
+
+Send forward command to remote media player
+
+td. 5.3.12 AT+BACKWARD - Track Backward
+
+o.,L Command C Description
+
+AT+BACKWARD Send backward command to remote media player
+
+logy 5.3.13 AT+REPEAT - Set Media Player Repeat Mode
+
+no Command ch Param e Response T Param
+
+AT+REPEAT{=Param} Repeat mode (0/1) 0-off 1-on +PLAYMODE=Param1,Param2 Format description reference: +PLAYMODE - Media Player Repeat/ Shuffle Mode
+
+sycom 5.3.14 AT+SHUFFLE - Set Media Player Shuffle Mode
+
+ea Command F Param n Response Shenzhe Param
+
+AT+SHUFFLE{=Param} Shuffle mode (0/1) 0-off 1-on +PLAYMODE=Param1,Param2 Format description reference: +PLAYMODE - Media Player Repeat/ Shuffle Mode
+
+5.3. A2DP/AVRCP Commands
+
+36
+
+BT1036 programming user guide, Release 6.0
+5.3.15 AT+GETMP - List Media Players of Remote Device
+
+Command
+
+AT+GETMP
+
+Response Param
+gy Co.,Ltd. Description
+
++BROWDATA=Param1,Param2,Param3,Param4 Format description reference: +BROWDATA - Media Player Filesystem Browsing Data
+List media players of remote device, only player with browsable flag set support browsing. For some phones (e.g. iOS devices), user may need to launch the player on phone side at the first time refer to application note for more description: AVRCP filesystem browsing
+
+Technolo 5.3.16 AT+SETMP - Select Media Player
+
+Command
+m Param o Response c Param Shenzhen Feasy Description
+
+AT+SETMP=Param Media Player index +BROWDATA=Param1,Param2 Format description reference: +BROWDATA - Media Player Filesystem Browsing Data
+Select the media player to browse, player's browsable flag must be set, we will enter the root directory after player selected refer to application note for more description: AVRCP filesystem browsing
+
+5.3. A2DP/AVRCP Commands
+
+37
+
+BT1036 programming user guide, Release 6.0
+5.3.17 AT+GETFD - List Sub Folders/Tracks of Selected Folder
+
+Command Param1
+. Param2 o.,Ltd Description
+
+AT+GETFD=Param1,Param2 Start position, (1~65535) End position, (1~65535), Param2 >= Param1
+List sub folders or media items in current folder. refer to application note for more description: AVRCP filesystem browsing
+
+logy C 5.3.18 AT+SETFD - Select and Enter Folder
+
+hno Command c Param Te Description
+
+AT+SETFD=Param 0):Enter up level folder (other): Enter selected folder Select and enter the folder to browse.
+
+m 5.3.19 AT+GETNP - List Tracks in Now Playing List
+
+syco Command a Param1 e Param2 F Response en Param
+
+AT+GETNP=Param1,Param2 (1~65535), Start position (1~65535), End position, Param2 >= Param1 +BROWDATA=M,Param1,Param2,Param3 Format description reference: +BROWDATA - Media Player Filesystem Browsing Data
+
+Shenzh 5.3.20 AT+ADDMP - Add Track to Media Player
+
+Command
+
+AT+ADDMP=Param
+
+Param
+
+Track ID
+
+Description
+
+Add selected track to media player and start to play.
+
+5.3. A2DP/AVRCP Commands
+
+38
+
+5.4 PBAP Commands
+
+BT1036 programming user guide, Release 6.0
+
+5.4.1 AT+PBSTAT - Read PBAP state
+
+Command
+td. Response
+Description
+
+AT+PBSTAT +PBATAT=Param Format description reference: +PBSTAT - PBAP State
+
+o.,L 5.4.2 AT+PBCONN - Establish PBAP Connection
+
+gy C Command lo Param Techno Description
+
+AT+PBCONN{=Param} MAC address of target device (12 Bytes ASCII)
+Module will use current HFP device'MAC address if parameter not exist For some firmware release, module will establish PBAP connection
+
+automatically on received command AT+PBDOWN
+
+sycom 5.4.3 AT+PBDISC - Release PBAP Connection
+
+Fea Command Shenzhen Description
+
+AT+PBDISC Release current PBAP connection with remote device
+
+5.4. PBAP Commands
+
+39
+
+BT1036 programming user guide, Release 6.0
+5.4.4 AT+PBDOWN - Download Phonebook
+
+Command Param1
+Param2 Param3
+
+Param1{, Param2{, Param3{, Param4}}}
+td. Phonebook type(0-5)
+(0) Phonebook (SIM Storage)
+.,L (1) Phonebook (Phone Storage) o (2) Received call log C (3) Dialed call log y (4) Missed call log g (5) All call log olo Max items (1~65535, default:3000 for phonebook; 50 for call log) chn Phonebook format (defaut:0) Te (0) Family Name, Middle Name, Given Name
+
+com Param4 en Feasy Description
+
+(1) Given Name, Middle Name, Family Name (2) Raw vCard 2.1
+Contact photo required (0/1)
+For some phones (e.g. iPhone), the contact download permission must be turned on in phone's Bluetooth settting refer to application note for more description: Phonebook/Contact photo downloading
+
+Shenzh 5.4.5 AT+PBABORT - Abort Downloading
+
+Command Description
+
+AT+PBABORT Abort downloading
+
+5.4. PBAP Commands
+
+40
+
+5.5 SPP Commands
+
+BT1036 programming user guide, Release 6.0
+
+5.5.1 AT+SPPSTAT - Read SPP State
+
+. Command td Response .,L Description
+
+AT+SPPSTAT +SPPATAT=Param Format description reference: +SPPSTAT - SPP State
+
+Co 5.5.2 AT+SPPCONN - Establish SPP Connection
+
+gy Command lo Param
+
+AT+SPPCONN{=Param} MAC address of target device (12 Bytes ASCII)
+
+Techno 5.5.3 AT+SPPDISC - Release SPP Connection
+
+Command Description
+
+AT+SPPDISC Release current SPP connection with remote device
+
+ycom 5.5.4 AT+SPPSEND - Send Data Via SPP
+
+eas Command F Param1 n Param2 e Description
+
+AT+SPPSEND=Param1,Param2 Payload length (1~492) Payload (1~492 Bytes UTF8) If throughput mode is on, this command is de-active
+
+enzh Example: Send data "1234567890"to remote device via SPP Sh << AT+SPPSEND=10,1234567890
+
+>> OK
+
+5.5. SPP Commands
+
+41
+
+5.6 GATT Commands
+
+BT1036 programming user guide, Release 6.0
+
+5.6.1 AT+GATTSTAT - Read GATT State
+
+Command
+td. Response
+Description
+
+AT+GATTSTAT +GATTATAT=Param Format description reference: +GATTSTAT - GATT State
+
+o.,L 5.6.2 AT+GATTDISC - Release GATT Connection
+
+gy C Command lo Description
+
+AT+GATTDISC Release current GATT connection with remote device
+
+Techno 5.6.3 AT+GATTSEND - Send Data Via GATT
+
+Command Param1
+om Param2 c Description
+
+AT+GATTSEND=Param1,Param2 Payload length (1~492) Payload (1~492 Bytes UTF8) If throughput mode is on, this command is de-active
+
+easy Example: Send data "1234567890"to remote device via GATT F << AT+SPPSEND=10,1234567890 en >> OK
+
+Shenzh 5.7 HID Commands
+
+5.6. GATT Commands
+
+42
+
+BT1036 programming user guide, Release 6.0
+5.7.1 AT+HIDSTAT - Read HID State
+
+Command
+
+AT+HIDSTAT
+
+Response Description
+
++HIDATAT=Param Format description reference: +HIDSTAT - HID State
+
+.,Ltd. 5.7.2 AT+HIDCONN - Establish HID Connection
+
+Co Command
+Param
+
+AT+HIDCONN{=Param} MAC address of target device (12 Bytes ASCII)
+
+logy 5.7.3 AT+HIDDISC - Release HID Connection
+
+chno Command Te Description
+
+AT+HIDDISC Release current HID connection with remote device
+
+m 5.7.4 AT+HIDMODE - Get/Set HID Input Mode
+
+syco Command a Param Shenzhen Fe Note
+
+AT+HIDMODE{=Param}
+HID keyboard input mode (0~1), default 1 (0) Hex key code (1) Ascii key code (English)
+Module can support various keyboard language with specify firmware, such as:TURKEY SPAIN PORTUGAL FRANCE GERMANY ITALY
+
+CZECH JAPAN
+
+5.7. HID Commands
+
+43
+
+BT1036 programming user guide, Release 6.0
+5.7.5 AT+HIDDLY - Get/Set HID Report Period
+
+Command
+
+AT+HIDDLY{=Param}
+
+Param
+
+HID report period in millisecond, default 10 ms
+
+td. 5.7.6 AT+HIDSEND - Send HID Keyboard Report
+
+o.,L Command C Param1
+Param2
+Technology Note
+
+AT+HIDSEND=Param1,Param2 Report length Report payload
+For special key code: 0x0D -> ENTER 0x08 -> BACKSPACE 0x09 -> TAB 0x20 -> SPACE
+
+sycom Example: Send key code `A'to remote device (on AT+HIDMODE=1)
+>> AT+HIDSEND=1,A
+ea << OK F Example: Send key code `A'to remote device (on AT+HIDMODE=0) n << AT+HIDSEND=4, xA1 x01 x00 x04 he >> OK z Note: As payload is hex value, hence actual command is: en41 54 2B 48 49 44 53 45 4E 44 3D 34 2C A1 01 00 04 0d 0a ShWhere:
+
+A1 : report start
+
+01 : page id 1
+
+00 : modifier
+
+04 : key code
+
+5.7. HID Commands
+
+44
+
+BT1036 programming user guide, Release 6.0 Module will auto send debounce key code by itself
+
+5.7.7 AT+HIDCMD - Send HID User Report
+
+. Command com Technology Co.,Ltd Param
+
+AT+HIDCMD=Param
+2 bytes hid user report e.g., for iPhone: Play/Pause: 00 CD Stop: 00 B7 Forward: 00 B5 Backward: 00 B6 Fast Forward: 00 B3 Rewind:00 B4 Record:00 B2 VolumpUp:00 E9 VolumpDn:00 EA Mute:00 E2 On screen keyboard Toggle:01 AE
+
+Feasy Example: Send Volume Up to iPhone en << AT+HIDCMD= x00 xE9 h >> OK z Note: As the payload is hex value, hence actual command is: Shen41 54 2B 48 49 44 43 4D 44 3D 00 E9 0D 0A
+
+5.7. HID Commands
+
+45
+
+. Chapter 6 .,Ltd Events Table
+
+gy Co 6.1 General Events nolo 6.1.1 +PWRSTAT - Powering State
+
+ech Format T Param Shenzhen Feasycom Description
+
++PWRSTAT=Param 0-Powering off 1-Powering on(booting) AT Command is not recommended to be used while powering on/off state
+
+46
+
+6.1.2 +SCAN - Scan Result
+
+BT1036 programming user guide, Release 6.0
+
+Format1
+
++SCAN =Param1,Param2,Param3, Param4,Param5,Param6
+
+Param1 Param2 Param3
+Param4 Param5 Param6 Format2
+
+Index RSSI (-127 ~ -1)
+td. Device address type (0~3) .,L (0) BR/EDR address o (1) LE public address C (2) LE random address y (3) iOS device with Carplay support log MAC address (12 Bytes ASCII) o Device Name for BR/EDR devices or advertising data for LE devices hn Class of device(6 Bytes ASCII) Tec +SCAN=E: Scan stopped
+
+m Example: Scan BR/EDR nearby devices o << AT+SCAN=1 syc >> OK
+>> +SCAN=1,-32,3,B019C66209FA,wt-iphone,7A020C
+ea >> +SCAN=2,-74,0,DC0D30000053,BW226,040680 F >> +SCAN=3,-43,0,00158354F994,LAPTOP-3L,120104 n >> +SCAN=E
+
+nzhe 6.1.3 +PAIRREQ - Pair Request
+
+SheFormat
+
++PAIRREQ=Param1,Param2{,Param3}
+
+Param1
+
+Passkey (000000~999999)
+
+Param2
+
+MAC address (12 Bytes ASCII) of current pairing device
+
+Param3
+
+Name of current pairing device
+
+6.1. General Events
+
+47
+
+6.1.4 +PAIRED - Pair Result
+
+BT1036 programming user guide, Release 6.0
+
+Format
+
++PAIRED=Param1,Param2
+
+Param1 Param2
+
+Pair result (0)-Success (1~255)-Failed reason MAC address (12 Bytes ASCII) of current pairing device
+
+.,Ltd. 6.1.5 +CODEC - Codec ID
+
+Co Format
+Param
+Technology Description
+
++CODEC=Param
+Code id (1) NAU88L25B (2) TI TLV32AIC3204 (3) ES8388
+
+Firmware integrated I2C drivers of several codecs,
+m such as NAU88L25B/ TLV32AIC3204/ ES8388, and probe one of co them on booting sy BT1036, BT955, BT936 chips have built-in Codec, and do not report aCodec instructions Shenzhen Fe 6.2 HFP Events
+
+6.2. HFP Events
+
+48
+
+BT1036 programming user guide, Release 6.0
+6.2.1 +HFPSTAT - HFP State
+
+Format
+
++HFPSTAT=Param1{,Param2{,Param3}}
+
+Param1
+
+. (0~10) td (0) Unsupported .,L (1) Standby
+(2) Connecting
+o (3) Connected C (4) Outgoing call y (5) Incoming call log (6) Active call o (7) Active held (3-way-calling) n (8) First call active, second call waiting (3-way-calling) ch (9) First call active, second call held (3-way-calling) Te (10) First call outgoing, second call held (3-way-calling)
+
+Param2
+om Param3
+
+Call number, only present for state > 3 Call number(Three-way calling)
+
+asyc Example: Dial number 10086 e << AT+HFPDIAL=10086 F >> +HFPSTAT=3 en >> +HFPSTAT=4,10086 h >> +HFPAUDIO=1 nz Example: Incoming call with number 13265463800 e>> +HFPSTAT=5, 13265463800 Sh>> +HFPAUDIO=1
+
+6.2. HFP Events
+
+49
+
+BT1036 programming user guide, Release 6.0
+6.2.2 +HFPDEV - HFP Remote Device Information
+
+Format
+
++HFPDEV=Param1{,Param2}
+
+Param1 Param2
+
+(12 Bytes ASCII), Remote MAC address of current HFP connection (UTF8), Remote device name of current HFP connection
+
+.,Ltd. Example: HFP connect success with device
+>> +HFPDEV=1C5CF226D774, iPhone
+
+y Co 6.2.3 +HFPAUDIO - HFP Voice Audio State
+
+olog Format Techn Param
+
++HFPAUDIO=Param
+(0) HFP voice audio disconnected, audio input/output routed to remote device
+
+(1) HFP voice audio connected, audio input/output routed to module
+
+sycom 6.2.4 +HFPSIG - HFP Remote Device Network Signal Strength
+
+Fea Format n Param
+
++HFPSIG=Param (0~5)Network signal strength of remote device
+
+zhe 6.2.5 +HFPROAM - HFP Remote Device Roaming State
+
+ShenFormat
+
++HFPROAM=Param
+
+Param
+
+(0/1) Roaming state of remote device
+
+6.2. HFP Events
+
+50
+
+BT1036 programming user guide, Release 6.0
+6.2.6 +HFPBATT - HFP Remote Device Battery Level
+
+Format
+
++HFPBATT=Param
+
+Param
+
+(0~5) Battery level of remote device
+
+td. 6.2.7 +HFPNET - HFP Remote Device Network Operator Selection
+
+o.,L Format C Param
+
++HFPNET=Param UTF8Network operator selection of remote device
+
+logy 6.2.8 +HFPMANU - HFP Remote Device Manufacture
+
+no Format Tech Param
+
++HFPMANU=Param UTF8Manufacture name of remote device
+
+6.2.9 +HFPNUM - HFP Remote Device Phone Subscriber Number
+
+com Format sy Param
+
++HFPNUM=Param (ASCII)Phone subscriber number of remote device
+
+Fea 6.2.10 +HFPIBR - HFP Remote Device In-band-ring Support
+
+hen Format zParam ShenDescription
+
++HFPIBR=Param (0/1) In-band-ring support Report whether the current connected phone support in-band-ring
+
+6.2. HFP Events
+
+51
+
+BT1036 programming user guide, Release 6.0
+6.2.11 +HFPRING - HFP Remote Device Ringing
+
+Format
+
++HFPRING=Param
+
+Param
+.,Ltd. Description
+
+(0/1) In-band-ring off/on
+Phone is ringing when call incoming, the host platform should play a local ringtone if in-band-ring not supported by remote mobile phone
+
+gy Co 6.3 A2DP/AVRCP Events olo 6.3.1 +A2DPSTAT - A2DP State
+
+echn Format Feasycom T Param
+
++A2DPSTAT=Param
+(0) Unsupported (1) Standby (2) Connecting (3) Connected (4) Paused (5) Streaming
+
+zhen 6.3.2 +A2DPDEV - A2DP Remote Device Information
+
+ShenFormat
+
++A2DPDEV=Param1{,Param2}
+
+Param1
+
+(12 Bytes ASCII), Remote device's MAC address of current A2DP
+
+connection
+
+Param2
+
+(UTF8), Remote device's name of current A2DP connection
+
+6.3. A2DP/AVRCP Events
+
+52
+
+BT1036 programming user guide, Release 6.0
+6.3.3 +AVRCPSTAT - AVRCP State
+
+Format
+
++AVRCPSTAT=Param
+
+.,Ltd. Param
+
+(0) Unsupported (1) Standby (2) Connecting (3) Connected
+
+gy Co 6.3.4 +PLAYSTAT - Media Player State
+
+nolo Format Shenzhen Feasycom Tech Param
+
++PLAYSTAT=Param
+(0) Stopped (1) Playing (2) Paused (3) Fast Forwarding (4) Fast Rewinding
+
+6.3. A2DP/AVRCP Events
+
+53
+
+BT1036 programming user guide, Release 6.0
+6.3.5 +PLAYMODE - Media Player Repeat/ Shuffle Mode
+
+Format
+
++PLAYMODE=Param1,Param2
+
+Param1 Param2
+
+Repeat Mode (1~4) (1) Off (2) Single Track (3) All Tracks (4) Group
+Shuffle Mode (1~3) (1) Off (2) All Tracks (3) Group
+
+Technology Co.,Ltd.
+
+m 6.3.6 +TRACKSTAT - Media Player Play Progress
+
+syco Format a Param1 e Param2 F Param3
+
++TRACKSTAT=Param1,Param2,Param3 (0~4), Media Player State, see +PLAYSTAT (Decimal ASCII),Elapsed time of current track in second (Decimal ASCII),Total time of current track in second
+
+zhen Example: Read media player play progress every 1s en>> +TRACKSTAT=1,54,322 Sh>> +TRACKSTAT=1,55,322
+
+>> +TRACKSTAT=1,56,322
+
+6.3. A2DP/AVRCP Events
+
+54
+
+BT1036 programming user guide, Release 6.0
+6.3.7 +TRACKINFO - Media Track Information
+
+Format
+
++TRACKINFO=Param1,Param2,Param3
+
+Param1 Param2
+. Param3
+
+title artist album
+
+.,Ltd Example: Phone playing song "Creep-Radio Head" o >> +TRACKINFO=Creep , Radiohead , Pablo Honey
+
+logy C 6.3.8 +BROWSTAT - Media Browsing State
+
+no Format Tech Param
+
++BROWSTAT=Param (0) Unsupported
+
+(1) Standby
+m (2) Connecting o (3) Connected Shenzhen Feasyc (4)Browsing
+
+6.3. A2DP/AVRCP Events
+
+55
+
+BT1036 programming user guide, Release 6.0
+6.3.9 +BROWDATA - Media Player Filesystem Browsing Data
+
+Format
+
++BROWDATA=Param1, Param2 {, Param3{, Param4}}
+
+Param1 P
+R F
+
+Browsing type, for each type, the following data means:
+td. Parame1: media player information .,L Parame2: 0­support browsing; 1- not support browsing
+Parame3: media player id
+o Parame4: media player name logy C Parame1: root dictionary name o Parame2: root dictionary name Techn Parame1: folder ID and name
+
+com M en Feasy E Shenzh Description
+
+Parame2: folder ID Parame3: folder name
+Parame1: media track ID and name Parame2: media track ID Parame3: media track name
+Parame1: browsing operation result code Parame2: 0 - browsing success; other - browsing error code refer to application note for more description: AVRCP filesystem brows-
+
+ing
+
+6.3. A2DP/AVRCP Events
+
+56
+
+6.3.10 +BIPSTAT - BIP State
+
+BT1036 programming user guide, Release 6.0
+
+Format
+
++BIPSTAT=Param
+
+Param Description
+
+. (0) Unsupported td (1) Standby .,L (2) Connecting
+(3) Connected
+o (4) Downloading logy C BIP Profile only used for media player cover art image downloading o now, n refer to application note for more description: AVRCP Cover Art image Tech retrieval
+
+m 6.3.11 +COVERART - Media Track Cover Art Download Success
+
+syco Format a Param Shenzhen Fe Description
+
++COVERART=Param Image ID
+Cover art image should be placed in specify folder with name ImageID.jpg, refer to application note for more description: AVRCP Cover Art image retrieval
+
+6.4 Phonebook Access Events
+
+6.4. Phonebook Access Events
+
+57
+
+BT1036 programming user guide, Release 6.0
+6.4.1 +PBSTAT - PBAP State
+
+Format
+
++PBSTAT=Param
+
+o.,Ltd. Param
+
+(0) Unsupported (1) Standby (2) Connecting (3) Connected (4) Downloading
+
+logy C 6.4.2 +PBCNT - Phonebook Entries of Remote Device
+
+hno Format Tec Param
+
++PBCNT=Param Phonebook entries of remote device
+
+Shenzhen Feasycom
+
+6.4. Phonebook Access Events
+
+58
+
+BT1036 programming user guide, Release 6.0
+6.4.3 +PBDATA - Phonebook Data
+
+Format1
+
++PBDATA=Param1,Param2,Param3{,Param4}
+
+Param1
+Param2 Param3 Param4
+
+. Type td (0) Phonebook (SIM Storage) .,L (1) Phonebook (Phone Storage)
+(2) Received call log
+o (3) Dialed call log C (4) Missed call log gy Name lo Number hno (15 Bytes ASCII), Call time if current download type is call log Tec Format:
+
+easycom Param4-2 enzhen F Format2 ShDescription
+
+Year(4Bytes) Month(2Bytes) Day(2Bytes) T(1Byte) Hour(2Bytes)
+Minute(2Bytes) Second(2Bytes). e.g. 20161012T152826 represents 2016/10/12/15/28/26
+Contact photo download compete flag if current download type is Phonebook, otherwise this parameter will not exist
++PBDATA=E: Download complete Call time may not exist for some mobile phones
+
+Example: Download all phonebook << AT+PBDOWN=1
+
+6.4. Phonebook Access Events
+
+59
+
+BT1036 programming user guide, Release 6.0
+>> +PBCNT=234 +PBDATA=1 , Jack , 18219146201 +PBDATA=1 , kenan , 8613771972680 ...... +PBDATA=E
+td. Example: Download 10 dialed call log .,L << AT+PBDOWN=3,10 o >> +PBDATA=3 , China Mobile , 10086 , 20171013T103516
+C +PBDATA=3 , Jerry , 18688967507 , 20171012T152826 y ...... g +PBDATA=E Technolo 6.5 SPP Events
+Note: Events for iAP2 (Apple Accessory Protocol) and AAP (Android Auto Protocol) are
+m almost the same with SPP, which are: co · +IAPSTAT, +IAPDATA for iAP2 profile sy · +AAPSTAT, +AAPDATA for AAP profile Shenzhen Fea Document will omit these events.
+
+6.5. SPP Events
+
+60
+
+6.5.1 +SPPSTAT - SPP State
+
+BT1036 programming user guide, Release 6.0
+
+Format
+o.,Ltd. Param
+
++SPPSTAT=Param
+(0) Unsupported (1) Standby (2) Connecting (3) Connected
+
+gy C 6.5.2 +SPPDATA - SPP Received Incoming Data
+
+nolo Format h Param1 Tec Param2
+
++SPPDATA=Param1,Param2 Payload length Payload
+
+m Example: Received data "1234567890"from remote device via SPP o << +SPPDATA=10,1234567890
+
+easyc 6.6 GATT Events n F 6.6.1 +GATTSTAT - GATT State
+
+zhe Format ShenParam
+
++GATTSTAT=Param
+(0) Unsupported (1) Standby
+
+(2) Connecting
+
+(3) Connected
+
+6.6. GATT Events
+
+61
+
+BT1036 programming user guide, Release 6.0
+6.6.2 +GATTDATA - GATT Received Incoming Data
+
+Format
+
++SPPDATA=Param1,Param2
+
+Param1 Param2
+
+Payload length Payload
+
+.,Ltd. Example: Received data "1234567890"from remote device via GATT
+<< +GATTDATA=10,1234567890
+
+gy Co 6.7 HID Events olo 6.7.1 +HIDSTAT - HID State
+
+chn Format Te Param
+
++HIDSTAT=Param
+
+(0) Unsupported
+m (1) Standby co (2) Connecting Shenzhen Feasy (3) Connected
+
+6.7. HID Events
+
+62
+
+. Chapter 7 .,Ltd Application scenarios gy Co 7.1 profiles initializing and change parameter Technolo The following figure shows Profile initialization and name modification Shenzhen Feasycom
+63
+
+BT1036 programming user guide, Release 6.0
+
+MCU change device name CARKIT reference code:
+
+1 void change_name(void)
+
+2{
+
+3 4 5 6 7 8
+9 10 11 12 13 14 15 16 17
+
+uart_send("AT+NAME\r\n");
+
+if(uart_read("+NAME",name_buf))
+
+. {
+
+td if(memcmp(name_buf,"CARKIT",6))
+
+.,L {
+
+uart_send("AT+NAME=CARKIT,0\r\n");
+
+//defalut
+
+o disable MAC address suffix
+
+C uart_send("AT+NAME\r\n"); // read bt name
+
+if(uart_read("+NAME",name_buf))
+
+gy {
+
+lo if(memcmp(name_buf,"CARKIT",6))
+
+{
+
+no //change name fail
+
+h }
+
+c else
+
+Te {
+
+18
+
+//change name success
+
+19
+
+}
+
+m 20
+
+}
+
+co 21
+
+}
+
+sy 22
+
+}
+
+23 }
+
+Fea Note: modify any parameters, it is recommended to query first and then modify the final verien fication
+
+Shenzh 7.2 Sink mode connection
+
+Note: If the factory firmware is an integrated transceiver program, the program default profile=339, Need to send AT+PRFOILE=1195 to configure audio receiving(sink) mode (Enable SPP, GATT Server, HFP Sink, A2DP Sink, AVRCP-Controller, PBAP). Some module
+
+7.2. Sink mode connection
+
+64
+
+BT1036 programming user guide, Release 6.0 transceiver programs do not support PBAP, such as BT955 module
+Shenzhen Feasycom Technology Co.,Ltd.
+
+7.2. Sink mode connection
+
+65
+
+BT1036 programming user guide, Release 6.0
+7.3 Source mode connection
+Note: The transmission(source) mode connection needs to configure the module to A2DP Source, HFP Source, The program will not automatically enter the audio transmission
+. mode or the call (intercom) mode after connecting the headset and speaker by default, you td need to send the command: Start audio transmission (AT+AUDROUTE=1) Start HFP Technology Co.,L (AT+AUDROUTE=2) Shenzhen Feasycom
+
+7.3. Source mode connection
+
+66
+
+BT1036 programming user guide, Release 6.0
+
+Technology Co.,Ltd.
+
+zhen Feasycom MCU connects to AirPods and starts audio transmission Reference code:
+
+hen 1 #define PROFILE_HFP_HF S2 #define PROFILE_HFP_AG
+
+(uint16)(BIT3) (uint16)(BIT4)
+
+3 #define PROFILE_A2DP_SINK
+
+(uint16)(BIT5)
+
+4 #define PROFILE_A2DP_SOURCE
+
+(uint16)(BIT6)
+
+5
+6 void bt_connect(void)
+
+(continues on next page)
+
+7.3. Source mode connection
+
+67
+
+BT1036 programming user guide, Release 6.0
+
+(continued from previous page)
+
+7{
+
+8
+
+//enable hfp source,a2dp source,avrcp tg,spp,gatt
+
+9
+
+uart_send("AT+PROFILE=339\r\n"); //if profile changes,module
+
+10 11 12 13 14 15 16 17 18 19 20 21 22 23 24
+
+will auto reboot, wait_ms(500);
+td. uart_send("AT+PROFILE\r\n");
+uint32 profiles = uart_read("+PROFILE",profiles);
+.,L if(profiles & (PROFILE_A2DP_SOURCE|PROFILE_HFP_AG))
+{
+o uint8 addr[6]; C uint8 buf[30]={0}; y uint8 a2dp_state=0 g uart_send("AT+SCAN=1\r\n"); lo uart_read_scan_addr("+SCAN",addr); o sprintf(buf,"AT+A2DPCONN=%s\r\n",addr); n uart_send(buf); //send a2dp connect ch uart_read("+A2DPSTAT",a2dp_state); Te if(a2dp_state == 3) //a2dp connected
+
+25 26
+om 27 c 28 sy 29 a 30 e 31 F 32 n 33 e 34 h 35 Shenz 36 }
+
+{ uart_send("AT+AUDROUTE=1"); // start a2dp audio
+} uart_read("+A2DPSTAT",a2dp_state); if(a2dp_state == 5) {
+//a2dp streaming } } else {/*not support master*/}
+
+7.3. Source mode connection
+
+68
+
+BT1036 programming user guide, Release 6.0
+7.4 HFP three way calling operations
+Note: BT1036, BT955 and other modules have not enabled the three way calling function. If
+Technology Co.,Ltd. you need to test this function, please contact Feasycom Shenzhen Feasycom
+
+7.4. HFP three way calling operations
+
+69
+
+BT1036 programming user guide, Release 6.0
+7.5 AVRCP filesystem browsing
+Note: BT1036, BT955 and other modules have not enabled the three way calling function. If
+Technology Co.,Ltd. you need to test this function, please contact Feasycom Shenzhen Feasycom
+
+7.5. AVRCP filesystem browsing
+
+70
+
+BT1036 programming user guide, Release 6.0
+7.6 AVRCP Cover Art image retrieval
+
+Note: Cover Art image download is only supported by the car protocol stack module, not sup-
+
+ported by the SOC audio module
+
+Technology Co.,Ltd.
+
+Feasycom 7.7 Phonebook/Contact photo downloading zhen Note: Contact photo download is only supported by the car protocol stack module, not supenported by the SOC audio module When some firmware does not support downloading, it will hautomatically connect to PBAP, and you need to send AT+PBCONN to connect to PBAP beS fore downloading
+
+7.6. AVRCP Cover Art image retrieval
+
+71
+
+BT1036 programming user guide, Release 6.0
+Shenzhen Feasycom Technology Co.,Ltd.
+
+7.7. Phonebook/Contact photo downloading
+
+72
+
+. Chapter 8 .,Ltd Appendix gy Co 8.1 Download PDF Document Technolo Download PDF Document Shenzhen Feasycom
+73
+
+

@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--bind", default="0.0.0.0", help="IP to bind (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=5004, help="UDP port to listen on (default: 5004)")
     parser.add_argument("--outfile", default="received.wav", help="Output WAV file")
-    parser.add_argument("--rate", type=int, default=16000, help="Sample rate (Hz)")
+    parser.add_argument("--rate", type=int, default=8000, help="Sample rate (Hz)")
     parser.add_argument("--channels", type=int, default=1, help="Number of channels")
     parser.add_argument("--width", type=int, default=2, help="Bytes per sample (2 = 16-bit)")
     args = parser.parse_args()

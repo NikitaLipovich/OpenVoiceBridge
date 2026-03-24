@@ -1,0 +1,2084 @@
+FSC-BT1036x Datasheet
+Bluetooth 5.2 Dual Mode Module Datasheet Version 1.2
+
+Shenzhen Feasycom Co.,Ltd
+
+-1-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+Copyright © 2013-2023 Feasycom Technology. All Rights Reserved.
+Feasycom Technology reserves the right to make corrections, modifications, and other changes to its products, documentation and services at anytime. Customers should obtain the newest relevant information before placing orders. To minimize customer product risks, customers should provide adequate design and operating safeguards. Without written permission from Feasycom Technology, reproduction, transfer, distribution or storage of part or all of the contents in this document in any form is prohibited.
+
+Revision History
+
+Version
+1.0 1.1 1.2
+
+Data
+2022/03/12 2022/06/21 2023/01/14
+
+Notes
+Initial Version Updade Schematic and Picture Updade Reset Time
+
+Marsh Marsh Marsh
+
+Contact Us
+Shenzhen Feasycom Co.,LTD
+Email: sales@feasycom.com
+Address: Rm 508, Building A, Fenghuang Zhigu, No.50, Tiezai Road, Xixiang ,Baoan District,Shenzhen,518100,China. Tel: 86-755-27924639,86-755-23062695
+
+Shenzhen Feasycom Co.,LTD
+
+-2-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+
+Contents
+1. INTRODUCTION ................................................................................................................................................................. 5
+1.1 SELECTION OF VERSION ....................................................................................................................................................... 6
+2. GENERAL SPECIFICATION ................................................................................................................................................... 6
+3. HARDWARE SPECIFICATION............................................................................................................................................... 8
+3.1 BLOCK DIAGRAM AND PIN DIAGRAM..................................................................................................................................... 8 3.2 PIN DEFINITION DESCRIPTIONS............................................................................................................................................. 9
+4. PHYSICAL INTERFACE ....................................................................................................................................................... 10
+4.1 POWER MANAGEMENT..................................................................................................................................................... 10 4.1.1 Power Supply....................................................................................................................................................... 10 4.1.2 Battery Charger .................................................................................................................................................. 10
+4.2 AUDIO PERIPHERALS ........................................................................................................................................................ 10 4.3 USB INTERFACE (THIS FEATURE IS NOT ENABLED ) ................................................................................................................... 10 4.4 I2S INTERFACE................................................................................................................................................................. 10 4.5 SERIAL INTERFACES .......................................................................................................................................................... 11
+4.5.1 UART Interface .................................................................................................................................................... 11 4.5.2 I2C Interface ........................................................................................................................................................ 12
+5. ELECTRICAL CHARACTERISTICS ........................................................................................................................................ 13
+5.1 ABSOLUTE MAXIMUM RATINGS .......................................................................................................................................... 13 5.2 RECOMMENDED OPERATING CONDITIONS ............................................................................................................................. 13
+5.3. Battery Charger(This feature is not enabled) ......................................................................................................... 13 5.4 AUDIO CHARACTERISTICS................................................................................................................................................... 14
+5.4.1 Analogue to Digital Converter ............................................................................................................................. 14 5.4.2 Digital to Analogue Converter ............................................................................................................................. 14
+6. MSL &ESD PROTECTION .................................................................................................................................................. 14
+7. RECOMMENDED TEMPERATURE REFLOW PROFILE ......................................................................................................... 15
+8. PCB LAYOUT..................................................................................................................................................................... 17
+8.1 FSC-BT1036A............................................................................................................................................................... 17 8.2 FSC-BT1036B............................................................................................................................................................... 18 8.3 FSC-BT1036C............................................................................................................................................................... 19
+9. HARDWARE INTEGRATION SUGGESTIONS....................................................................................................................... 20
+9.1 SOLDERING RECOMMENDATIONS......................................................................................................................................... 20 9.2 LAYOUT GUIDELINES(INTERNAL ANTENNA) ............................................................................................................................ 20 9.3 LAYOUT GUIDELINES(EXTERNAL ANTENNA)............................................................................................................................ 21
+9.3.1 Antenna Connection and Grounding Plane Design............................................................................................... 21
+10. PRODUCT PACKAGING INFORMATIONM(FOR REFERENCE ONLY) .................................................................................. 22
+10.1 DEFAULTPACKING .......................................................................................................................................................... 22
+
+Shenzhen Feasycom Co.,LTD
+
+-3-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+10.2 PACKING BOX(OPTIONAL) ................................................................................................................................................ 23 11. APPLICATION SCHEMATIC.............................................................................................................................................. 24
+
+Shenzhen Feasycom Co.,LTD
+
+-4-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+
+1. INTRODUCTION
+Overview
+FSC-BT1036x it is a Bluetooth dual-mode module series. It supports a Bluetooth Low Energy and compliant system for audio and data communication.
+FSC-BT1036x integrates an ultra-low-power DSP and application processor with embedded flash memory, a high-performance stereo codec, a power management subsystem, I2S, LED drivers and ADC I/O in a SOC IC.
+By default, FSC-BT1036x module is equipped with powerful and easy-to-use Feasycom firmware. It's easy to use and completely encapsulated. Feasycom firmware enables users to access Bluetooth functionality with simple ASCII commands delivered to the module over serial interface - it's just like a Bluetooth modem.
+Therefore, FSC-BT1036x provides an ideal solution for developers who want to integrate Bluetooth wireless technology into their design.
+
+Application
+ Bluetooth speakers  Bluetooth music box  Wired/wireless stereo headsets/headphones  Audio transmitter
+
+Features
+ Bluetooth 5.2 classic and low energy  Active noise cancellation  Voice-activated assistant  24 bits audio quality  8 kHz to 384 kHz audio sample rate  Acoustic echo cancellation  3 MIC/Line_IN (only BT1036B)  PCB ANT Except BT1036A
+
+Shenzhen Feasycom Co.,LTD
+
+-5-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+
+1.1 Selection of version
+
+Order Number
+
+Descriptions
+
+Module picture as below showing
+
+FSC-BT1036A
+
+Dimension: 10*11.9*1.8mmwithout cover
+
+Pin1
+
+FSC-BT1036B
+
+Dimension: 13*26.9*2.4mmwithout cover
+
+FSC-BT1036C
+
+Dimension: 13*26.9*1.8mmwithout cover
+
+2. General Specification
+
+Table 1: General Specifications
+
+Categories
+
+Features
+
+Chip
+
+Frequency
+
+Wireless Specification
+
+Transmit Power Receive Sensitivity
+
+UART Interface
+
+Host Interface and
+
+Peripherals
+
+GPIO
+
+I2C Interface
+
+ADC Interface
+
+USB Interface
+
+Profiles
+
+BR/EDR Bluetooth Low Energy
+
+Audio
+
+Implementation
+BT V5.2 Dual-mode 2.402 - 2.480 GHz +10 dBm (Maximum) -93.0 dBm (typ.) BDR=1Mbps -94.0 dBm (typ.) BDR=2Mbps -86.0 dBm (typ.) EDR=3Mbps -97 dBm (typ.) BLE=1Mbps TX, RX, CTS, RTS General Purpose I/O Default 115200,N,8,1 Baudrate support from 1200 to 4000000
+14 (maximum ­ configurable) lines 1 I2C Master interface with speed up to 400 kbps Analog input voltage range: 0~ 1.8V 12-bit ADC 1 full-speed (12Mbps) (This feature is not enabled) SPP (Serial Port Profile) - Up to 600 Kbps A2DP/AVRCP/HFP/HSP/HOGP/PBAP/SPP Profiles support GATT Client & Peripheral Simultaneous BR/EDR and BLE support 24bit ADC/DAC
+
+Shenzhen Feasycom Co.,LTD
+
+-6-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+
+FW upgrade Supply Voltage
+
+Supply
+
+Power Consumption
+
+Environmental
+Miscellaneous Humidity MSL grade: ESD grade:
+
+Operating Storage Lead Free Warranty
+
+UART VDD: 3.3V
+Shut down:0.9uA(typ) Standby:20uA(typ) A2DP/HFP:6mA(typ) BLE TX 10dBm:28mA(typ) -20°C to +85°C -40°C to +85°C Lead-free and RoHS compliant One Year 10% ~ 90% non-condensing MSL 3 Human Body Model: Class 2 2kV (all pins) Charged Device Model: Class III 500 V (all pins)
+
+Shenzhen Feasycom Co.,LTD
+
+-7-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+3. HARDWARE SPECIFICATION
+3.1 Block Diagram and PIN Diagram
+UART/USB RESET
+
+Internal or external antenna
+
++5V
+
+26MHZ
+
+Dual Mode Bluetooth5.2 IC
+
+Crystal
+
+LED
+
+VDD
+
+Figure 1: Block Diagram
+
+Antenna I2C/GPIO I2S/PCM
+SPK/Line out MIC IN/Line_ IN
+
+34 33 32 31 30 29 28
+
+SPK_RN SPK_RP SPK_LN SPK_LP MIC_BIAS MIC0_LP MIC0_RP
+
+1 P5/UART_RTS
+
+EXT_ANT 27
+
+2 P4/UART_CTS
+
+GND 26
+
+3 P0/UART_TX/DN
+
+P13 25
+
+4 P1/UART_RX/DP
+
+P2/LED 24
+
+5 P39/I2C_SDA
+
+P24/I2S_MCLK 23
+
+6 P38/I2C_SCL
+
+P11/ADC 0 22
+
+7 P37/ADC1
+
+P30/I2S_BCLK 21
+
+8 P15/RESET
+
+P33/I2S_DO 20
+
+9 VDD 10 GND
+
+P32/I2S_DI 19
+FSC-BT1036A P31/I2S_WS 18
+
+EXT_ANT 36
+
+GND 35
+
+1 P0/UART_TX/DN
+
+P11/ADC 0 34
+
+2 P1/UART_RX/DP
+
+P11/ADC 0 33
+
+3 P4/UART_CTS
+
+P2/LED 32
+
+4 P5/UART_RTS
+
+P24/I2S_MCLK 31
+
+5 P30/I2S_BCLK
+
+P39/I2C_SDA 30
+
+6 P33/I2S_DO
+
+P38/I2C_SCL 29
+
+7 P32/I2S_DI
+
+P37/ADC1 28
+
+8 P31/I2S_WS
+
+P5/UART_RTS 27
+
+9 MIC0-LP
+
+P4/UART_CTS 26
+
+10 MIC1-RP
+
+P13 25
+
+11 12
+
+P15/RESET FSC-BT1036B
+VDD
+
+SPK_R SPK_L
+
+24 23
+
+13 GND
+
+GND 22
+
+GND NC NC NC NC +5V GND GND +5V MIC_BIAS MIC0-LP MIC0-RP SPK_L SPK_R GND
+
+11 12 13 14 15 16 17
+
+14 15 16 17 18 19 20 21
+
+1 GND
+
+GND 52
+
+2 NC
+
+EXT_ANT 51
+
+3 NC
+
+GND 50
+
+4 P30/I2S_BCLK
+
+SPK_LP 49
+
+5 P32/I2S_DI
+
+SPK_LN 48
+
+6 P33/I2S_DO
+
+SPK_RP 47
+
+7 P31/I2S_WS
+
+SPK_RN 46
+
+8 P15/RESET
+
+MIC_BIAS 45
+
+9 P24/I2S_MCLK
+
+MIC 0_LN 44
+
+10 NC
+
+MIC 0_LP 43
+
+11 NC
+
+NC 42
+
+12 NC
+
+MIC 0_RN 41
+
+13 P0/UART_TX/DN
+
+MIC 0_RP 40
+
+14 P1/UART_RX/DP
+
++5V 39
+
+15 P4/BT_CTS
+
+P0/UART_TX/DN 38
+
+16 P5/BT_RTS
+
+P1/UART_RX/DP 37
+
+17 P2/LED
+
+NC 36
+
+18 P11/ADC 0 19 P37/ADC 1
+
+FSC-BT1036C
+
+NC 35 NC 34
+
+20 P37/ADC 1
+
+VDD 33
+
+21 P13
+
+GND 32
+
+GND NC P38/I2C_SCL P39/I2C_SDA NC P38/I2C_SCL P39/I2C_SDA NC NC 3.0V_OUT
+
+22 23 24 25 26 27 28 29 30 31
+
+Figure 2: FSC-BT1036x PIN Diagram(Top View)
+
+Shenzhen Feasycom Co.,LTD
+
+-8-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+
+3.2 PIN Definition Descriptions
+
+Table 2:Pin definition
+
+Pin Name
+
+Pin Number
+
+BT1036A BT1036B
+
+BT1036C
+
+P0/UART_TX/DN
+
+3
+
+P1/UART_RX/DP
+
+4
+
+P5/UART_RTS
+
+1
+
+P4/UART_CTS
+
+2
+
+1
+
+13,38
+
+2
+
+14,37
+
+4
+
+16
+
+3
+
+15
+
+P38/I2C_SCL
+
+6
+
+29
+
+24,27
+
+P39/I2C_SDA
+
+5
+
+30
+
+25,28
+
+P37/ADC1 P11/ADC0
+
+7
+
+28
+
+19,20
+
+22
+
+33,34
+
+18
+
+P15/RESET
+
+8
+
+11
+
+8
+
++5V VDD 3.0V_OUT GND
+
+16 9 -
+10,11,17,26
+
+15 12 -
+13,14,21,22,35
+
+39 33 31
+1,22,32,50,52
+
+MIC0_RN MIC0_RP MIC0_LN MIC0_LP MIC1_RP MIC_BIAS
+
+-
+
+-
+
+41
+
+28
+
+18
+
+40
+
+-
+
+-
+
+44
+
+29
+
+9,17
+
+43
+
+-
+
+10
+
+-
+
+30
+
+16
+
+45
+
+SPK_L SPK_R SPK_LN SPK_LP SPK_RN SPK_RP
+
+-
+
+19,23
+
+-
+
+-
+
+20,24
+
+-
+
+32
+
+-
+
+48
+
+31
+
+-
+
+49
+
+34
+
+-
+
+46
+
+33
+
+-
+
+47
+
+P30/I2S_BCLK
+
+21
+
+5
+
+4
+
+P32/ I2S_DI
+
+19
+
+7
+
+5
+
+P33/ I2S_DO
+
+20
+
+6
+
+6
+
+P31/ I2S_WS
+
+18
+
+8
+
+7
+
+P24/ I2S_MCLK
+
+23
+
+31
+
+9
+
+P2/LED P13
+
+24
+
+32
+
+17
+
+25
+
+25
+
+21
+
+EXT_ANT
+
+27
+
+36
+
+51
+
+2,3,10~12,23,
+
+NC
+
+12~15
+
+-
+
+26,29,30,
+
+34~36,42
+
+Type
+I/O I/O I/O I/O I/O I/O I/O I/O I/O VDD VDD VDD VSS
+Audio Audio Audio Audio Audio
+VDD
+Audio Audio Audio Audio Audio Audio
+I/O I/O I/O I/O I/O I/O I/O
+o
+
+Descriptions
+GPIO0/UART_TX/USB_DN GPIO1/UART_RX/USB_DP GPIO5/UART_RTS/Line in_R GPIO4/UART_CTS/ Line in_L GPIO38/I2C_SCL GPIO39/I2C_SDA GPIO37/ADC1 GPIO11/ADC0/ STATUS(default)
+GPIO15/RESETLow level for more than 15ms
++5V input (Not used by default)
+Power Supplies3.3V
+3.0V_out(30mA) GND MIC0/Line_IN differential R input, negative MIC0/Line_IN differential R input, positive MIC0/Line_IN differential L input, negative MIC0/Line_IN differential L input, positive MIC1/Line_IN differential R input, positive MIC Power Supplies Line_out, left(16/32  load cannot be connected) Line_out,right(16/32  load cannot be connected) Headphone/speaker differential L output, negative Headphone/speaker differential L output, positive Headphone/speaker differential R output, negative Headphone/speaker differential R output, positive GPIO30/ I2S_BCLK GPIO32/ I2S_DI GPIO33/ I2S_DO GPIO31/ I2S_WS GPIO24/ I2S_MCLK GPIO2/LED(default) GPIO13 External antenna NC
+
+Notes
+
+Shenzhen Feasycom Co.,LTD
+
+-9-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+4. PHYSICAL INTERFACE
+4.1 Power Management 4.1.1 Power Supply
+ The FSC-BT1036x can be powered directly from a 3.1V to 4.35V external battery via the VDD pin or it can be powered from a 4.75V to 5.5V USB power supply via the +5V pin. The +5V can be also used to charge battery with internal charge control circuit.
+
+4.1.2 Battery Charger
+ The default mode for the FSC-BT1036x battery charger is OFF.  The internal charger circuit can provide up to 220mA of charge current.
+4.2 Audio Peripherals
+ The FSC-BT1036x comes with a rich set of audio peripherals to enhance the Bluetooth listening experience. The chip includes 24 bits analog-to-digital converter (ADC) and 24 bits digital-to-analog converter (DAC), together with amplifier and bias. The DAC is capable of driving 16  speakers with up to 30 pF of load capacitance (BT1036B except).
+ The typical sample rate of ADC and DAC is to 8 kHz44.1 kHz and 48 kHz, but could be set to any number from 8 kHz to 384 kHz.
+ There is also digital microphone interface to support up to 1 digital microphone. The PDM does the 8:1 CIC decimation that the PCM sample rate could be up to 384 kHz when the PDM clock frequency is 3.072 MHz.
+4.3 USB interface (This feature is not enabled )
+ The USB interface supports both host and device mode, with full speed.
+
+4.4 I2S interface
+
+ The I2S interface supports both master and slave mode, with sample rate from 7.35 kHz to 384 kHz.  There is an I2S DPLL dedicate for I2S and audio ADC/DAC, that it can output master clock for external device.
+
+Shenzhen Feasycom Co.,LTD
+
+-10-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+4.5 Serial Interfaces
+4.5.1 UART Interface
+FSC-BT1036x provides one channels of Universal Asynchronous Receiver/Transmitters(UART)(Full-duplex asynchronous communications). The UART Controller performs a serial-to-parallel conversion on data received from the peripheral and a parallel-to-serial conversion on data transmitted from the CPU. Each UART Controller channel supports ten types of interrupts.
+This is a standard UART interface for communicating with other serial devices. The UART interface provides a simple mechanism for communicating with other serial devices using the RS232 protocol.
+When the module is connected to another digital device, UART_RX and UART_TX transfer data between the two devices. The remaining two signals, UART_CTS and UART_RTS, can be used to implement RS232 hardware flow control where both are active low indicators.
+This module output is at 3.3V CMOS logic levels (tracks VCC). Level conversion must be added to interface with an RS-232 level compliant interface.
+Some serial implementations link CTS and RTS to remove the need for handshaking. We do not recommend linking CTS and RTS except for testing and prototyping. If these pins are linked and the host sends data when the FSCBT1036x deasserts its RTS signal, there is significant risk that internal receive buffers will overflow, which could lead to an internal processor crash. This drops the connection and may require a power cycle to reset the module. We recommend that you adhere to the correct CTS/RTS handshaking protocol for proper operation.
+
+Table 3: Possible UART Settings
+Parameter
+Baudrate
+Flow control Parity Number of stop bits Bits per channel
+
+Minimum Standard Maximum
+
+Possible Values
+2400 baud (2%Error) 115200bps(1%Error)
+4Mbaud(1%Error) RTS/CTS, or None None, Odd or Even
+1 /2 8
+
+When connecting the module to a host, please make sure to follow .
+
+Shenzhen Feasycom Co.,LTD
+
+-11-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+
+TX (P0/U AR T_TX ) RX(P1/U AR T_RX
+CTS
+Module RTS
+GND
+
+RX TX
+
+RTS
+
+CTS
+
+Host
+
+GND
+
+Figure 3: UART Connection
+
+4.5.2 I2C Interface
+FSC-BT1036x includes a configurable I2C interface.
+I2C is a two-wire, bi-directional serial bus that provides a simple and efficient method of data exchange between devices. The I2C standard is a true multi-master bus including collision detection and arbitration that prevents data corruption if two or more masters attempt to control the bus simultaneously.
+Data is transferred between a Master and a Slave synchronously to SCL on the SDA line on a byte-by-byte basis. Each data byte is 8-bit long. There is one SCL clock pulse for each data bit with the MSB being transmitted first. An acknowledge bit follows each transferred byte. Each bit is sampled during the high period of SCL; therefore, the SDA line may be changed only during the low period of SCL and must be held stable during the high period of SCL. A transition on the SDA line while SCL is high is interpreted as a command (START or STOP). Please refer to the following figure for more details about I2C Bus Timing.
+
+Figure 4: I2C Bus Timing
+The device on-chip I2C logic provides the serial interface that meets the I2C bus standard mode specification. The I2C port handles byte transfers autonomously. The I2C H/W interfaces to the I2C bus via two pins: SDA and SCL. Pull up resistor is needed for I2C operation as these are open drain pins. When the I/O pins are used as I2C port, user must set the pins function to I2C in advance.
+
+Shenzhen Feasycom Co.,LTD
+
+-12-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+
+5. ELECTRICAL CHARACTERISTICS
+
+5.1 Absolute Maximum Ratings
+Absolute maximum ratings for supply voltage and voltages on digital and analogue pins of the module are listed below. Exceeding these values causes permanent damage.
+
+The average PIO pin output current is defined as the average current value flowing through any one of the corresponding pins for a 100mS period. The total average PIO pin output current is defined as the average current value flowing through all of the corresponding pins for a 100mS period. The maximum output current is defined as the value of the peak current flowing through any one of the corresponding pins.
+
+Table 4:Absolute Maximum Rating
+Parameter
++5V VDD TST - Storage Temperature
+
+Min
+
+Max
+
+Unit
+
+4.75
+
+5.5
+
+V
+
+3.1
+
+4.35
+
+V
+
+-40
+
++85
+
+°C
+
+(a) Standard maximum input voltage is 5.75V, a 6.50V maximum depends on firmware version and implementation of over-temperature protection software, for more information contact Feasycom. (b) VDD is the VDD_IO supply domain for this I/O. Voltage must not exceed 3.6 V on any I/O.
+
+5.2 Recommended Operating Conditions
+
+Table 5:Recommended Operating Conditions
+
+Parameter
+
+Min
+
++5V
+
+4.75
+
+VDD
+
+TA - Operating Temperature
+
+-20
+
+Type
+5 3.3 -
+
+Max
+
+Unit
+
+5.5
+
+V
+
+V
+
++85
+
+°C
+
+5.3. Battery Charger(This feature is not enabled)
+
+Table 6: Battery Charger
+Parameter
+Input voltage, +5V Trickle Charge Mode Charge Current at trickle mode as
+percent of fast charge mode) Fast Charge Mode Charge current at fast charge mode V_end(Need Calibrated) VBAT voltage when Charge End
+
+Min Type
+
+Max
+
+4.75 5.00 5.75
+
+10%
+
+5
+
+220
+
+4.2
+
+Unit
+V
+mA V
+
+Shenzhen Feasycom Co.,LTD
+
+-13-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+
+5.4 Audio Characteristics
+
+5.4.1 Analogue to Digital Converter
+
+Table 7:Analogue to Digital Converter (single-ended/differential audio input)
+
+Parameter
+
+Ccnditions
+
+Min
+
+Resolution
+
+-
+
+-
+
+Output Sample Rate, -
+
+8
+
+F sample
+
+Input level
+
+-
+
+SNR
+
+-
+
+Type
+-
+200 100
+
+Max Unit
+
+24
+
+Bits
+
+384
+
+KHz
+
+mVrms
+
+-
+
+dB
+
+5.4.2 Digital to Analogue Converter
+
+Table 8:Digital to Analogue Converter differential audio output
+
+Parameter
+
+Ccnditions
+
+DAC Diff. Output
+
+With 600ohm loading
+
+Amplitude
+
+With 16ohm loading
+
+SNR
+
+f in = 1kHz
+
+F sample
+
+Load
+
+Min Type
+
+-
+
+-
+
+-
+
+-
+
+104
+
+Max
+1.0 0.8
+
+Unit
+Vrms Vrms
+dB
+
+6. MSL &ESD Protection
+Table 9: MSL and ESD
+Parameter
+MSL grade(with JEDEC J-STD-020)
+Human Body Model Contact Discharge per ANSI/ESDA/JEDEC JS-001 Charged Device Model Contact Discharge per JEDEC/EIA JESD22-C101
+
+Class
+2 III
+
+Max Rating
+MSL 3
+2kV(all pins)
+500V (all pins)
+
+Shenzhen Feasycom Co.,LTD
+
+-14-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+
+7. RECOMMENDED TEMPERATURE REFLOW PROFILE
+
+Prior to any reflow, it is important to ensure the modules were packaged to prevent moisture absorption. New packages contain desiccate (to absorb moisture) and a humidity indicator card to display the level maintained during storage and shipment. If directed to bake units on the card, please check the below Table 10 and follow instructions specified by IPC/JEDEC J-STD-033.
+
+Note: The shipping tray cannot be heated above 65°C. If baking is required at the higher temperatures displayed in the below Table 10, the modules must be removed from the shipping tray.
+
+Any modules not manufactured before exceeding their floor life should be re-packaged with fresh desiccate and a new humidity indicator card. Floor life for MSL (Moisture Sensitivity Level) 3 devices is 168 hours in ambient environment 30°C/60%RH.
+
+Table 10: Recommended baking times and temperatures
+
+125°C Baking Temp.
+
+90°C/ 5%RH Baking Temp.
+
+40°C/  5%RH Baking Temp.
+
+Saturated @ Floor Life Limit Saturated @ Floor Life Limit Saturated@ Floor Life Limit
+
+MSL
+
+30°C/85%
+
++ 72 hours @
+
+30°C/85%
+
++ 72 hours @
+
+30°C/85% + 72 hours @
+
+30°C/60%
+
+30°C/60%
+
+30°C/60%
+
+3
+
+9 hours
+
+7 hours
+
+33 hours
+
+23 hours
+
+13 days
+
+9 days
+
+Feasycom surface mount modules are designed to be easily manufactured, including reflow soldering to a PCB. Ultimately it is the responsibility of the customer to choose the appropriate solder paste and to ensure oven temperatures during reflow meet the requirements of the solder paste. Feasycom surface mount modules conform to J-STD-020D1 standards for reflow temperatures.
+
+The soldering profile depends on various parameters necessitating a set up for each application. The data here is given only for guidance on solder reflow.
+
+ 250
+
+217 210
+
+25
+
+A
+
+B
+
+C
+
+D
+
+E
+
+0
+
+1
+
+2
+
+3
+
+4
+
+5
+
+6
+
+min
+
+Figure 5: Typical Lead-free Re-flow
+Pre-heat zone (A) -- This zone raises the temperature at a controlled rate, typically 0.5 ­ 2 °C/s. The purpose of this zone is to preheat the PCB board and components to 120 ~ 150 °C. This stage is required to distribute the heat uniformly to the PCB board and completely remove solvent to reduce the heat shock to components.
+Equilibrium Zone 1 (B) -- In this stage the flux becomes soft and uniformly encapsulates solder particles and spread over PCB board, preventing them from being re-oxidized. Also with elevation of temperature and liquefaction of flux, each activator and rosin get activated and start eliminating oxide film formed on the surface of each solder particle and PCB
+
+Shenzhen Feasycom Co.,LTD
+
+-15-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+board. The temperature is recommended to be 150° to 210° for 60 to 120 second for this zone.
+Equilibrium Zone 2 (C) (optional) -- In order to resolve the upright component issue, it is recommended to keep the temperature in 210 ­ 217 ° for about 20 to 30 second.
+Reflow Zone (D) -- The profile in the figure is designed for Sn/Ag3.0/Cu0.5. It can be a reference for other lead-free solder. The peak temperature should be high enough to achieve good wetting but not so high as to cause component discoloration or damage. Excessive soldering time can lead to intermetallic growth which can result in a brittle joint. The recommended peak temperature (Tp) is 230 ~ 250 °C. The soldering time should be 30 to 90 second when the temperature is above 217 °C.
+Cooling Zone (E) -- The cooling ate should be fast, to keep the solder grains small which will give a longer-lasting joint. Typical cooling rate should be 4 °C.
+
+Shenzhen Feasycom Co.,LTD
+
+-16-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+8. PCB layout
+8.1 FSC-BT1036A
+ Dimension: 10mm(W) x 11.9mm(L) x 1.8mm(H) Tolerance: ±0.2mm  Module size: 10mm X 11.9mm Tolerance: ±0.2mm  Pad size: 1.8mmX0.6mm Tolerance: ±0.2mm  Pad pitch: 1.1mm Tolerance: ±0.1mm
+
+Shenzhen Feasycom Co.,LTD
+
+Figure 6: FSC-BT1036A pad -17-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+8.2 FSC-BT1036B
+ Dimension: 13mm(W) x 26.9mm(L) x 2.4mm(H) Tolerance: ±0.2mm  Module size: 13mm X 26.9mm Tolerance: ±0.2mm  Pad size: 2.2mmX0.8mm Tolerance: ±0.2mm  Pad pitch: 1.5mm Tolerance: ±0.1mm
+
+Shenzhen Feasycom Co.,LTD
+
+Figure 7: FSC-BT1036B pad -18-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+8.3 FSC-BT1036C
+ Dimension: 13mm(W) x 26.9mm(L) x 1.8mm(H) Tolerance: ±0.2mm  Module size: 13mm X 26.9mm Tolerance: ±0.2mm  Pad size: 1.6mmX0.6mm Tolerance: ±0.2mm  Pad pitch: 1.0mm Tolerance: ±0.1mm
+
+Shenzhen Feasycom Co.,LTD
+
+Figure 8: FSC-BT1036C pad -19-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+
+9. HARDWARE INTEGRATION SUGGESTIONS
+
+9.1 Soldering Recommendations
+FSC-BT1036x is compatible with industrial standard reflow profile for Pb-free solders. The reflow profile used is dependent on the thermal mass of the entire populated PCB, heat transfer efficiency of the oven and particular type of solder paste used. Consult the datasheet of particular solder paste for profile configurations.
+Feasycom will give following recommendations for soldering the module to ensure reliable solder joint and operation of the module after soldering. Since the profile used is process and layout dependent, the optimum profile should be studied case by case. Thus following recommendation should be taken as a starting point guide.
+9.2 Layout Guidelines(Internal Antenna)
+It is strongly recommended to use good layout practices to ensure proper operation of the module. Placing copper or any metal near antenna deteriorates its operation by having effect on the matching properties. Metal shield around the antenna will prevent the radiation and thus metal case should not be used with the module. Use grounding vias separated max 3 mm apart at the edge of grounding areas to prevent RF penetrating inside the PCB and causing an unintentional resonator. Use GND vias all around the PCB edges.
+The mother board should have no bare conductors or vias in this restricted area, because it is not covered by stop mask print. Also no copper (planes, traces or vias) are allowed in this area, because of mismatching the on-board antenna.
+
+26.9 5 2.8 Max.0.5
+
+Unit:mm
+
+43.5 Max.1.0 15
+13 8.2 10
+20
+
+no bare copper(exept solder pads for module)
+
+no copper and components on any layer
+
+no components on any layer
+
+Applic. PCB
+
+do not place any conductive parts in this area
+
+20
+
+10
+
+Provide solid ground plane(s) as large as possible around area
+
+Figure 9: FSC-BT1036x Restricted Area
+
+Following recommendations helps to avoid EMC problems arising in the design. Note that each design is unique and the following list do not consider all basic design rules such as avoiding capacitive coupling between signal lines. Following list is aimed to avoid EMC problems caused by RF part of the module. Use good consideration to avoid problems arising from digital signals in the design.
+
+Ensure that signal lines have return paths as short as possible. For example if a signal goes to an inner layer through a via, always use ground vias around it. Locate them tightly and symmetrically around the signal vias. Routing of any sensitive signals should be done in the inner layers of the PCB. Sensitive traces should have a ground area above and under the line. If this is not possible, make sure that the return path is short by other means (for example using a ground line next to the signal line).
+
+Shenzhen Feasycom Co.,LTD
+
+-20-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+
+9.3 Layout Guidelines(External Antenna)
+
+Placement and PCB layout are critical to optimize the performances of a module without on-board antenna designs. The trace from the antenna port of the module to an external antenna should be 50 and must be as short as possible to avoid any interference into the transceiver of the module. The location of the external antenna and RF-IN port of the module should be kept away from any noise sources and digital traces. A matching network might be needed in between the external antenna and RF-IN port to better match the impedance to minimize the return loss.
+As indicated in Figure16 below, RF critical circuits of the module should be clearly separated from any digital circuits on the system board. All RF circuits in the module are close to the antenna port. The module, then, should be placed in this way that module digital part towards your digital section of the system PCB.
+
+Aentn
+
+Anetn
+
+Non enmitting circuits
+
+Non enmitting circuits
+
+RF_IN Digital Part
+
+RF & heat enmitting circuits
+
+Digital Part RF_IN
+
+Digital & Analog Circuits
+
+Digital & Analog Circuits
+
+PCB
+
+Figure 10: Placement the Module on a System Board
+
+RF & heat enmitting circuits
+PCB
+
+9.3.1 Antenna Connection and Grounding Plane Design
+
+5mm
+
+Antenna
+
+Matching Network
+
+RF_IN
+
+Figure 11: Leave 5mm Clearance Space from the Antenna
+
+General design recommendations are:
+The length of the trace or connection line should be kept as short as possible. Distance between connection and ground area on the top layer should at least be as large as the dielectric thickness. Routing the RF close to digital sections of the system board should be avoided. To reduce signal reflections, sharp angles in the routing of the micro strip line should be avoided. Chamfers or fillets
+
+Shenzhen Feasycom Co.,LTD
+
+-21-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+
+are preferred for rectangular routing; 45-degree routing is preferred over Manhattan style 90-degree routing.
+
+tAnen
+
+etnnA
+
+nenAt
+
+PCB Wrong
+
+PCB Better
+
+PCB Best
+
+Figure 12: Recommended Trace Connects Antenna and the Module Routing of the RF-connection underneath the module should be avoided. The distance of the micro strip line to the ground plane on the bottom side of the receiver is very small and has huge tolerances. Therefore, the impedance of this part of the trace cannot be controlled. Use as many vias as possible to connect the ground planes.
+10. PRODUCT PACKAGING INFORMATIONM(For reference only)
+10.1 DefaultPacking
+a, Tray vacuumzhi b, Tray Dimension: 180mm * 195mm
+
+Shenzhen Feasycom Co.,LTD
+
+-22-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+
+10.2 Packing box(Optional)
+
+Figure 13: Tray vacuum
+
+* If require any other packing, must be confirmed with customer * Package: 2000PCS Per Carton (Min Carton Package)
+Figure 14: Packing Box
+
+Shenzhen Feasycom Co.,LTD
+
+-23-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+
+11. APPLICATION SCHEMATIC
+
+UART_RTS UART_CTS UART interface UART_TX
+UART_RX
+
+3V3_BT
+
+I2C-SDA
+I2C I2C-SCL
+
+RESET
+
+C54 100nF
+
+C4 10uF
+
+SPK_RN SPK_RP SPK_LN SPK_LP
+MIC_LP MIC_RP
+
+MIC_BIAS
+
+Input Level 200mVrmsMAX
+
+J1
+
+R2
+C1 NC
+
+0R
+
+1
+
+ANT-F C2 NC
+
+34 SPK_RN
+33 SPK_RP
+32 SPK_LN
+31 SPK_LP
+30 MIC_BIAS
+29 MIC0_LP
+28 MIC0_RP
+
+1 P5/UART_RTS/LINE_R
+
+2 P4/UART_CTS/LINE_L
+
+3 P0/UART_TX
+
+4 P1/UART_RX
+
+5 P39/I2C_SDA
+
+6 P38/I2C_SCL
+
+7
+
+U1
+
+P37/ADC1
+
+8 P15/RESET
+
+9 VDD
+
+10 GND
+
+27 RF_OUT
+26 GND P13 25
+24 P2/LED
+23 P24/I2S_MCLK
+22 P11/ADC0
+21 P30/I2S_CLK
+20 P33/I2S_OUT
+19 P32/I2S_IN
+18 P31/I2S_WS
+
+R13
+
+1K
+
+LED
+BT work Status Indicator Light
+
+I2S-CLK I2S-OUT I2S-IN I2S-WS
+
+I2S
+
+2 J2
+
+POWER
+
+5V
+1 2
+
+C3 10uF
+
+(Optional)
+
+U5
+
+1 VIN
+
+5 VOUT
+
+C8 100nF
+
+3 EN
+3.3V LDO
+
+2 GND
+
+BP 4 C6
+10nF
+
+3V3_BT
+C5 C7 10uF 100nF
+
+11 GND
+12 NC
+13 NC
+14 NC
+15 NC
+16 +5V
+17 GND
+
+I:connect to SPK(16/32ohm)
+
+SPK_LP SPK_LN
+SPK_RP SPK_RN
+
+SPK-R 16R/32R
+SPK-L 16R/32R
+
+II:Differential to Single
+
+VREF 5V
+
+SPK_LP SPK_LN
+
+R14 100K
+
+C9 4.7uF
+
+R18 100K
+SPK_RN
+SPK_RP
+
+R24 20K 1% C15 1uF R19 20K 1%
+C10 1uF R20 20K 1%
+
+5 +
+6 -
+
+VREF
+7 C17 2.2uF U8-B PT2308
+
+R26 20K 1% R27 20K 1%
+
+SPK_LO SPK_RO
+
+JK1
+1 2 3
+
+AUDIO_OUTPUT
+
+4
+
+C16 1uF R22 20K 1% C34 1uF R23 20K 1%
+R25 20K 1%
+
+2
+
+-
+
+1 C22 2.2uF
+
+3
+
++
+
+U8-A
+
+8
+
+PT2308
+
+5V
+
+C28 C23 100nF 4.7uF
+
+RESET (Optional)
+
+Reset Circuit Based On Voltage Dual Comparators
+
+3V3_BT
+
+R4 100K
+
+VCC 3
+
+1 GND
+
+2 RESET
+
+U3 CN809R-2.63V
+
+RESET
+
+RC Reset Circuit RC Reset Circuit already included in this module.
+3V3_BT
+R1 10K
+RESET
+C14 100nF
+
+VREF
+
+Line IN
+
+(Optional)
+
+JK
+GND 6 AUDIO-L 4
+SWITCH 3 SWITCH 2 AUDIO-R 1
+MIC 5
+CON-EAR-3F32(CTIA)
+
+LINE_IN_L LINE_IN_L LINE_IN_R
+LINE_IN_R
+
+10K
+
+R3
+
+C21 4.7uF
+
+R12 2.4K
+
+MIC_LP
+
+C18 100pF
+
+10K
+
+R11
+
+C19 4.7uF
+
+R10 2.4K
+
+MIC_RP
+
+C11 100pF
+
+MIC_BIAS
+
+MIC
+
+MIC_BIAS
+
+MIC
+
+R15 2.2K
+C12 100nF R17 1K
+C13 15pF
+
+MIC_LP
+
+R5 2.2K
+C20 100nF R6 1K
+C24 15pF
+
+MIC_RP
+
+L4 15nH
+Default
+MIC_L -42dB
+
+L1 15nH
+Optional
+MIC_R -42dB
+
+Important RC network
+
+Figure 15FSC-BT1036A SCH
+
+Shenzhen Feasycom Co.,LTD
+
+-24-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+
+14 15 GND 16 +5V 17 MIC_BIAS 18 MIC0_LP 19 MIC0_RP 20 SPK_L 21 SPK_R
+GND 2
+J2 2 GND
+
+UART_TX UART interface UART_RX
+UART_CTS UART_RTS
+
+I2S
+
+I2S-CLK I2S-OUT I2S-IN
+I2S-WS
+
+RESET
+
+3V3_BT
+
+C54 100nF
+
+C4 10uF
+
+U1
+
+1 2 P0/UART_TX/DN 3 P1/UART_RX/DP 4 P4/UART_CTS 5 P5/UART_RTS 6 P30/I2S_BCLK 7 P33/I2S_DO 8 P32/I2S_DI 9 P31/I2S_WS 10 MIC0_LP 11 MIC1_RP 12 RESET 13 VDD_3V3
+GND
+
+36 EXT_ANT 35
+GND 34 P11/ADC0 33 P11/ADC0 32
+P2/LED 31 P24/I2S_MCLK 30
+P39/I2C_SDA 29 P38/I2C_SCL 28
+P37/ADC1 27 P5/UART_RTS 26 P4/UART_CTS 25
+P13 24 SPK_R 23 SPK_L 22
+GND
+
+Optional J1
+
+R2
+C1 NC
+
+0R
+
+1
+
+ANT-F C2 NC
+
+R13
+
+1K
+
+LED
+BT work Status Indicator Light
+
+I2C-SDA I2C-SCL
+
+I2C
+
+MIC_BIAS
+
+MIC_RP MIC_LP
+Input Level 200mVrmsMAX
+
+JK1
+
+SPK_R 1 SPK_L 2
+GND 3
+
+AUDIO_OUTPUT
+
+POWER
+
+5V
+1 2
+
+C3 10uF
+
+(Optional)
+
+U5
+
+1 VIN
+
+5 VOUT
+
+C8 100nF
+
+3 EN 3.3V LDO
+
+4 BP
+C6
+10nF
+
+3V3_BT
+C5 C7 10uF 100nF
+
+RESET (Optional)
+
+Reset Circuit Based On Voltage Dual Comparators
+
+3V3_BT
+
+R4 100K
+
+VCC 3
+
+1 GND
+
+RESET 2
+
+U3 CN809R-2.63V
+
+RESET
+
+RC Reset Circuit RC Reset Circuit already included in this module.
+3V3_BT
+R1 10K
+RESET
+C14 100nF
+
+Line IN
+
+(Optional)
+
+JK
+GND 6 AUDIO-L 4
+SWITCH 3 SWITCH 2 AUDIO-R 1
+MIC 5
+CON-EAR-3F32(CTIA)
+
+LINE_IN_L LINE_IN_L LINE_IN_R
+LINE_IN_R
+
+10K
+
+R3
+
+C21 4.7uF
+
+R12 2.4K
+
+MIC_LP
+
+C18 100pF
+
+10K
+
+R11
+
+C19 4.7uF
+
+R10 2.4K
+
+MIC_RP
+
+C11 100pF
+
+MIC_BIAS
+
+MIC
+
+MIC_BIAS
+
+MIC
+
+R15 2.2K
+C12 100nF R17 1K
+C13 15pF
+
+MIC_LP
+
+R5 2.2K
+C20 100nF R6 1K
+C24 15pF
+
+MIC_RP
+
+L4 15nH
+Default
+MIC_L -42dB
+
+L1 15nH
+Optional
+MIC_R -42dB
+
+Important RC network
+
+Figure 16FSC-BT1036B SCH
+
+Shenzhen Feasycom Co.,LTD
+
+-25-
+
+www.feasycom.com
+
+FSC-BT1036x Datasheet
+
+I2S
+I2S-CLK I2S-IN I2S-OUT I2S-WS
+
+RESET
+
+UART_TX UART_RX
+UART_CTS UART interface
+UART_RTS
+
+LED
+
+1K
+
+R13
+
+BT work Status Indicator Light
+
+1 GND
+
+2 NC
+
+3 NC
+
+4 P30/I2S_BCLK
+
+5 P32/I2S_DI
+
+6 P33//I2S_DO
+
+7 P31/I2S_WS
+
+8 RESET
+
+9
+
+U1
+
+P24/I2S_MCLK
+
+10 NC
+
+11 NC
+
+12 NC
+
+13 P0/UART_TX/DN
+
+14 P1/UART_RX/DP
+
+15 P4/UART_CTS
+
+16 P5/UART_RTS
+
+17 P2/LED
+
+18 P11/ADC0
+
+19 P37/ADC1
+
+20 P37/ADC1
+
+21 P13
+
+J1
+Optional
+
+R2
+C1 NC
+
+0R
+
+1
+
+ANT-F C2 NC
+
+52 GND EXT_ANT 51 GND 50
+49 SPK_LP
+48 SPK_LN
+47 SPK_RP
+46 SPK_RN
+45 MIC_BIAS
+44 MIC0_LN MIC0_LP 43
+42 NC
+41 MIC0_RN MIC0_RP 40
+39 +5V
+38 P0/UART_TX/DN
+37 P1/UART_RX/DP
+36 NC
+35 NC
+34 NC
+33 VDD
+32 GND
+
+SPK_LP MIC_BIAS
+SPK_LN
+SPK_RP
+SPK_RN
+
+R7 1K C25 100nF
+
+MIC_LP
+
+R8 1K C26 100nF
+
+MIC_RP
+
+Input Level 200mVrmsMAX
+
+C4 10uF
+
+C54 100nF
+
+3V3_BT
+
+22 GND
+23 NC
+24 P38/I2C_SCL 25 P39/I2C_SDA 26
+NC 27
+P38/I2C_SCL 28 P39/I2C_SDA 29
+NC 30
+NC 31
+3.3V_OUT
+
+I2C-SDA I2C-SCL
+
+I2C
+
+2 J2
+
+POWER
+
+5V
+1 2
+
+C3 10uF
+
+(Optional)
+
+U5
+
+C8 100nF
+
+1 VIN
+3 EN
+3.3V LDO
+
+2 GND
+
+5 VOUT
+4 BP
+C6
+10nF
+
+3V3_BT
+C5 C7 10uF 100nF
+
+I:connect to SPK(16/32ohm)
+
+SPK_LP SPK_LN
+SPK_RP SPK_RN
+
+SPK-R 16R/32R
+SPK-L 16R/32R
+
+II:Differential to Single
+
+VREF 5V
+
+SPK_LP SPK_LN
+
+R14 100K
+
+C9 4.7uF
+
+R18 100K
+SPK_RN
+SPK_RP
+
+R24 20K 1% C15 1uF R19 20K 1%
+C10 1uF R20 20K 1%
+
+5 +
+6 -
+
+VREF
+7 C17 2.2uF U8-B PT2308
+
+R26 20K 1% R27 20K 1%
+
+SPK_LO SPK_RO
+
+JK1
+1 2 3
+
+AUDIO_OUTPUT
+
+4
+
+C16 1uF R22 20K 1% C34 1uF R23 20K 1%
+R25 20K 1%
+
+2
+
+-
+
+1 C22 2.2uF
+
+3
+
++
+
+U8-A
+
+8
+
+PT2308
+
+5V
+
+C28 C23 100nF 4.7uF
+
+RESET (Optional)
+
+Reset Circuit Based On Voltage Dual Comparators
+
+3V3_BT
+
+R4 100K
+
+VCC 3
+
+1 GND
+
+RESET 2
+
+U3 CN809R-2.63V
+
+RESET
+
+RC Reset Circuit RC Reset Circuit already included in this module.
+3V3_BT
+R1 10K
+RESET
+C14 100nF
+
+VREF
+
+Line IN
+
+(Optional)
+
+JK
+GND 6 AUDIO-L 4
+SWITCH 3 SWITCH 2 AUDIO-R 1
+MIC 5
+CON-EAR-3F32(CTIA)
+
+LINE_IN_L LINE_IN_L LINE_IN_R
+LINE_IN_R
+
+10K
+
+R3
+
+C21 100nF
+
+R12 2.4K
+
+MIC_LP
+
+C18 100pF
+
+10K
+
+R11
+
+C19 100nF
+
+R10 2.4K
+
+MIC_RP
+
+C11 100pF
+
+MIC_BIAS
+
+MIC
+
+MIC_BIAS
+
+MIC
+
+R15 2.2K
+C12 100nF R17 1K
+C13 15pF
+
+MIC_LP
+
+R5 2.2K
+C20 100nF R6 1K
+C24 15pF
+
+MIC_RP
+
+L4 15nH
+Default
+MIC_L -42dB
+
+L1 15nH
+Optional
+MIC_R -42dB
+
+Important RC network
+
+Figure 17FSC-BT1036C SCH
+
+Shenzhen Feasycom Co.,LTD
+
+-26-
+
+www.feasycom.com
+
+

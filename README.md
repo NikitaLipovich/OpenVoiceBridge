@@ -82,12 +82,11 @@ AT+I2SCFG=3
 # Set HFP SCO sample rate to 16 kHz (ESP firmware matches this)
 AT+HFPSR=16000
 
-# Enable HFP profile
-AT+PROFILE=1
-
-# Save & reboot
+# Reboot to apply settings
 AT+REBOOT
 ```
+
+> **Do NOT send AT+PROFILE.** The factory default `+PROFILE=1195` already enables HFP-HF (BIT[3]) along with A2DP/AVRCP/PBAP. Sending `AT+PROFILE=1` sets only BIT[0]=SPP and disables HFP — the phone will not be able to connect for calls.
 
 After a call is active the module outputs 16 kHz, 16-bit, mono PCM on I2S_DO.
 
