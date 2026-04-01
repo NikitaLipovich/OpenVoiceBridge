@@ -1,49 +1,44 @@
 #include <string.h>
 
-#include "lwip/udp.h"
-#include "lwip/tcpip.h"
-#include "lwip/ip_addr.h"
-#include "lwip/pbuf.h"
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/ringbuf.h"
+#include "freertos/event_groups.h"
 
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
-#include "freertos/event_groups.h"
 
-#include "esp_heap_caps.h"
+#include "lwip/udp.h"
+#include "lwip/ip_addr.h"
+#include "lwip/tcpip.h"
+#include "lwip/pbuf.h"
 
 #include "driver/gpio.h"
 #include "driver/i2s_std.h"
-#include "driver/i2c_master.h"
 
 static const char *TAG = "audio_stream";
 
 // -------------------- Settings (edit) --------------------
 
 // I2S0 — BT1036-A (phone side, full-duplex)
-#define I2S_BCLK_GPIO   (GPIO_NUM_4)
-#define I2S_WS_GPIO     (GPIO_NUM_5)
-#define I2S_DIN_GPIO    (GPIO_NUM_6)   // BT1036-A P33 DO → ESP32  (call audio RX)
-#define I2S_DOUT_GPIO   (GPIO_NUM_7)   // ESP32 → BT1036-A P32 DI  (mic TX to phone)
+// ESP32 = master (drives BCLK/WS), BT1036-A = slave
+#define I2S0_BCLK_GPIO  (GPIO_NUM_4)
+#define I2S0_WS_GPIO    (GPIO_NUM_5)
+#define I2S0_DIN_GPIO   (GPIO_NUM_6)   // BT1036-A P33 DO → ESP32  (call audio RX)
+#define I2S0_DOUT_GPIO  (GPIO_NUM_7)   // ESP32 → BT1036-A P32 DI  (mic TX to phone)
 
-// I2S1 — WM8960 DAC (headphone output)
-#define I2S1_MCLK_GPIO  (GPIO_NUM_3)   // MCLK → WM8960 MCLK
-#define I2S1_BCLK_GPIO  (GPIO_NUM_15)  // BCLK → WM8960 BCLK
-#define I2S1_WS_GPIO    (GPIO_NUM_16)  // WS   → WM8960 DACLRC
-#define I2S1_DOUT_GPIO  (GPIO_NUM_17)  // DOUT → WM8960 DACDAT
-
-// I2C — WM8960 control
-#define WM8960_SDA_GPIO (GPIO_NUM_8)
-#define WM8960_SCL_GPIO (GPIO_NUM_9)
-#define WM8960_ADDR     (0x1A)
+// I2S1 — BT1036-B (headset side, full-duplex)
+// ESP32 = master (drives BCLK/WS), BT1036-B = slave
+#define I2S1_BCLK_GPIO  (GPIO_NUM_15)  // BCLK → BT1036-B P30
+#define I2S1_WS_GPIO    (GPIO_NUM_16)  // WS   → BT1036-B P31
+#define I2S1_DOUT_GPIO  (GPIO_NUM_17)  // ESP32 → BT1036-B P32 DI  (audio to headphones)
+#define I2S1_DIN_GPIO   (GPIO_NUM_18)  // BT1036-B P33 DO → ESP32  (mic from headphones)
 
 #define SAMPLE_RATE_HZ     (8000)      // OnePlus 13R: CVSD 8 kHz
 #define BITS_PER_SAMPLE    (16)
@@ -54,89 +49,32 @@ static const char *TAG = "audio_stream";
 #define FRAME_BYTES_STEREO (SAMPLES_PER_FRAME * BYTES_PER_SAMPLE * 2)  // 640
 #define FRAME_BYTES_MONO   (SAMPLES_PER_FRAME * BYTES_PER_SAMPLE)      // 320
 
-#define RINGBUF_CAPACITY_BYTES (FRAME_BYTES_MONO * 50)
+#define RINGBUF_CAPACITY_BYTES (FRAME_BYTES_MONO * 8)
 
 #define UDP_REMOTE_IP   "192.168.1.214"
 #define UDP_REMOTE_PORT (5004)
 
-#define SW_GAIN 4   // software gain for call audio (AT+SPKVOL unavailable in I2S mode)
+#define SW_GAIN 28   // software gain for call audio (AT+SPKVOL unavailable in I2S mode)
 
 // ---------------------------------------------------------
 
 // Ring buffers
-static RingbufHandle_t s_rb    = NULL;  // call audio → UDP
-static RingbufHandle_t s_rb_tx = NULL;  // call audio → DAC headphones
+static RingbufHandle_t s_rb    = NULL;  // call audio (BT1036-A RX) → UDP
+static RingbufHandle_t s_rb_tx = NULL;  // call audio → BT1036-B TX → headphones
 
 // I2S handles
-static i2s_chan_handle_t s_i2s_rx      = NULL;  // I2S0 RX: call from BT1036-A
+static i2s_chan_handle_t s_i2s_rx      = NULL;  // I2S0 RX: call audio from BT1036-A
 static i2s_chan_handle_t s_i2s_call_tx = NULL;  // I2S0 TX: mic to BT1036-A → phone
-static i2s_chan_handle_t s_i2s_tx      = NULL;  // I2S1 TX: audio to external DAC → headphones
+static i2s_chan_handle_t s_i2s_tx      = NULL;  // I2S1 TX: call audio to BT1036-B → headphones
+static i2s_chan_handle_t s_i2s_mic_rx  = NULL;  // I2S1 RX: mic from BT1036-B headphones
 
-// ---------------------------------------------------------------------------
-// WM8960 init via I2C
-// ---------------------------------------------------------------------------
-static i2c_master_dev_handle_t s_wm8960 = NULL;
-
-static esp_err_t wm8960_write(uint8_t reg, uint16_t val)
-{
-    // WM8960 protocol: [reg(7-bit) | val_bit8], [val_bits7-0]
-    uint8_t buf[2] = {
-        (uint8_t)((reg << 1) | ((val >> 8) & 0x01)),
-        (uint8_t)(val & 0xFF),
-    };
-    return i2c_master_transmit(s_wm8960, buf, sizeof(buf), pdMS_TO_TICKS(50));
-}
-
-static void wm8960_init(void)
-{
-    i2c_master_bus_config_t bus_cfg = {
-        .i2c_port          = I2C_NUM_0,
-        .sda_io_num        = WM8960_SDA_GPIO,
-        .scl_io_num        = WM8960_SCL_GPIO,
-        .clk_source        = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
-    i2c_master_bus_handle_t bus;
-    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus));
-
-    i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = WM8960_ADDR,
-        .scl_speed_hz    = 400000,
-    };
-    ESP_ERROR_CHECK(i2c_master_bus_add_device(bus, &dev_cfg, &s_wm8960));
-
-    ESP_ERROR_CHECK(wm8960_write(0x0F, 0x000));   // Reset
-    vTaskDelay(pdMS_TO_TICKS(10));
-
-    // Power
-    ESP_ERROR_CHECK(wm8960_write(0x19, 0x0C0));   // PWR1: VMID=50kΩ, VREF
-    ESP_ERROR_CHECK(wm8960_write(0x1A, 0x1E0));   // PWR2: DACL, DACR, LOUT1, ROUT1
-    ESP_ERROR_CHECK(wm8960_write(0x2F, 0x00C));   // PWR3: LOMIX(bit3), ROMIX(bit2)
-
-    // Audio interface: I2S format, 16-bit, slave (ESP32 is master)
-    ESP_ERROR_CHECK(wm8960_write(0x07, 0x002));
-
-    // Clocking: MCLK → SYSCLK, no PLL, no divider
-    ESP_ERROR_CHECK(wm8960_write(0x04, 0x000));
-
-    // Route DAC → output mixer → headphone amp
-    ESP_ERROR_CHECK(wm8960_write(0x22, 0x100));   // Left  Mix: LD2LO=1
-    ESP_ERROR_CHECK(wm8960_write(0x24, 0x100));   // Right Mix: RD2RO=1
-
-    // Volumes: 0 dB everywhere
-    ESP_ERROR_CHECK(wm8960_write(0x0A, 0x1FF));   // Left  DAC: 0dB + VU
-    ESP_ERROR_CHECK(wm8960_write(0x0B, 0x1FF));   // Right DAC: 0dB + VU
-    ESP_ERROR_CHECK(wm8960_write(0x02, 0x179));   // LOUT1: 0dB + VU
-    ESP_ERROR_CHECK(wm8960_write(0x03, 0x179));   // ROUT1: 0dB + VU
-
-    ESP_LOGI(TAG, "WM8960 initialized");
-}
+// Raw lwIP UDP PCB (created after WiFi IP assignment, thread-safe via LOCK_TCPIP_CORE)
+static struct udp_pcb *s_udp_pcb = NULL;
 
 static esp_err_t i2s_init(void)
 {
     // I2S0: full-duplex — BT1036-A (phone side)
+    // ESP32 = master; BT1036-A configured as slave via AT+I2SCFG=3
     {
         i2s_chan_config_t cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
         ESP_ERROR_CHECK(i2s_new_channel(&cfg, &s_i2s_call_tx, &s_i2s_rx));
@@ -147,10 +85,10 @@ static esp_err_t i2s_init(void)
                                                             I2S_SLOT_MODE_STEREO),
             .gpio_cfg = {
                 .mclk = GPIO_NUM_NC,
-                .bclk = I2S_BCLK_GPIO,
-                .ws   = I2S_WS_GPIO,
-                .dout = I2S_DOUT_GPIO,
-                .din  = I2S_DIN_GPIO,
+                .bclk = I2S0_BCLK_GPIO,
+                .ws   = I2S0_WS_GPIO,
+                .dout = I2S0_DOUT_GPIO,
+                .din  = I2S0_DIN_GPIO,
                 .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
             },
         };
@@ -160,30 +98,29 @@ static esp_err_t i2s_init(void)
         ESP_ERROR_CHECK(i2s_channel_enable(s_i2s_rx));
     }
 
-    // I2S1: TX-only — WM8960 DAC → headphones
+    // I2S1: full-duplex — BT1036-B (headset side)
+    // ESP32 = master; BT1036-B configured as slave via AT+I2SCFG=3
     {
         i2s_chan_config_t cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
-        ESP_ERROR_CHECK(i2s_new_channel(&cfg, &s_i2s_tx, NULL));
+        ESP_ERROR_CHECK(i2s_new_channel(&cfg, &s_i2s_tx, &s_i2s_mic_rx));
 
         i2s_std_config_t std = {
-            .clk_cfg = {
-                .sample_rate_hz = SAMPLE_RATE_HZ,
-                .clk_src        = I2S_CLK_SRC_DEFAULT,
-                .mclk_multiple  = I2S_MCLK_MULTIPLE_256,  // MCLK = 256*8000 = 2.048 MHz
-            },
+            .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE_HZ),
             .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
                                                             I2S_SLOT_MODE_STEREO),
             .gpio_cfg = {
-                .mclk = I2S1_MCLK_GPIO,
+                .mclk = GPIO_NUM_NC,
                 .bclk = I2S1_BCLK_GPIO,
                 .ws   = I2S1_WS_GPIO,
                 .dout = I2S1_DOUT_GPIO,
-                .din  = GPIO_NUM_NC,
+                .din  = I2S1_DIN_GPIO,
                 .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
             },
         };
-        ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_i2s_tx, &std));
+        ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_i2s_tx,     &std));
+        ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_i2s_mic_rx, &std));
         ESP_ERROR_CHECK(i2s_channel_enable(s_i2s_tx));
+        ESP_ERROR_CHECK(i2s_channel_enable(s_i2s_mic_rx));
     }
 
     return ESP_OK;
@@ -203,9 +140,32 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         esp_wifi_connect();
         xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         ESP_LOGI(TAG, "wifi disconnected, retrying");
+        // Free UDP PCB on disconnect so it's recreated cleanly after reconnect
+        LOCK_TCPIP_CORE();
+        if (s_udp_pcb) {
+            udp_remove(s_udp_pcb);
+            s_udp_pcb = NULL;
+        }
+        UNLOCK_TCPIP_CORE();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+        // Create raw lwIP UDP PCB — safe to call here with LOCK_TCPIP_CORE
+        LOCK_TCPIP_CORE();
+        if (s_udp_pcb == NULL) {
+            s_udp_pcb = udp_new_ip_type(IPADDR_TYPE_V4);
+            if (s_udp_pcb) {
+                ip_addr_t dest;
+                IP4_ADDR(&dest.u_addr.ip4,
+                         192, 168, 1, 214);  // UDP_REMOTE_IP
+                dest.type = IPADDR_TYPE_V4;
+                udp_connect(s_udp_pcb, &dest, UDP_REMOTE_PORT);
+                ESP_LOGI(TAG, "UDP PCB ready -> " UDP_REMOTE_IP ":%d", UDP_REMOTE_PORT);
+            } else {
+                ESP_LOGE(TAG, "udp_new failed");
+            }
+        }
+        UNLOCK_TCPIP_CORE();
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
 }
@@ -255,8 +215,6 @@ static void wifi_connect_sta(void)
         ESP_LOGW(TAG, "failed to connect to AP within timeout");
     }
 }
-
-// (BSD socket helper removed — now using raw lwIP UDP)
 
 // ---------------------------------------------------------------------------
 // TASK: i2s_rx — reads call audio from BT1036-A, fans out to UDP and headphones
@@ -318,18 +276,10 @@ static void i2s_rx_task(void *arg)
 // ---------------------------------------------------------------------------
 static void udp_tx_task(void *arg)
 {
-    LOCK_TCPIP_CORE();
-    struct udp_pcb *pcb = udp_new();
-    UNLOCK_TCPIP_CORE();
-
-    if (!pcb) {
-        ESP_LOGE(TAG, "udp_new() failed");
-        vTaskDelete(NULL);
-        return;
+    // Wait until WiFi is up and UDP PCB is created
+    while (s_udp_pcb == NULL) {
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
-
-    ip_addr_t dst;
-    ipaddr_aton(UDP_REMOTE_IP, &dst);
 
     while (1) {
         size_t item_size = 0;
@@ -337,16 +287,18 @@ static void udp_tx_task(void *arg)
         if (!item) continue;
 
         LOCK_TCPIP_CORE();
-        struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)item_size, PBUF_RAM);
-        if (p) {
-            memcpy(p->payload, item, item_size);
-            err_t err = udp_sendto(pcb, p, &dst, UDP_REMOTE_PORT);
-            pbuf_free(p);
-            if (err != ERR_OK) {
-                ESP_LOGW(TAG, "udp_sendto err=%d", (int)err);
+        if (s_udp_pcb) {
+            struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)item_size, PBUF_RAM);
+            if (p) {
+                memcpy(p->payload, item, item_size);
+                err_t err = udp_send(s_udp_pcb, p);
+                if (err != ERR_OK) {
+                    ESP_LOGW(TAG, "udp_send err=%d", (int)err);
+                }
+                pbuf_free(p);
+            } else {
+                ESP_LOGW(TAG, "pbuf_alloc failed (out of pbufs)");
             }
-        } else {
-            ESP_LOGW(TAG, "pbuf_alloc failed");
         }
         UNLOCK_TCPIP_CORE();
 
@@ -355,7 +307,7 @@ static void udp_tx_task(void *arg)
 }
 
 // ---------------------------------------------------------------------------
-// TASK: i2s_tx — sends call audio to BT1036-B → headphones
+// TASK: i2s_tx — re-streams call audio via I2S1 to BT1036-B → BT headphones
 // ---------------------------------------------------------------------------
 static void i2s_tx_task(void *arg)
 {
@@ -398,6 +350,40 @@ static void i2s_tx_task(void *arg)
 }
 
 // ---------------------------------------------------------------------------
+// TASK: mic_task — reads headphone mic from I2S1 RX, writes directly to I2S0 TX → phone
+// No ring buffer: avoids cross-core SMP xRingbufferSend assert
+// ---------------------------------------------------------------------------
+static void mic_task(void *arg)
+{
+    int16_t *stereo_in  = (int16_t *)heap_caps_malloc(FRAME_BYTES_STEREO, MALLOC_CAP_8BIT);
+    int16_t *stereo_out = (int16_t *)heap_caps_malloc(FRAME_BYTES_STEREO, MALLOC_CAP_8BIT);
+    if (!stereo_in || !stereo_out) {
+        ESP_LOGE(TAG, "No memory for mic buffers");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    while (1) {
+        size_t bytes_read = 0;
+        esp_err_t err = i2s_channel_read(s_i2s_mic_rx, stereo_in, FRAME_BYTES_STEREO,
+                                         &bytes_read, portMAX_DELAY);
+        if (err != ESP_OK || bytes_read == 0) continue;
+
+        // BT1036-B always outputs stereo L+R; extract LEFT channel, expand back to stereo
+        size_t mono_samples = (bytes_read / 2) / 2;
+        for (size_t i = 0; i < mono_samples; i++) {
+            int16_t s = stereo_in[i * 2];
+            stereo_out[i * 2]     = s;
+            stereo_out[i * 2 + 1] = s;
+        }
+
+        size_t bytes_written = 0;
+        i2s_channel_write(s_i2s_call_tx, stereo_out, mono_samples * 4,
+                          &bytes_written, pdMS_TO_TICKS(100));
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 void app_main(void)
 {
@@ -410,10 +396,12 @@ void app_main(void)
     if (!s_rb_tx) { ESP_LOGE(TAG, "Failed to create s_rb_tx"); return; }
 
     ESP_ERROR_CHECK(i2s_init());
-    wm8960_init();
+
+    ESP_LOGI(TAG, "Free heap after init: %lu bytes", (unsigned long)esp_get_free_heap_size());
 
     // Core 0: I2S reads (time-critical)
     xTaskCreatePinnedToCore(i2s_rx_task, "i2s_rx", 4096, NULL, 20, NULL, 0);
+    xTaskCreatePinnedToCore(mic_task,    "mic",     4096, NULL, 20, NULL, 0);
 
     // Core 1: outputs
     xTaskCreatePinnedToCore(udp_tx_task, "udp_tx", 8192, NULL, 10, NULL, 1);
