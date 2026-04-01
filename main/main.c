@@ -35,7 +35,7 @@ static const char *TAG = "audio_stream";
 #define I2S_DOUT_GPIO   (GPIO_NUM_7)   // ESP32 → BT1036-A P32 DI  (mic TX to phone)
 
 // I2S1 — WM8960 DAC (headphone output)
-#define I2S1_MCLK_GPIO  (GPIO_NUM_3)   // MCLK → WM8960 MCLK
+#define I2S1_MCLK_GPIO  (GPIO_NUM_NC)  // MCLK не нужен — на плате WM8960 SparkFun уже стоит встроенный генератор 2MHz
 #define I2S1_BCLK_GPIO  (GPIO_NUM_15)  // BCLK → WM8960 BCLK
 #define I2S1_WS_GPIO    (GPIO_NUM_16)  // WS   → WM8960 DACLRC
 #define I2S1_DOUT_GPIO  (GPIO_NUM_17)  // DOUT → WM8960 DACDAT
@@ -54,7 +54,7 @@ static const char *TAG = "audio_stream";
 #define FRAME_BYTES_STEREO (SAMPLES_PER_FRAME * BYTES_PER_SAMPLE * 2)  // 640
 #define FRAME_BYTES_MONO   (SAMPLES_PER_FRAME * BYTES_PER_SAMPLE)      // 320
 
-#define RINGBUF_CAPACITY_BYTES (FRAME_BYTES_MONO * 50)
+#define RINGBUF_CAPACITY_BYTES (FRAME_BYTES_MONO * 8)
 
 #define UDP_REMOTE_IP   "192.168.1.214"
 #define UDP_REMOTE_PORT (5004)
@@ -62,6 +62,9 @@ static const char *TAG = "audio_stream";
 #define SW_GAIN 4   // software gain for call audio (AT+SPKVOL unavailable in I2S mode)
 
 // ---------------------------------------------------------
+
+// UDP PCB (raw lwIP, created on IP_EVENT_STA_GOT_IP)
+static struct udp_pcb *s_udp_pcb = NULL;
 
 // Ring buffers
 static RingbufHandle_t s_rb    = NULL;  // call audio → UDP
@@ -75,7 +78,8 @@ static i2s_chan_handle_t s_i2s_tx      = NULL;  // I2S1 TX: audio to external DA
 // ---------------------------------------------------------------------------
 // WM8960 init via I2C
 // ---------------------------------------------------------------------------
-static i2c_master_dev_handle_t s_wm8960 = NULL;
+static i2c_master_bus_handle_t s_i2c_bus = NULL;
+static i2c_master_dev_handle_t s_wm8960  = NULL;
 
 static esp_err_t wm8960_write(uint8_t reg, uint16_t val)
 {
@@ -84,7 +88,7 @@ static esp_err_t wm8960_write(uint8_t reg, uint16_t val)
         (uint8_t)((reg << 1) | ((val >> 8) & 0x01)),
         (uint8_t)(val & 0xFF),
     };
-    return i2c_master_transmit(s_wm8960, buf, sizeof(buf), pdMS_TO_TICKS(50));
+    return i2c_master_transmit(s_wm8960, buf, sizeof(buf), 50);  // 50ms, не pdMS_TO_TICKS
 }
 
 static void wm8960_init(void)
@@ -95,24 +99,30 @@ static void wm8960_init(void)
         .scl_io_num        = WM8960_SCL_GPIO,
         .clk_source        = I2C_CLK_SRC_DEFAULT,
         .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
+        .flags.enable_internal_pullup = false,  // на плате уже есть 2.2kΩ
     };
-    i2c_master_bus_handle_t bus;
-    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus));
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &s_i2c_bus));
 
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address  = WM8960_ADDR,
-        .scl_speed_hz    = 400000,
+        .scl_speed_hz    = 100000,
+        .scl_wait_us     = 1000,
     };
-    ESP_ERROR_CHECK(i2c_master_bus_add_device(bus, &dev_cfg, &s_wm8960));
+    ESP_ERROR_CHECK(i2c_master_bus_add_device(s_i2c_bus, &dev_cfg, &s_wm8960));
 
-    ESP_ERROR_CHECK(wm8960_write(0x0F, 0x000));   // Reset
+    ESP_ERROR_CHECK(i2c_master_probe(s_i2c_bus, WM8960_ADDR, 1000));
+    ESP_LOGI(TAG, "WM8960 detected at 0x%02X", WM8960_ADDR);
+
+    esp_err_t err = wm8960_write(0x0F, 0x000);  // Reset
+    ESP_LOGI(TAG, "reset write result = %s", esp_err_to_name(err));
+    ESP_ERROR_CHECK(err);
     vTaskDelay(pdMS_TO_TICKS(10));
 
-    // Power
+    // Power — VMID должен зарядиться до включения усилителей
     ESP_ERROR_CHECK(wm8960_write(0x19, 0x0C0));   // PWR1: VMID=50kΩ, VREF
-    ESP_ERROR_CHECK(wm8960_write(0x1A, 0x1E0));   // PWR2: DACL, DACR, LOUT1, ROUT1
+    vTaskDelay(pdMS_TO_TICKS(500));               // ждём зарядку VMID (50kΩ × C_internal)
+    ESP_ERROR_CHECK(wm8960_write(0x1A, 0x1E4));   // PWR2: DACL, DACR, LOUT1, ROUT1, OUT3(bit2)
     ESP_ERROR_CHECK(wm8960_write(0x2F, 0x00C));   // PWR3: LOMIX(bit3), ROMIX(bit2)
 
     // Audio interface: I2S format, 16-bit, slave (ESP32 is master)
@@ -125,11 +135,14 @@ static void wm8960_init(void)
     ESP_ERROR_CHECK(wm8960_write(0x22, 0x100));   // Left  Mix: LD2LO=1
     ESP_ERROR_CHECK(wm8960_write(0x24, 0x100));   // Right Mix: RD2RO=1
 
+    // Unmute DAC — default after reset is DACMU=1 (soft mute ON)
+    ESP_ERROR_CHECK(wm8960_write(0x05, 0x000));   // ADC/DAC CTL1: DACMU=0
+
     // Volumes: 0 dB everywhere
     ESP_ERROR_CHECK(wm8960_write(0x0A, 0x1FF));   // Left  DAC: 0dB + VU
     ESP_ERROR_CHECK(wm8960_write(0x0B, 0x1FF));   // Right DAC: 0dB + VU
-    ESP_ERROR_CHECK(wm8960_write(0x02, 0x179));   // LOUT1: 0dB + VU
-    ESP_ERROR_CHECK(wm8960_write(0x03, 0x179));   // ROUT1: 0dB + VU
+    ESP_ERROR_CHECK(wm8960_write(0x02, 0x179));   // LOUT1: +6dB + VU
+    ESP_ERROR_CHECK(wm8960_write(0x03, 0x179));   // ROUT1: +6dB + VU
 
     ESP_LOGI(TAG, "WM8960 initialized");
 }
@@ -169,7 +182,7 @@ static esp_err_t i2s_init(void)
             .clk_cfg = {
                 .sample_rate_hz = SAMPLE_RATE_HZ,
                 .clk_src        = I2S_CLK_SRC_DEFAULT,
-                .mclk_multiple  = I2S_MCLK_MULTIPLE_256,  // MCLK = 256*8000 = 2.048 MHz
+                .mclk_multiple  = I2S_MCLK_MULTIPLE_256,  // не выводится (MCLK_GPIO=NC), используется внутри ESP32 для делителя
             },
             .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
                                                             I2S_SLOT_MODE_STEREO),
@@ -200,12 +213,29 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        LOCK_TCPIP_CORE();
+        if (s_udp_pcb) { udp_remove(s_udp_pcb); s_udp_pcb = NULL; }
+        UNLOCK_TCPIP_CORE();
         esp_wifi_connect();
         xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         ESP_LOGI(TAG, "wifi disconnected, retrying");
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+        LOCK_TCPIP_CORE();
+        if (s_udp_pcb == NULL) {
+            s_udp_pcb = udp_new_ip_type(IPADDR_TYPE_V4);
+            if (s_udp_pcb) {
+                ip_addr_t dest;
+                IP4_ADDR(&dest.u_addr.ip4, 192, 168, 1, 214);
+                dest.type = IPADDR_TYPE_V4;
+                udp_connect(s_udp_pcb, &dest, UDP_REMOTE_PORT);
+                ESP_LOGI(TAG, "UDP PCB created and connected");
+            } else {
+                ESP_LOGE(TAG, "udp_new_ip_type() failed");
+            }
+        }
+        UNLOCK_TCPIP_CORE();
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
 }
@@ -318,18 +348,10 @@ static void i2s_rx_task(void *arg)
 // ---------------------------------------------------------------------------
 static void udp_tx_task(void *arg)
 {
-    LOCK_TCPIP_CORE();
-    struct udp_pcb *pcb = udp_new();
-    UNLOCK_TCPIP_CORE();
-
-    if (!pcb) {
-        ESP_LOGE(TAG, "udp_new() failed");
-        vTaskDelete(NULL);
-        return;
+    // Wait until wifi_event_handler creates the PCB after IP assignment
+    while (s_udp_pcb == NULL) {
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
-
-    ip_addr_t dst;
-    ipaddr_aton(UDP_REMOTE_IP, &dst);
 
     while (1) {
         size_t item_size = 0;
@@ -337,16 +359,18 @@ static void udp_tx_task(void *arg)
         if (!item) continue;
 
         LOCK_TCPIP_CORE();
-        struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)item_size, PBUF_RAM);
-        if (p) {
-            memcpy(p->payload, item, item_size);
-            err_t err = udp_sendto(pcb, p, &dst, UDP_REMOTE_PORT);
-            pbuf_free(p);
-            if (err != ERR_OK) {
-                ESP_LOGW(TAG, "udp_sendto err=%d", (int)err);
+        if (s_udp_pcb) {
+            struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)item_size, PBUF_RAM);
+            if (p) {
+                memcpy(p->payload, item, item_size);
+                err_t err = udp_send(s_udp_pcb, p);
+                pbuf_free(p);
+                if (err != ERR_OK) {
+                    ESP_LOGW(TAG, "udp_send err=%d", (int)err);
+                }
+            } else {
+                ESP_LOGW(TAG, "pbuf_alloc failed");
             }
-        } else {
-            ESP_LOGW(TAG, "pbuf_alloc failed");
         }
         UNLOCK_TCPIP_CORE();
 
@@ -403,14 +427,15 @@ void app_main(void)
 {
     wifi_connect_sta();
 
-    s_rb = xRingbufferCreate(RINGBUF_CAPACITY_BYTES, RINGBUF_TYPE_BYTEBUF);
+    s_rb = xRingbufferCreate(RINGBUF_CAPACITY_BYTES, RINGBUF_TYPE_NOSPLIT);
     if (!s_rb) { ESP_LOGE(TAG, "Failed to create s_rb"); return; }
 
-    s_rb_tx = xRingbufferCreate(RINGBUF_CAPACITY_BYTES, RINGBUF_TYPE_BYTEBUF);
+    s_rb_tx = xRingbufferCreate(RINGBUF_CAPACITY_BYTES, RINGBUF_TYPE_NOSPLIT);
     if (!s_rb_tx) { ESP_LOGE(TAG, "Failed to create s_rb_tx"); return; }
 
     ESP_ERROR_CHECK(i2s_init());
     wm8960_init();
+    ESP_LOGI(TAG, "Free heap after init: %lu bytes", (unsigned long)esp_get_free_heap_size());
 
     // Core 0: I2S reads (time-critical)
     xTaskCreatePinnedToCore(i2s_rx_task, "i2s_rx", 4096, NULL, 20, NULL, 0);
