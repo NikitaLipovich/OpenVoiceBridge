@@ -73,7 +73,7 @@ static const char *TAG = "audio_stream";
 #define UDP_REMOTE_PORT  (5004)   // call audio: phone → headphones
 #define UDP_MIC_PORT     (5005)   // mic audio:  headset mic → phone
 
-#define SW_GAIN     8    // software gain for call audio (4=+12dB, 8=+18dB)
+#define SW_GAIN     4    // software gain for call audio. 8 caused clipping on peaks >4096.
 
 // ---------------------------------------------------------
 
@@ -199,7 +199,9 @@ static esp_err_t i2s_init(void)
 
     // I2S1: full-duplex — WM8960 DAC (headphones TX) + ADC (mic RX)
     {
-        i2s_chan_config_t cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+        i2s_chan_config_t cfg    = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+        cfg.dma_desc_num  = 8;   // more DMA descriptors (default 6)
+        cfg.dma_frame_num = 480; // larger per-descriptor buffer (default 240) → ~480ms hardware buffer
         ESP_ERROR_CHECK(i2s_new_channel(&cfg, &s_i2s_tx, &s_i2s_mic));
 
         i2s_std_config_t std = {
@@ -344,13 +346,23 @@ static void i2s_rx_task(void *arg)
             continue;
         }
 
-        // BT1036 always outputs stereo L+R; extract LEFT channel + apply gain
+        // BT1036 always outputs stereo L+R; extract LEFT channel + apply gain + soft limit.
+        // Soft limiter: linear below SW_LIMIT_THRESHOLD, hyperbolic above.
+        //   y = T + excess*(MAX-T)/(MAX-T+excess)  →  asymptotically approaches MAX, no hard clip.
+        #define SW_LIMIT_THRESHOLD  16384   // ~0.5 FS: linear zone
+        #define SW_LIMIT_MAX        32700   // ceiling (just below 32767 for safety)
         size_t mono_samples = (bytes_read / 2) / 2;
         for (size_t i = 0; i < mono_samples; i++) {
             int32_t v = (int32_t)stereo[i * 2] * SW_GAIN;
-            if (v >  32767) v =  32767;
-            if (v < -32768) v = -32768;
-            mono[i] = (int16_t)v;
+            // Apply soft limiter symmetrically
+            int32_t sign = (v < 0) ? -1 : 1;
+            int32_t a    = v * sign;  // absolute value
+            if (a > SW_LIMIT_THRESHOLD) {
+                int32_t excess  = a - SW_LIMIT_THRESHOLD;
+                int32_t headroom = SW_LIMIT_MAX - SW_LIMIT_THRESHOLD;
+                a = SW_LIMIT_THRESHOLD + (excess * headroom) / (headroom + excess);
+            }
+            mono[i] = (int16_t)(sign * a);
         }
         size_t mono_bytes = mono_samples * 2;
 
@@ -369,8 +381,8 @@ static void i2s_rx_task(void *arg)
         if (xRingbufferSend(s_rb, mono, mono_bytes, pdMS_TO_TICKS(50)) != pdTRUE) {
             ESP_LOGW(TAG, "s_rb full, dropping frame");
         }
-        if (xRingbufferSend(s_rb_tx, mono, mono_bytes, pdMS_TO_TICKS(10)) != pdTRUE) {
-            // headphone path drop is non-fatal
+        if (xRingbufferSend(s_rb_tx, mono, mono_bytes, pdMS_TO_TICKS(25)) != pdTRUE) {
+            ESP_LOGW(TAG, "s_rb_tx full, dropping headphone frame");
         }
         // Feed AEC reference: the call audio that goes to headphones (echo source)
         aec_write_reference(mono, mono_samples);
@@ -453,22 +465,26 @@ static void i2s_tx_task(void *arg)
         return;
     }
 
-    uint32_t tx_frame = 0;
+    uint32_t tx_frame  = 0;
+    uint32_t write_err = 0;
     while (1) {
-        size_t item_size = 0;
-        int16_t *item = (int16_t *)xRingbufferReceive(s_rb_tx, &item_size, portMAX_DELAY);
+        size_t   item_size = 0;
+        int16_t *item      = (int16_t *)xRingbufferReceive(s_rb_tx, &item_size,
+                                                            portMAX_DELAY);
         if (!item) continue;
 
-        // Expand mono → stereo (L = R)
         size_t mono_samples = item_size / 2;
+        // Expand mono → stereo (L = R)
         for (size_t i = 0; i < mono_samples; i++) {
             stereo_out[i * 2]     = item[i];
             stereo_out[i * 2 + 1] = item[i];
         }
 
-        size_t bytes_written = 0;
+        size_t    bytes_written = 0;
         esp_err_t err = i2s_channel_write(s_i2s_tx, stereo_out, mono_samples * 4,
-                                          &bytes_written, pdMS_TO_TICKS(100));
+                                          &bytes_written, pdMS_TO_TICKS(200));
+        if (err != ESP_OK) write_err++;
+
         tx_frame++;
         if (tx_frame % 50 == 0) {
             int16_t max_val = 0;
@@ -476,9 +492,8 @@ static void i2s_tx_task(void *arg)
                 int16_t v = item[i] < 0 ? -item[i] : item[i];
                 if (v > max_val) max_val = v;
             }
-            ESP_LOGI(TAG, "hp_tx frame=%lu written=%u max=%d err=%s",
-                     (unsigned long)tx_frame, (unsigned)bytes_written, max_val,
-                     esp_err_to_name(err));
+            ESP_LOGI(TAG, "hp_tx frame=%lu write_err=%lu max=%d",
+                     (unsigned long)tx_frame, (unsigned long)write_err, max_val);
         }
         vRingbufferReturnItem(s_rb_tx, item);
     }
@@ -669,7 +684,7 @@ void app_main(void)
     s_rb = xRingbufferCreate(RINGBUF_CAPACITY_BYTES, RINGBUF_TYPE_NOSPLIT);
     if (!s_rb) { ESP_LOGE(TAG, "Failed to create s_rb"); return; }
 
-    s_rb_tx = xRingbufferCreate(RINGBUF_CAPACITY_BYTES, RINGBUF_TYPE_NOSPLIT);
+    s_rb_tx = xRingbufferCreate(RINGBUF_CAPACITY_BYTES * 2, RINGBUF_TYPE_NOSPLIT);  // 2× headroom for BT jitter
     if (!s_rb_tx) { ESP_LOGE(TAG, "Failed to create s_rb_tx"); return; }
 
     s_rb_mic = xRingbufferCreate(RINGBUF_CAPACITY_BYTES, RINGBUF_TYPE_NOSPLIT);
