@@ -57,19 +57,22 @@ static const char *TAG = "audio_stream";
 
 #define RINGBUF_CAPACITY_BYTES (FRAME_BYTES_MONO * 8)
 
-#define UDP_REMOTE_IP   "192.168.1.214"
-#define UDP_REMOTE_PORT (5004)
+#define UDP_REMOTE_IP    "192.168.1.214"
+#define UDP_REMOTE_PORT  (5004)   // call audio: phone → headphones
+#define UDP_MIC_PORT     (5005)   // mic audio:  headset mic → phone
 
-#define SW_GAIN 4   // software gain for call audio (AT+SPKVOL unavailable in I2S mode)
+#define SW_GAIN 8   // software gain for call audio (4=+12dB, 8=+18dB)
 
 // ---------------------------------------------------------
 
-// UDP PCB (raw lwIP, created on IP_EVENT_STA_GOT_IP)
-static struct udp_pcb *s_udp_pcb = NULL;
+// UDP PCBs (raw lwIP, created on IP_EVENT_STA_GOT_IP)
+static struct udp_pcb *s_udp_pcb     = NULL;  // port 5004: call audio
+static struct udp_pcb *s_udp_mic_pcb = NULL;  // port 5005: mic audio
 
 // Ring buffers
-static RingbufHandle_t s_rb    = NULL;  // call audio → UDP
-static RingbufHandle_t s_rb_tx = NULL;  // call audio → DAC headphones
+static RingbufHandle_t s_rb     = NULL;  // call audio → UDP 5004
+static RingbufHandle_t s_rb_tx  = NULL;  // call audio → DAC headphones
+static RingbufHandle_t s_rb_mic = NULL;  // mic audio  → UDP 5005
 
 // I2S handles
 static i2s_chan_handle_t s_i2s_rx      = NULL;  // I2S0 RX: call from BT1036-A
@@ -222,7 +225,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         LOCK_TCPIP_CORE();
-        if (s_udp_pcb) { udp_remove(s_udp_pcb); s_udp_pcb = NULL; }
+        if (s_udp_pcb)     { udp_remove(s_udp_pcb);     s_udp_pcb     = NULL; }
+        if (s_udp_mic_pcb) { udp_remove(s_udp_mic_pcb); s_udp_mic_pcb = NULL; }
         UNLOCK_TCPIP_CORE();
         esp_wifi_connect();
         xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
@@ -230,17 +234,22 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+        ip_addr_t dest;
+        IP4_ADDR(&dest.u_addr.ip4, 192, 168, 1, 214);
+        dest.type = IPADDR_TYPE_V4;
         LOCK_TCPIP_CORE();
         if (s_udp_pcb == NULL) {
             s_udp_pcb = udp_new_ip_type(IPADDR_TYPE_V4);
             if (s_udp_pcb) {
-                ip_addr_t dest;
-                IP4_ADDR(&dest.u_addr.ip4, 192, 168, 1, 214);
-                dest.type = IPADDR_TYPE_V4;
                 udp_connect(s_udp_pcb, &dest, UDP_REMOTE_PORT);
-                ESP_LOGI(TAG, "UDP PCB created and connected");
-            } else {
-                ESP_LOGE(TAG, "udp_new_ip_type() failed");
+                ESP_LOGI(TAG, "UDP call PCB created (port %d)", UDP_REMOTE_PORT);
+            }
+        }
+        if (s_udp_mic_pcb == NULL) {
+            s_udp_mic_pcb = udp_new_ip_type(IPADDR_TYPE_V4);
+            if (s_udp_mic_pcb) {
+                udp_connect(s_udp_mic_pcb, &dest, UDP_MIC_PORT);
+                ESP_LOGI(TAG, "UDP mic PCB created (port %d)", UDP_MIC_PORT);
             }
         }
         UNLOCK_TCPIP_CORE();
@@ -387,6 +396,35 @@ static void udp_tx_task(void *arg)
 }
 
 // ---------------------------------------------------------------------------
+// TASK: mic_udp_tx — sends headset mic audio to PC over UDP port 5005
+// ---------------------------------------------------------------------------
+static void mic_udp_tx_task(void *arg)
+{
+    while (s_udp_mic_pcb == NULL) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    while (1) {
+        size_t item_size = 0;
+        uint8_t *item = (uint8_t *)xRingbufferReceive(s_rb_mic, &item_size, portMAX_DELAY);
+        if (!item) continue;
+
+        LOCK_TCPIP_CORE();
+        if (s_udp_mic_pcb) {
+            struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)item_size, PBUF_RAM);
+            if (p) {
+                memcpy(p->payload, item, item_size);
+                udp_send(s_udp_mic_pcb, p);
+                pbuf_free(p);
+            }
+        }
+        UNLOCK_TCPIP_CORE();
+
+        vRingbufferReturnItem(s_rb_mic, item);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TASK: i2s_tx — sends call audio to BT1036-B → headphones
 // ---------------------------------------------------------------------------
 static void i2s_tx_task(void *arg)
@@ -475,6 +513,18 @@ static void mic_rx_task(void *arg)
             stereo[i * 2 + 1] = left;
         }
 
+        // Pack mono (left channel) into first half of buffer, then send to UDP
+        for (size_t i = 0; i < samples; i++) {
+            stereo[i] = stereo[i * 2];  // compact: L0,L1,L2...
+        }
+        xRingbufferSend(s_rb_mic, stereo, samples * 2, 0);  // mono 320 bytes
+
+        // Rebuild stereo for I2S0 TX (L=R=mic)
+        for (size_t i = samples; i-- > 0; ) {
+            stereo[i * 2]     = stereo[i];
+            stereo[i * 2 + 1] = stereo[i];
+        }
+
         size_t bytes_written = 0;
         i2s_channel_write(s_i2s_call_tx, stereo, samples * 4,
                           &bytes_written, pdMS_TO_TICKS(100));
@@ -493,15 +543,19 @@ void app_main(void)
     s_rb_tx = xRingbufferCreate(RINGBUF_CAPACITY_BYTES, RINGBUF_TYPE_NOSPLIT);
     if (!s_rb_tx) { ESP_LOGE(TAG, "Failed to create s_rb_tx"); return; }
 
+    s_rb_mic = xRingbufferCreate(RINGBUF_CAPACITY_BYTES, RINGBUF_TYPE_NOSPLIT);
+    if (!s_rb_mic) { ESP_LOGE(TAG, "Failed to create s_rb_mic"); return; }
+
     ESP_ERROR_CHECK(i2s_init());
     wm8960_init();
     ESP_LOGI(TAG, "Free heap after init: %lu bytes", (unsigned long)esp_get_free_heap_size());
 
     // Core 0: I2S reads (time-critical)
-    xTaskCreatePinnedToCore(i2s_rx_task,  "i2s_rx",  4096, NULL, 20, NULL, 0);
-    xTaskCreatePinnedToCore(mic_rx_task,  "mic_rx",  4096, NULL, 19, NULL, 0);
+    xTaskCreatePinnedToCore(i2s_rx_task,     "i2s_rx",  4096, NULL, 20, NULL, 0);
+    xTaskCreatePinnedToCore(mic_rx_task,     "mic_rx",  4096, NULL, 19, NULL, 0);
 
     // Core 1: outputs
-    xTaskCreatePinnedToCore(udp_tx_task, "udp_tx", 8192, NULL, 10, NULL, 1);
-    xTaskCreatePinnedToCore(i2s_tx_task, "i2s_tx", 4096, NULL, 15, NULL, 1);
+    xTaskCreatePinnedToCore(udp_tx_task,     "udp_tx",  8192, NULL, 10, NULL, 1);
+    xTaskCreatePinnedToCore(mic_udp_tx_task, "mic_udp", 8192, NULL, 10, NULL, 1);
+    xTaskCreatePinnedToCore(i2s_tx_task,     "i2s_tx",  4096, NULL, 15, NULL, 1);
 }
