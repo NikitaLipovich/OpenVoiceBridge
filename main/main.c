@@ -529,31 +529,32 @@ static void mic_rx_task(void *arg)
                      max_val > 100 ? "<<< MIC" : "(silence)");
         }
 
-        // DC-block (HPF ~20 Hz) + biquad notch at 50 Hz and 150 Hz (mains hum).
+        // HPF ~80 Hz (1-pole, α=30651 Q15) + biquad notch at 50/150/250 Hz (mains hum harmonics).
         // Notch: H(z)=(1-2cos(w0)z^-1+z^-2)/(1-2r*cos(w0)z^-1+r^2*z^-2), r=0.95
         // Coefficients Q14 (×16384). Stability verified: poles at |z|=0.95 < 1.
         //   50 Hz:  cos=0.99923 → b1=-32728, a1=-31100, a2=14786
         //   150 Hz: cos=0.99307 → b1=-32542, a1=-30905, a2=14786
+        //   250 Hz: cos=0.98079 → b1=-32127, a1=-30521, a2=14786
         {
             static int32_t s_hp_x_prev = 0, s_hp_y_prev = 0;
-            static int32_t xp1[2]={0,0}, xp2[2]={0,0};
-            static int32_t yp1[2]={0,0}, yp2[2]={0,0};
-            static const int32_t b1[2] = {-32728, -32542};
-            static const int32_t a1[2] = {-31100, -30905};
+            static int32_t xp1[3]={0,0,0}, xp2[3]={0,0,0};
+            static int32_t yp1[3]={0,0,0}, yp2[3]={0,0,0};
+            static const int32_t b1[3] = {-32728, -32542, -32127};
+            static const int32_t a1[3] = {-31100, -30905, -30521};
             static const int32_t a2    =  14786;
 
             for (size_t i = 0; i < samples; i++) {
-                // DC-block
+                // HPF ~80 Hz (α=30651 Q15, -3dB @ 80 Hz)
                 int32_t x = stereo[i * 2];
-                int32_t y = x - s_hp_x_prev + ((32277 * s_hp_y_prev) >> 15);
+                int32_t y = x - s_hp_x_prev + ((30651 * s_hp_y_prev) >> 15);
                 if (y >  32767) y =  32767;
                 if (y < -32768) y = -32768;
                 s_hp_x_prev = x;
                 s_hp_y_prev = y;
                 x = y;
 
-                // Two notch biquads in series (50 Hz, then 150 Hz)
-                for (int k = 0; k < 2; k++) {
+                // Three notch biquads in series (50 Hz, 150 Hz, 250 Hz)
+                for (int k = 0; k < 3; k++) {
                     y = x
                       + ((b1[k] * xp1[k]) >> 14)
                       + xp2[k]
@@ -569,12 +570,16 @@ static void mic_rx_task(void *arg)
             }
         }
 
-        // Frame-level noise gate with hysteresis + hold time.
+        // Frame-level noise gate with hysteresis + Wiener noise suppression.
+        // During silence (gate closed):  update noise floor estimate, mute output.
+        // During speech (gate open):     apply Wiener gain g = max(0, 1 - N/S) to
+        //                                suppress residual noise proportional to SNR.
         // gate_open: 1 = passing audio, 0 = muted.
-        // close_count: counts consecutive low-RMS frames before gate closes.
         {
-            static int s_gate_open   = 0;
-            static int s_close_count = 0;
+            static int     s_gate_open    = 0;
+            static int     s_close_count  = 0;
+            static int32_t s_noise_sq     = 0;  // noise floor mean_sq estimate
+            static int     s_noise_valid  = 0;  // 1 once we have ≥1 silent frame
 
             int64_t sum_sq = 0;
             for (size_t i = 0; i < samples; i++) {
@@ -585,6 +590,13 @@ static void mic_rx_task(void *arg)
             int32_t mean_sq = (int32_t)(sum_sq / (int64_t)samples);
 
             if (!s_gate_open) {
+                // Update noise floor with exponential smoothing (τ ≈ 0.3 s at 20ms frames)
+                if (!s_noise_valid) {
+                    s_noise_sq    = mean_sq;
+                    s_noise_valid = 1;
+                } else {
+                    s_noise_sq = (int32_t)(((int64_t)s_noise_sq * 30 + (int64_t)mean_sq * 2) >> 5);
+                }
                 // Gate closed: open if RMS exceeds OPEN threshold
                 if (mean_sq >= (int32_t)NOISE_GATE_OPEN * NOISE_GATE_OPEN) {
                     s_gate_open   = 1;
@@ -608,8 +620,19 @@ static void mic_rx_task(void *arg)
                     stereo[i * 2 + 1] = 0;
                 }
             } else {
+                // Wiener gain in Q14: g = max(0, 1 - noise_sq/signal_sq)
+                // Suppresses residual noise during speech without hard gating.
+                int32_t g_Q14 = 16384;  // 1.0 in Q14 (no suppression by default)
+                if (s_noise_valid && mean_sq > s_noise_sq && mean_sq > 0) {
+                    int32_t ratio_Q14 = (int32_t)(((int64_t)s_noise_sq << 14) / mean_sq);
+                    g_Q14 = 16384 - ratio_Q14;
+                    if (g_Q14 < 0)     g_Q14 = 0;
+                    if (g_Q14 > 16384) g_Q14 = 16384;
+                }
                 for (size_t i = 0; i < samples; i++) {
-                    int32_t v = (int32_t)stereo[i * 2] * MIC_SW_GAIN;
+                    // Apply SW gain and Wiener gain together to avoid extra multiply stage.
+                    // Max intermediate: 32767 × MIC_SW_GAIN × 16384 fits in int32 when gain≤2.
+                    int32_t v = (((int32_t)stereo[i * 2] * MIC_SW_GAIN) * g_Q14) >> 14;
                     if (v >  32767) v =  32767;
                     if (v < -32768) v = -32768;
                     stereo[i * 2]     = (int16_t)v;
