@@ -24,6 +24,8 @@
 #include "driver/i2s_std.h"
 #include "driver/i2c_master.h"
 
+#include "aec.h"
+
 static const char *TAG = "audio_stream";
 
 // -------------------- Settings (edit) --------------------
@@ -57,11 +59,21 @@ static const char *TAG = "audio_stream";
 
 #define RINGBUF_CAPACITY_BYTES (FRAME_BYTES_MONO * 8)
 
+// Frame-level noise gate with hysteresis + hold time.
+// Opens when frame RMS exceeds OPEN threshold.
+// Closes only after RMS stays below CLOSE threshold for HOLD_FRAMES consecutive frames.
+// Prevents choppy stutter on natural phoneme silences (p/t/k stops last ~20ms).
+#define NOISE_GATE_OPEN       450   // RMS to open gate
+#define NOISE_GATE_CLOSE      380   // RMS to start hold-down counter (raised above noise floor)
+#define NOISE_GATE_HOLD       4     // frames (~80ms) RMS must stay low to actually close
+
+#define MIC_SW_GAIN           2     // SW gain after hardware +59dB. Lapel mic is hot; 4 caused 4% clip.
+
 #define UDP_REMOTE_IP    "192.168.1.214"
 #define UDP_REMOTE_PORT  (5004)   // call audio: phone → headphones
 #define UDP_MIC_PORT     (5005)   // mic audio:  headset mic → phone
 
-#define SW_GAIN 8   // software gain for call audio (4=+12dB, 8=+18dB)
+#define SW_GAIN     8    // software gain for call audio (4=+12dB, 8=+18dB)
 
 // ---------------------------------------------------------
 
@@ -125,7 +137,7 @@ static void wm8960_init(void)
     vTaskDelay(pdMS_TO_TICKS(10));
 
     // Power — VMID должен зарядиться до включения усилителей
-    ESP_ERROR_CHECK(wm8960_write(0x19, 0x0EA));   // PWR1: VMID=50kΩ, VREF, AINL(bit5), ADCL(bit3), MICB(bit1)
+    ESP_ERROR_CHECK(wm8960_write(0x19, 0x0FE));   // PWR1: VMID=50kΩ, VREF, AINL, AINR, ADCL, ADCR, MICB
     vTaskDelay(pdMS_TO_TICKS(500));               // ждём зарядку VMID (50kΩ × C_internal)
     ESP_ERROR_CHECK(wm8960_write(0x1A, 0x1E4));   // PWR2: DACL, DACR, LOUT1, ROUT1, OUT3(bit2)
     ESP_ERROR_CHECK(wm8960_write(0x2F, 0x02C));   // PWR3: LMIC(bit5), LOMIX(bit3), ROMIX(bit2)
@@ -150,8 +162,11 @@ static void wm8960_init(void)
     ESP_ERROR_CHECK(wm8960_write(0x03, 0x179));   // ROUT1: 0dB + VU
 
     // Microphone path: LINPUT1 → PGA → Boost → ADC → ADAT
-    ESP_ERROR_CHECK(wm8960_write(0x00, 0x132));   // Left PGA: unmute, +20dB(LINVOL=50), IPVU(bit8)
-    ESP_ERROR_CHECK(wm8960_write(0x20, 0x138));   // L ADC path: LMN1(bit8), boost=+29dB(bits5:4=11), LMIC2B(bit3)
+    // Fixed gain; ALC disabled (reset default). ADC digital volume at reset default (0dB).
+    ESP_ERROR_CHECK(wm8960_write(0x00, 0x13F));   // Left  PGA: unmute, +30dB, IPVU
+    ESP_ERROR_CHECK(wm8960_write(0x01, 0x13F));   // Right PGA: unmute, +30dB, IPVU
+    ESP_ERROR_CHECK(wm8960_write(0x20, 0x138));   // L ADC: LINPUT1, boost=+29dB, PGA→boost
+    ESP_ERROR_CHECK(wm8960_write(0x21, 0x138));   // R ADC: RINPUT1, boost=+29dB, PGA→boost
 
     ESP_LOGI(TAG, "WM8960 initialized");
 }
@@ -357,6 +372,8 @@ static void i2s_rx_task(void *arg)
         if (xRingbufferSend(s_rb_tx, mono, mono_bytes, pdMS_TO_TICKS(10)) != pdTRUE) {
             // headphone path drop is non-fatal
         }
+        // Feed AEC reference: the call audio that goes to headphones (echo source)
+        aec_write_reference(mono, mono_samples);
     }
 }
 
@@ -490,9 +507,14 @@ static void mic_rx_task(void *arg)
             continue;
         }
 
-        // WM8960 ADC: left channel = mic, right = 0 (only ADCL enabled)
-        // Extract left, duplicate to right for BT1036-A I2S0 TX (expects stereo)
         size_t samples = bytes_read / 4;
+
+        // Average L and R channels → stereo[i*2] = (L+R)/2.
+        // Uncorrelated ADC noise cancels by ~3dB; correlated signal (mic) preserved.
+        for (size_t i = 0; i < samples; i++) {
+            int32_t avg = ((int32_t)stereo[i * 2] + (int32_t)stereo[i * 2 + 1]) / 2;
+            stereo[i * 2] = (int16_t)avg;
+        }
 
         mic_frame++;
         if (mic_frame % 50 == 0) {
@@ -507,19 +529,103 @@ static void mic_rx_task(void *arg)
                      max_val > 100 ? "<<< MIC" : "(silence)");
         }
 
-        for (size_t i = 0; i < samples; i++) {
-            int16_t left = stereo[i * 2];
-            stereo[i * 2]     = left;
-            stereo[i * 2 + 1] = left;
+        // DC-block (HPF ~20 Hz) + biquad notch at 50 Hz and 150 Hz (mains hum).
+        // Notch: H(z)=(1-2cos(w0)z^-1+z^-2)/(1-2r*cos(w0)z^-1+r^2*z^-2), r=0.95
+        // Coefficients Q14 (×16384). Stability verified: poles at |z|=0.95 < 1.
+        //   50 Hz:  cos=0.99923 → b1=-32728, a1=-31100, a2=14786
+        //   150 Hz: cos=0.99307 → b1=-32542, a1=-30905, a2=14786
+        {
+            static int32_t s_hp_x_prev = 0, s_hp_y_prev = 0;
+            static int32_t xp1[2]={0,0}, xp2[2]={0,0};
+            static int32_t yp1[2]={0,0}, yp2[2]={0,0};
+            static const int32_t b1[2] = {-32728, -32542};
+            static const int32_t a1[2] = {-31100, -30905};
+            static const int32_t a2    =  14786;
+
+            for (size_t i = 0; i < samples; i++) {
+                // DC-block
+                int32_t x = stereo[i * 2];
+                int32_t y = x - s_hp_x_prev + ((32277 * s_hp_y_prev) >> 15);
+                if (y >  32767) y =  32767;
+                if (y < -32768) y = -32768;
+                s_hp_x_prev = x;
+                s_hp_y_prev = y;
+                x = y;
+
+                // Two notch biquads in series (50 Hz, then 150 Hz)
+                for (int k = 0; k < 2; k++) {
+                    y = x
+                      + ((b1[k] * xp1[k]) >> 14)
+                      + xp2[k]
+                      - ((a1[k] * yp1[k]) >> 14)
+                      - ((a2    * yp2[k]) >> 14);
+                    if (y >  32767) y =  32767;
+                    if (y < -32768) y = -32768;
+                    xp2[k] = xp1[k]; xp1[k] = x;
+                    yp2[k] = yp1[k]; yp1[k] = y;
+                    x = y;
+                }
+                stereo[i * 2] = (int16_t)x;
+            }
         }
 
-        // Pack mono (left channel) into first half of buffer, then send to UDP
-        for (size_t i = 0; i < samples; i++) {
-            stereo[i] = stereo[i * 2];  // compact: L0,L1,L2...
-        }
-        xRingbufferSend(s_rb_mic, stereo, samples * 2, 0);  // mono 320 bytes
+        // Frame-level noise gate with hysteresis + hold time.
+        // gate_open: 1 = passing audio, 0 = muted.
+        // close_count: counts consecutive low-RMS frames before gate closes.
+        {
+            static int s_gate_open   = 0;
+            static int s_close_count = 0;
 
-        // Rebuild stereo for I2S0 TX (L=R=mic)
+            int64_t sum_sq = 0;
+            for (size_t i = 0; i < samples; i++) {
+                int32_t v = stereo[i * 2];
+                sum_sq += v * v;
+            }
+            // mean_sq vs threshold² avoids sqrt; same as comparing RMS to threshold
+            int32_t mean_sq = (int32_t)(sum_sq / (int64_t)samples);
+
+            if (!s_gate_open) {
+                // Gate closed: open if RMS exceeds OPEN threshold
+                if (mean_sq >= (int32_t)NOISE_GATE_OPEN * NOISE_GATE_OPEN) {
+                    s_gate_open   = 1;
+                    s_close_count = 0;
+                }
+            } else {
+                // Gate open: count consecutive frames below CLOSE threshold
+                if (mean_sq < (int32_t)NOISE_GATE_CLOSE * NOISE_GATE_CLOSE) {
+                    if (++s_close_count >= NOISE_GATE_HOLD) {
+                        s_gate_open   = 0;
+                        s_close_count = 0;
+                    }
+                } else {
+                    s_close_count = 0;  // reset counter on any loud frame
+                }
+            }
+
+            if (!s_gate_open) {
+                for (size_t i = 0; i < samples; i++) {
+                    stereo[i * 2]     = 0;
+                    stereo[i * 2 + 1] = 0;
+                }
+            } else {
+                for (size_t i = 0; i < samples; i++) {
+                    int32_t v = (int32_t)stereo[i * 2] * MIC_SW_GAIN;
+                    if (v >  32767) v =  32767;
+                    if (v < -32768) v = -32768;
+                    stereo[i * 2]     = (int16_t)v;
+                    stereo[i * 2 + 1] = stereo[i * 2];
+                }
+            }
+        }
+
+        // Pack mono (L channel) into first half, apply AEC, send to UDP ringbuf.
+        for (size_t i = 0; i < samples; i++) {
+            stereo[i] = stereo[i * 2];
+        }
+        aec_process(stereo, samples);
+        xRingbufferSend(s_rb_mic, stereo, samples * 2, 0);
+
+        // Rebuild stereo L=R=mic (reverse to avoid overlap)
         for (size_t i = samples; i-- > 0; ) {
             stereo[i * 2]     = stereo[i];
             stereo[i * 2 + 1] = stereo[i];
@@ -548,11 +654,13 @@ void app_main(void)
 
     ESP_ERROR_CHECK(i2s_init());
     wm8960_init();
+    aec_init();
+
     ESP_LOGI(TAG, "Free heap after init: %lu bytes", (unsigned long)esp_get_free_heap_size());
 
     // Core 0: I2S reads (time-critical)
-    xTaskCreatePinnedToCore(i2s_rx_task,     "i2s_rx",  4096, NULL, 20, NULL, 0);
-    xTaskCreatePinnedToCore(mic_rx_task,     "mic_rx",  4096, NULL, 19, NULL, 0);
+    xTaskCreatePinnedToCore(i2s_rx_task,   "i2s_rx",  4096, NULL, 20, NULL, 0);
+    xTaskCreatePinnedToCore(mic_rx_task,   "mic_rx",  4096, NULL, 19, NULL, 0);
 
     // Core 1: outputs
     xTaskCreatePinnedToCore(udp_tx_task,     "udp_tx",  8192, NULL, 10, NULL, 1);
