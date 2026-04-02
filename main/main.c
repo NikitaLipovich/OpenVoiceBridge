@@ -34,11 +34,12 @@ static const char *TAG = "audio_stream";
 #define I2S_DIN_GPIO    (GPIO_NUM_6)   // BT1036-A P33 DO → ESP32  (call audio RX)
 #define I2S_DOUT_GPIO   (GPIO_NUM_7)   // ESP32 → BT1036-A P32 DI  (mic TX to phone)
 
-// I2S1 — WM8960 DAC (headphone output)
+// I2S1 — WM8960 DAC (headphone output) + ADC (microphone input)
 #define I2S1_MCLK_GPIO  (GPIO_NUM_NC)  // MCLK не нужен — на плате WM8960 SparkFun уже стоит встроенный генератор 2MHz
-#define I2S1_BCLK_GPIO  (GPIO_NUM_15)  // BCLK → WM8960 BCLK
-#define I2S1_WS_GPIO    (GPIO_NUM_16)  // WS   → WM8960 DACLRC
-#define I2S1_DOUT_GPIO  (GPIO_NUM_17)  // DOUT → WM8960 DACDAT
+#define I2S1_BCLK_GPIO  (GPIO_NUM_15)  // BCLK → WM8960 DCLK
+#define I2S1_WS_GPIO    (GPIO_NUM_16)  // WS   → WM8960 DLRC + ALRC (перемычка на плате)
+#define I2S1_DOUT_GPIO  (GPIO_NUM_17)  // DOUT → WM8960 DDAT
+#define I2S1_DIN_GPIO   (GPIO_NUM_18)  // DIN  ← WM8960 ADAT (mic ADC output)
 
 // I2C — WM8960 control
 #define WM8960_SDA_GPIO (GPIO_NUM_8)
@@ -73,7 +74,8 @@ static RingbufHandle_t s_rb_tx = NULL;  // call audio → DAC headphones
 // I2S handles
 static i2s_chan_handle_t s_i2s_rx      = NULL;  // I2S0 RX: call from BT1036-A
 static i2s_chan_handle_t s_i2s_call_tx = NULL;  // I2S0 TX: mic to BT1036-A → phone
-static i2s_chan_handle_t s_i2s_tx      = NULL;  // I2S1 TX: audio to external DAC → headphones
+static i2s_chan_handle_t s_i2s_tx      = NULL;  // I2S1 TX: DAC → headphones
+static i2s_chan_handle_t s_i2s_mic     = NULL;  // I2S1 RX: WM8960 ADC → mic data
 
 // ---------------------------------------------------------------------------
 // WM8960 init via I2C
@@ -120,10 +122,10 @@ static void wm8960_init(void)
     vTaskDelay(pdMS_TO_TICKS(10));
 
     // Power — VMID должен зарядиться до включения усилителей
-    ESP_ERROR_CHECK(wm8960_write(0x19, 0x0C0));   // PWR1: VMID=50kΩ, VREF
+    ESP_ERROR_CHECK(wm8960_write(0x19, 0x0EA));   // PWR1: VMID=50kΩ, VREF, AINL(bit5), ADCL(bit3), MICB(bit1)
     vTaskDelay(pdMS_TO_TICKS(500));               // ждём зарядку VMID (50kΩ × C_internal)
     ESP_ERROR_CHECK(wm8960_write(0x1A, 0x1E4));   // PWR2: DACL, DACR, LOUT1, ROUT1, OUT3(bit2)
-    ESP_ERROR_CHECK(wm8960_write(0x2F, 0x00C));   // PWR3: LOMIX(bit3), ROMIX(bit2)
+    ESP_ERROR_CHECK(wm8960_write(0x2F, 0x02C));   // PWR3: LMIC(bit5), LOMIX(bit3), ROMIX(bit2)
 
     // Audio interface: I2S format, 16-bit, slave (ESP32 is master)
     ESP_ERROR_CHECK(wm8960_write(0x07, 0x002));
@@ -138,11 +140,15 @@ static void wm8960_init(void)
     // Unmute DAC — default after reset is DACMU=1 (soft mute ON)
     ESP_ERROR_CHECK(wm8960_write(0x05, 0x000));   // ADC/DAC CTL1: DACMU=0
 
-    // Volumes: 0 dB everywhere
+    // DAC volumes
     ESP_ERROR_CHECK(wm8960_write(0x0A, 0x1FF));   // Left  DAC: 0dB + VU
     ESP_ERROR_CHECK(wm8960_write(0x0B, 0x1FF));   // Right DAC: 0dB + VU
-    ESP_ERROR_CHECK(wm8960_write(0x02, 0x179));   // LOUT1: +6dB + VU
-    ESP_ERROR_CHECK(wm8960_write(0x03, 0x179));   // ROUT1: +6dB + VU
+    ESP_ERROR_CHECK(wm8960_write(0x02, 0x179));   // LOUT1: 0dB + VU  (0x7F=+6dB, 0x79=0dB, 0x6D=-12dB, 0x67=-18dB)
+    ESP_ERROR_CHECK(wm8960_write(0x03, 0x179));   // ROUT1: 0dB + VU
+
+    // Microphone path: LINPUT1 → PGA → Boost → ADC → ADAT
+    ESP_ERROR_CHECK(wm8960_write(0x00, 0x132));   // Left PGA: unmute, +20dB(LINVOL=50), IPVU(bit8)
+    ESP_ERROR_CHECK(wm8960_write(0x20, 0x138));   // L ADC path: LMN1(bit8), boost=+29dB(bits5:4=11), LMIC2B(bit3)
 
     ESP_LOGI(TAG, "WM8960 initialized");
 }
@@ -173,10 +179,10 @@ static esp_err_t i2s_init(void)
         ESP_ERROR_CHECK(i2s_channel_enable(s_i2s_rx));
     }
 
-    // I2S1: TX-only — WM8960 DAC → headphones
+    // I2S1: full-duplex — WM8960 DAC (headphones TX) + ADC (mic RX)
     {
         i2s_chan_config_t cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
-        ESP_ERROR_CHECK(i2s_new_channel(&cfg, &s_i2s_tx, NULL));
+        ESP_ERROR_CHECK(i2s_new_channel(&cfg, &s_i2s_tx, &s_i2s_mic));
 
         i2s_std_config_t std = {
             .clk_cfg = {
@@ -191,12 +197,14 @@ static esp_err_t i2s_init(void)
                 .bclk = I2S1_BCLK_GPIO,
                 .ws   = I2S1_WS_GPIO,
                 .dout = I2S1_DOUT_GPIO,
-                .din  = GPIO_NUM_NC,
+                .din  = I2S1_DIN_GPIO,
                 .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
             },
         };
-        ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_i2s_tx, &std));
+        ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_i2s_tx,  &std));
+        ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_i2s_mic, &std));
         ESP_ERROR_CHECK(i2s_channel_enable(s_i2s_tx));
+        ESP_ERROR_CHECK(i2s_channel_enable(s_i2s_mic));
     }
 
     return ESP_OK;
@@ -422,6 +430,58 @@ static void i2s_tx_task(void *arg)
 }
 
 // ---------------------------------------------------------------------------
+// TASK: mic_rx — reads mic from WM8960 ADC, sends to BT1036-A → phone
+// ---------------------------------------------------------------------------
+static void mic_rx_task(void *arg)
+{
+    // WM8960 ADC outputs stereo I2S even when only left channel (mic) is active
+    int16_t *stereo = (int16_t *)heap_caps_malloc(FRAME_BYTES_STEREO, MALLOC_CAP_8BIT);
+    if (!stereo) {
+        ESP_LOGE(TAG, "No memory for mic_rx buffer");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    uint32_t mic_frame = 0;
+    while (1) {
+        size_t bytes_read = 0;
+        esp_err_t err = i2s_channel_read(s_i2s_mic, stereo, FRAME_BYTES_STEREO,
+                                         &bytes_read, portMAX_DELAY);
+        if (err != ESP_OK || bytes_read == 0) {
+            ESP_LOGW(TAG, "mic_rx read err=%s bytes=%u", esp_err_to_name(err), (unsigned)bytes_read);
+            continue;
+        }
+
+        // WM8960 ADC: left channel = mic, right = 0 (only ADCL enabled)
+        // Extract left, duplicate to right for BT1036-A I2S0 TX (expects stereo)
+        size_t samples = bytes_read / 4;
+
+        mic_frame++;
+        if (mic_frame % 50 == 0) {
+            int16_t max_val = 0;
+            for (size_t i = 0; i < samples; i++) {
+                int16_t v = stereo[i * 2];
+                if (v < 0) v = -v;
+                if (v > max_val) max_val = v;
+            }
+            ESP_LOGI(TAG, "mic frame=%lu bytes=%u max=%d %s",
+                     (unsigned long)mic_frame, (unsigned)bytes_read, max_val,
+                     max_val > 100 ? "<<< MIC" : "(silence)");
+        }
+
+        for (size_t i = 0; i < samples; i++) {
+            int16_t left = stereo[i * 2];
+            stereo[i * 2]     = left;
+            stereo[i * 2 + 1] = left;
+        }
+
+        size_t bytes_written = 0;
+        i2s_channel_write(s_i2s_call_tx, stereo, samples * 4,
+                          &bytes_written, pdMS_TO_TICKS(100));
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 void app_main(void)
 {
@@ -438,7 +498,8 @@ void app_main(void)
     ESP_LOGI(TAG, "Free heap after init: %lu bytes", (unsigned long)esp_get_free_heap_size());
 
     // Core 0: I2S reads (time-critical)
-    xTaskCreatePinnedToCore(i2s_rx_task, "i2s_rx", 4096, NULL, 20, NULL, 0);
+    xTaskCreatePinnedToCore(i2s_rx_task,  "i2s_rx",  4096, NULL, 20, NULL, 0);
+    xTaskCreatePinnedToCore(mic_rx_task,  "mic_rx",  4096, NULL, 19, NULL, 0);
 
     // Core 1: outputs
     xTaskCreatePinnedToCore(udp_tx_task, "udp_tx", 8192, NULL, 10, NULL, 1);

@@ -40,9 +40,11 @@
                      │                               │
   ESP32 3.3V  ───────┤ 3.3V                          │
                      │ MCLK   (встроенный генератор) │
-  ESP32 GPIO15───────┤ BCLK                          │
-  ESP32 GPIO16───────┤ DACLRC (WS)                   │
-  ESP32 GPIO17───────┤ DACDAT                        │
+  ESP32 GPIO15───────┤ DCLK                          │
+  ESP32 GPIO16───┬───┤ DLRC                          │
+                 └───┤ ALRC  (перемычка на плате)    │
+  ESP32 GPIO17───────┤ DDAT                          │
+  ESP32 GPIO18───────┤ ADAT  (mic ADC output)        │
   ESP32 GPIO8 ───────┤ SDA                           │
   ESP32 GPIO9 ───────┤ SCL                           │
                      └──────────────────────────────┘
@@ -86,11 +88,13 @@
 | 6 | резистор 4.68kΩ нога 2 | WM8960 MICBIAS |
 | 7 | ESP32 3.3V | WM8960 3.3V |
 | 8 | ESP32 GND | WM8960 GND |
-| 9 | ESP32 GPIO15 | WM8960 BCLK |
-| 10 | ESP32 GPIO16 | WM8960 DACLRC |
-| 11 | ESP32 GPIO17 | WM8960 DACDAT |
-| 12 | ESP32 GPIO8 | WM8960 SDA |
-| 13 | ESP32 GPIO9 | WM8960 SCL |
+| 9 | ESP32 GPIO15 | WM8960 DCLK |
+| 10 | ESP32 GPIO16 | WM8960 DLRC |
+| 11 | WM8960 DLRC | WM8960 ALRC (перемычка) |
+| 12 | ESP32 GPIO17 | WM8960 DDAT |
+| 13 | ESP32 GPIO18 | WM8960 ADAT |
+| 14 | ESP32 GPIO8 | WM8960 SDA |
+| 15 | ESP32 GPIO9 | WM8960 SCL |
 
 > MCLK не подключать — на плате уже стоит встроенный генератор 2MHz (Y1 + U4).
 > SDA = GPIO8, SCL = GPIO9 — рабочая конфигурация.
