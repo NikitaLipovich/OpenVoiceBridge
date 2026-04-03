@@ -1,0 +1,50 @@
+# ESP32 LyraT — BT Classic (HFP + A2DP) defaults
+# Применяется при: idf.py set-target esp32
+
+# ── Bluetooth стек ──────────────────────────────────────────────────────────
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_CLASSIC_ENABLED=y
+CONFIG_BT_SSP_ENABLED=y
+
+# A2DP (Bluetooth аудио профиль — приём музыки)
+CONFIG_BT_A2DP_ENABLE=y
+
+# HFP Hands-Free Unit (гарнитура / телефон)
+CONFIG_BT_HFP_ENABLE=y
+CONFIG_BT_HFP_CLIENT_ENABLE=y
+
+# Legacy API: Bluedroid декодирует mSBC/CVSD внутри → callback получает готовый PCM
+# Нам нужен PCM для I2S → ES8388. External codec API даёт encoded frames — не подходит.
+# CONFIG_BT_HFP_USE_EXTERNAL_CODEC не устанавливаем (default=n)
+
+# Аудио datapath: HCI (программный, через esp_hf_client_outgoing_data_cb_t)
+# PCM hardware datapath НЕВОЗМОЖЕН на LyraT v4.3:
+#   GPIO0 (PCM CLK)  = занят MCLK  для ES8388 I2S
+#   GPIO5 (PCM DIN)  = занят BCLK  для ES8388 I2S
+#   GPIO25 (PCM SYNC)= занят LRCLK для ES8388 I2S
+#   GPIO4 (PCM DOUT) = занят MicroSD D1
+# Официальный ADF пример pipeline_a2dp_sink_and_hfp использует HCI по той же причине.
+CONFIG_BT_HFP_AUDIO_DATA_PATH_HCI=y
+
+# ── BTDM контроллер ─────────────────────────────────────────────────────────
+# Dual-mode (Classic BT + BLE)
+# Только Classic BT (HFP+A2DP) — освобождает ~50KB heap от BLE
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
+# SCO/eSCO соединений (для звонков достаточно 1)
+CONFIG_BTDM_CTRL_BR_EDR_MAX_SYNC_CONN=1
+
+# ── Coexistence BT + WiFi ───────────────────────────────────────────────────
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# ── FreeRTOS ─────────────────────────────────────────────────────────────────
+CONFIG_FREERTOS_HZ=1000
+CONFIG_FREERTOS_ENABLE_BACKWARD_COMPATIBILITY=y
+
+# ── Flash и таблица разделов ─────────────────────────────────────────────────
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# Кастомная таблица разделов: nvs(24K) + phy(4K) + factory(3MB)
+# Нужна т.к. BT стек требует > 1MB app-раздела
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_bt_sink_example.csv"

@@ -1,0 +1,22 @@
+# ESP32-специфичные настройки для LyraT (ESP32-WROVER-IE)
+# Применяется поверх sdkconfig.defaults при target=esp32
+
+CONFIG_IDF_TARGET="esp32"
+
+# ── PSRAM (ESP32-WROVER-IE имеет 8MB PSRAM) ──────────────────────────────────
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_40M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# ── Flash режим (LyraT: 80MHz QIO) ───────────────────────────────────────────
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# ── Аудио кодек ES8388 (LyraT встроенный) ────────────────────────────────────
+# CONFIG_ESP_LYRAT_V4_3_BOARD=y  ← только для ESP-ADF, без него не нужен
+# ES8388 подключён через I2C (SCL=GPIO23, SDA=GPIO18) и I2S (BCLK=GPIO5, WS=GPIO25, DO=GPIO26, DI=GPIO35)
+# Инициализируется напрямую через i2c_master + i2s_driver в коде
+
+# ── CPU частота ───────────────────────────────────────────────────────────────
+CONFIG_ESP32_DEFAULT_CPU_FREQ_240=y
