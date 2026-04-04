@@ -1,4 +1,4 @@
-idf_component_register(SRCS "main.c"
+idf_component_register(SRCS "main.c" "aec.c" "spectral_ns.c" "adpcm.c"
                     INCLUDE_DIRS "."
                     REQUIRES
                         nvs_flash
@@ -10,4 +10,5 @@ idf_component_register(SRCS "main.c"
                         driver
                         esp_timer
                         heap
+                        esp_coex
 )

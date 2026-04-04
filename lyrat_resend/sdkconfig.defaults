@@ -28,14 +28,39 @@ CONFIG_BT_HFP_CLIENT_ENABLE=y
 CONFIG_BT_HFP_AUDIO_DATA_PATH_HCI=y
 
 # ── BTDM контроллер ─────────────────────────────────────────────────────────
-# Dual-mode (Classic BT + BLE)
-# Только Classic BT (HFP+A2DP) — освобождает ~50KB heap от BLE
+# BR/EDR only — BLE не нужен, экономит ~50KB heap + IRAM
+# WiFi coex работает и в BR_EDR_ONLY режиме
 CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
 # SCO/eSCO соединений (для звонков достаточно 1)
 CONFIG_BTDM_CTRL_BR_EDR_MAX_SYNC_CONN=1
 
 # ── Coexistence BT + WiFi ───────────────────────────────────────────────────
 CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# ── WiFi IRAM optimization ──────────────────────────────────────────────────
+# Move WiFi code from IRAM to flash — saves ~13KB IRAM (needed for BT+WiFi fit)
+# Slight WiFi performance hit but irrelevant for our UDP streaming use case
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+
+# ── WiFi memory optimization ────────────────────────────────────────────────
+# Reduce WiFi static buffers to free internal DRAM for BT + esp-dsp FFT
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER=y
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
+# Disable AMPDU — single-frame TX fits better in BT coex gaps
+CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
+
+# ── PSRAM BSS ────────────────────────────────────────────────────────────────
+# Allow EXT_RAM_BSS_ATTR to place static buffers in PSRAM
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+
+# ── Brownout ─────────────────────────────────────────────────────────────────
+# WiFi+BT phy_init draws peak current — USB power can sag and trigger brownout reset.
+# Disable detector to prevent boot loops on marginal USB power.
+CONFIG_ESP_BROWNOUT_DET=n
 
 # ── FreeRTOS ─────────────────────────────────────────────────────────────────
 CONFIG_FREERTOS_HZ=1000
