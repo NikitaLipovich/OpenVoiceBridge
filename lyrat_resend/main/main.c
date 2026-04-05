@@ -150,7 +150,7 @@ static dsp_cfg_t s_dsp = {
     .aec_on     = 0,    // Step 6
     .limiter_on = 0,    // call audio limiter
     .sns_on     = 1,    // Step 7 — spectral NS active (mode 4 set in init)
-    .mic_gain   = 3,    // Step 2: ×3 (hw_gain=24dB × 3 = peak ~15000, no clipping)
+    .mic_gain   = 4,    // Step 2: ×4 (hw_gain=30dB × 4 ≈ peak ~16000, 50% full scale)
     .call_gain  = 2,
     .wifi_on    = 1,
 };
@@ -381,19 +381,6 @@ static void mic_rx_task(void *arg)
             }
         }
 
-        // === Step 2: SW Gain ===
-        {
-            int mg = s_dsp.mic_gain;
-            if (mg > 1) {
-                for (size_t i = 0; i < n; i++) {
-                    int32_t v = (int32_t)mono_buf[i] * mg;
-                    if (v >  32767) v =  32767;
-                    if (v < -32768) v = -32768;
-                    mono_buf[i] = (int16_t)v;
-                }
-            }
-        }
-
         // === Step 3: Notch 50/150/250 Hz ===
         if (s_dsp.notch_on) {
             for (size_t i = 0; i < n; i++) {
@@ -506,6 +493,19 @@ after_dsp:
 
         // Yield to let UDP task send (SNS FFT is CPU-heavy)
         taskYIELD();
+
+        // === SW Gain (AFTER SNS — amplify clean signal, not noise) ===
+        {
+            int mg = s_dsp.mic_gain;
+            if (mg > 1) {
+                for (size_t i = 0; i < n; i++) {
+                    int32_t v = (int32_t)mono_buf[i] * mg;
+                    if (v >  32767) v =  32767;
+                    if (v < -32768) v = -32768;
+                    mono_buf[i] = (int16_t)v;
+                }
+            }
+        }
 
         // Peak measurement
         for (size_t i = 0; i < n; i++) {
@@ -961,9 +961,9 @@ static esp_err_t audio_init(void)
     }
 
     esp_codec_dev_set_out_vol(s_codec_dev, 100);
-    esp_codec_dev_set_in_gain(s_codec_dev, 24.0f);  // 24dB — stronger signal for spectral NS
+    esp_codec_dev_set_in_gain(s_codec_dev, 30.0f);  // 30dB — louder signal, better ADPCM tracking
 
-    ESP_LOGI(TAG, "ES8388 OK — vol=100 gain=24dB PA=GPIO%d", PA_PIN);
+    ESP_LOGI(TAG, "ES8388 OK — vol=100 gain=30dB PA=GPIO%d", PA_PIN);
     return ESP_OK;
 }
 
