@@ -112,23 +112,25 @@ static void process_hop(void)
             float mag = sqrtf(re * re + im * im);
             float mag_db = 20.0f * log10f(mag + EPS);
 
-            // Soft gain: gradual transition over 6dB range (no hard on/off)
+            // Soft gain: gradual transition over 12dB range (wide ramp)
             float gain;
             float diff = mag_db - s_noise_thresh[k];
-            if (diff > 6.0f) {
+            if (diff > 12.0f) {
                 gain = 1.0f;
                 passed++;
-            } else if (diff < 0.0f) {
+            } else if (diff < -3.0f) {
                 gain = s_floor_gain;
                 masked++;
             } else {
-                // Linear ramp from floor_gain to 1.0 over 6dB
-                gain = s_floor_gain + (1.0f - s_floor_gain) * (diff / 6.0f);
+                // Smooth ramp from floor_gain to 1.0 over 15dB (-3 to +12)
+                float t = (diff + 3.0f) / 15.0f;  // 0..1
+                gain = s_floor_gain + (1.0f - s_floor_gain) * t * t;  // quadratic ease-in
                 passed++;
             }
 
-            // Temporal smoothing: 70% previous + 30% current (prevents flicker)
-            gain = 0.7f * s_prev_gain[k] + 0.3f * gain;
+            // Heavy temporal smoothing: 85% previous + 15% current
+            // Prevents rapid gain changes that cause "pukking"
+            gain = 0.85f * s_prev_gain[k] + 0.15f * gain;
             s_prev_gain[k] = gain;
 
             if (s_mode >= 3) {
@@ -184,7 +186,7 @@ void spectral_ns_init(void)
     memset(s_noise_sum_sq_db, 0, sizeof(s_noise_sum_sq_db));
     s_noise_frames = 0;
     s_calibrated   = 0;
-    s_mode         = 2;
+    s_mode         = 4;  // hard-mask by default
     s_floor_gain   = 0.02f;
 
     memset(s_in_ring, 0, sizeof(s_in_ring));

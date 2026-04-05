@@ -105,6 +105,7 @@ def capture_stream(port, label, out_path, stats):
     frames_lost   = 0
     total_samples = 0
     expected_seq  = None
+    prev_last_sample = 0   # for ADPCM boundary smoothing
 
     while not stop_event.is_set():
         try:
@@ -145,6 +146,17 @@ def capture_stream(port, label, out_path, stats):
             pcm = pcm[:expected_samples]
         elif len(pcm) < expected_samples:
             pcm.extend([0] * (expected_samples - len(pcm)))
+
+        # Crossfade first 16 samples to remove ADPCM reset pop
+        # Ramp from previous packet's last sample to current decoded values
+        XFADE = 16
+        if prev_last_sample != 0 and len(pcm) > XFADE:
+            for i in range(XFADE):
+                alpha = i / XFADE
+                pcm[i] = int(prev_last_sample * (1 - alpha) + pcm[i] * alpha)
+
+        if len(pcm) > 0:
+            prev_last_sample = pcm[-1]
 
         wf.writeframes(struct.pack(f"<{len(pcm)}h", *pcm))
         packets_ok  += 1

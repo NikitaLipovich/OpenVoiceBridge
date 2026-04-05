@@ -108,7 +108,7 @@
 #define RINGBUF_FRAMES       8              // BT path ring buffers
 #define RINGBUF_UDP_FRAMES   256            // UDP path — 4 sec buffer
 #define UDP_BATCH_FRAMES     4              // 4 frames = 60ms per packet, ~490 bytes ADPCM
-#define UDP_DUPLICATE        1              // send each packet twice (FEC via repetition)
+#define UDP_DUPLICATE        2              // send each packet 3 times (FEC via repetition)
 
 // ---------------------------------------------------------------------------
 // WiFi settings (edit for your network)
@@ -149,7 +149,7 @@ static dsp_cfg_t s_dsp = {
     .gate_on    = 0,    // Step 5
     .aec_on     = 0,    // Step 6
     .limiter_on = 0,    // call audio limiter
-    .sns_on     = 0,    // Step 7 — enable via 'sns 1' or 'sns 2'
+    .sns_on     = 1,    // Step 7 — spectral NS active (mode 4 set in init)
     .mic_gain   = 3,    // Step 2: ×3 (hw_gain=24dB × 3 = peak ~15000, no clipping)
     .call_gain  = 2,
     .wifi_on    = 1,
@@ -504,6 +504,9 @@ after_dsp:
             }
         }
 
+        // Yield to let UDP task send (SNS FFT is CPU-heavy)
+        taskYIELD();
+
         // Peak measurement
         for (size_t i = 0; i < n; i++) {
             int16_t abs_v = mono_buf[i] < 0 ? -mono_buf[i] : mono_buf[i];
@@ -644,6 +647,7 @@ static int udp_encode_and_send(int sock, struct sockaddr_in *dest,
     int n_frames = n_samples / SAMPLES_PER_FRAME;
     if (n_frames == 0) n_frames = 1;
 
+    // Reset ADPCM state per packet — decoder does the same
     adpcm_state_t enc;
     adpcm_init(&enc);
 
@@ -662,84 +666,73 @@ static int udp_encode_and_send(int sock, struct sockaddr_in *dest,
     size_t total = 8 + adpcm_bytes;
 
     // Send (non-blocking — returns immediately if WiFi busy)
-    sendto(sock, pkt, total, 0, (struct sockaddr *)dest, sizeof(*dest));
-
-#if UDP_DUPLICATE
-    // Duplicate after short delay — stagger to avoid same coex denial window
-    vTaskDelay(pdMS_TO_TICKS(10));
-    sendto(sock, pkt, total, 0, (struct sockaddr *)dest, sizeof(*dest));
-#endif
+    // Send original + duplicates (total = 1 + UDP_DUPLICATE times)
+    for (int dup = 0; dup <= UDP_DUPLICATE; dup++) {
+        sendto(sock, pkt, total, 0, (struct sockaddr *)dest, sizeof(*dest));
+    }
 
     return (int)total;
 }
 
-// Try to collect and send one batch from a ring buffer
-static bool udp_try_send_stream(RingbufHandle_t rb, int16_t *pcm_buf,
-                                 int *collected, int sock,
-                                 struct sockaddr_in *dest, uint32_t *seq)
+// Per-stream UDP TX task — blocks waiting for data, batches frames, sends ADPCM
+static void udp_stream_task(int *sock, struct sockaddr_in *dest,
+                             RingbufHandle_t rb, int16_t *pcm_buf,
+                             const char *label)
 {
-    size_t item_size = 0;
-    uint8_t *item = (uint8_t *)xRingbufferReceiveUpTo(
-        rb, &item_size, 0, FRAME_BYTES_MONO);  // non-blocking
-
-    if (item && item_size > 0) {
-        size_t got = item_size / sizeof(int16_t);
-        size_t max = SAMPLES_PER_FRAME * UDP_BATCH_FRAMES;
-        if (*collected + (int)got <= (int)max) {
-            memcpy(&pcm_buf[*collected], item, item_size);
-            *collected += (int)got;
-        }
-        vRingbufferReturnItem(rb, item);
-    }
-
-    int target = SAMPLES_PER_FRAME * UDP_BATCH_FRAMES;
-    if (*collected >= target) {
-        udp_encode_and_send(sock, dest, pcm_buf, *collected, seq);
-        *collected = 0;
-        return true;
-    }
-    return (item != NULL);
-}
-
-static void udp_tx_task(void *arg)
-{
-    uint32_t seq_call = 0, seq_mic = 0;
-    int collected_call = 0, collected_mic = 0;
+    uint32_t seq = 0;
     uint32_t send_count = 0;
 
-    ESP_LOGI(TAG, "udp_tx started (core %d, batch=%d, ADPCM, dup=%d)",
-             xPortGetCoreID(), UDP_BATCH_FRAMES, UDP_DUPLICATE);
+    ESP_LOGI(TAG, "udp_%s_tx started (core %d, batch=%d, ADPCM)",
+             label, xPortGetCoreID(), UDP_BATCH_FRAMES);
 
     for (;;) {
-        bool busy = false;
-
-        // Drain both streams alternately
-        if (s_wifi_ready) {
-            busy |= udp_try_send_stream(s_rb_udp_call, s_pcm_call, &collected_call,
-                                          s_udp_call_sock, &s_udp_dest_call, &seq_call);
-            busy |= udp_try_send_stream(s_rb_udp_mic, s_pcm_mic, &collected_mic,
-                                          s_udp_mic_sock, &s_udp_dest_mic, &seq_mic);
+        if (!s_wifi_ready) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
         }
 
-        // Flush partial batches on timeout
-        if (!busy) {
-            if (collected_call > 0) {
-                udp_encode_and_send(s_udp_call_sock, &s_udp_dest_call,
-                                     s_pcm_call, collected_call, &seq_call);
-                collected_call = 0;
+        int collected = 0;
+        int target = SAMPLES_PER_FRAME * UDP_BATCH_FRAMES;
+
+        for (int i = 0; i < UDP_BATCH_FRAMES; i++) {
+            // First frame: block until data arrives. Next: short wait to fill batch.
+            TickType_t wait = (i == 0) ? portMAX_DELAY : pdMS_TO_TICKS(10);
+            size_t item_size = 0;
+            uint8_t *item = (uint8_t *)xRingbufferReceiveUpTo(
+                rb, &item_size, wait, FRAME_BYTES_MONO);
+
+            if (item && item_size > 0) {
+                size_t got = item_size / sizeof(int16_t);
+                if (collected + (int)got <= target) {
+                    memcpy(&pcm_buf[collected], item, item_size);
+                    collected += (int)got;
+                }
+                vRingbufferReturnItem(rb, item);
+            } else {
+                break;
             }
-            if (collected_mic > 0) {
-                udp_encode_and_send(s_udp_mic_sock, &s_udp_dest_mic,
-                                     s_pcm_mic, collected_mic, &seq_mic);
-                collected_mic = 0;
-            }
-            vTaskDelay(pdMS_TO_TICKS(5));
         }
 
-        if (++send_count % 500 == 0) {
-            ESP_LOGI(TAG, "UDP seq: call=%"PRIu32" mic=%"PRIu32, seq_call, seq_mic);
+        if (collected > 0) {
+            udp_encode_and_send(*sock, dest, pcm_buf, collected, &seq);
+        }
+
+        if (++send_count % 200 == 0) {
+            ESP_LOGI(TAG, "UDP %s: seq=%"PRIu32, label, seq);
         }
     }
+}
+
+static void udp_call_tx_task(void *arg)
+{
+    udp_stream_task(&s_udp_call_sock, &s_udp_dest_call,
+                     s_rb_udp_call, s_pcm_call, "call");
+}
+
+static void udp_mic_tx_task(void *arg)
+{
+    udp_stream_task(&s_udp_mic_sock, &s_udp_dest_mic,
+                     s_rb_udp_mic, s_pcm_mic, "mic");
 }
 
 // ---------------------------------------------------------------------------
@@ -1295,7 +1288,8 @@ void app_main(void)
     // Tasks on Core 1 (Core 0 = BT + WiFi stacks)
     xTaskCreatePinnedToCore(i2s_tx_task,       "i2s_tx",    4096, NULL, 15, NULL, 1);
     xTaskCreatePinnedToCore(mic_rx_task,        "mic_rx",    8192, NULL, 14, NULL, 1);
-    xTaskCreatePinnedToCore(udp_tx_task,         "udp_tx",    4096, NULL, 12, NULL, 1);
+    xTaskCreatePinnedToCore(udp_call_tx_task,   "udp_call",  4096, NULL, 12, NULL, 1);
+    xTaskCreatePinnedToCore(udp_mic_tx_task,    "udp_mic",   4096, NULL, 12, NULL, 1);
     xTaskCreatePinnedToCore(console_task,       "console",   4096, NULL,  5, NULL, 1);
 
     ESP_LOGI(TAG, "Free heap after init: %"PRIu32" bytes", esp_get_free_heap_size());
