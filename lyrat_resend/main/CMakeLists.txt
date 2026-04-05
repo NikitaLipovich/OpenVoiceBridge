@@ -1,4 +1,4 @@
-idf_component_register(SRCS "main.c" "aec.c" "spectral_ns.c" "adpcm.c"
+idf_component_register(SRCS "main.c" "aec.c" "spectral_ns.c" "ulaw.c"
                     INCLUDE_DIRS "."
                     REQUIRES
                         nvs_flash

@@ -128,9 +128,9 @@ static void process_hop(void)
                 passed++;
             }
 
-            // Heavy temporal smoothing: 85% previous + 15% current
-            // Prevents rapid gain changes that cause "pukking"
-            gain = 0.85f * s_prev_gain[k] + 0.15f * gain;
+            // Very heavy temporal smoothing: 95% previous + 5% current
+            // Takes ~20 hops (160ms) for full gain change — eliminates 125Hz buzz
+            gain = 0.95f * s_prev_gain[k] + 0.05f * gain;
             s_prev_gain[k] = gain;
 
             if (s_mode >= 3) {

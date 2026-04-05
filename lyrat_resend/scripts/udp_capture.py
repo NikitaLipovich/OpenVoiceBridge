@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-UDP audio capture + ADPCM decode + command sender — all in one.
+UDP audio capture + µ-law decode + command sender — all in one.
 
-Records call (5004) and mic (5005), decodes ADPCM → PCM WAV.
+Records call (5004) and mic (5005), decodes G.711 µ-law → PCM WAV.
 Sends commands to ESP32 on port 5006.
 ESP32 IP is auto-detected from first received packet.
 
@@ -38,36 +38,21 @@ STREAMS = [
 stop_event = threading.Event()
 esp32_ip = [None]  # mutable, set from first packet
 
-# ── IMA ADPCM decoder ───────────────────────────────────────────────────────
+# ── G.711 µ-law decoder ──────────────────────────────────────────────────────
 
-STEP_TABLE = [
-    7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
-    19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
-    50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
-    130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
-    337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
-    876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
-    2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
-    5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
-    15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
-]
-INDEX_TABLE = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8]
+BIAS = 0x84  # 132
+
+def ulaw_decode_byte(b):
+    b = ~b & 0xFF
+    sign = b & 0x80
+    exponent = (b >> 4) & 0x07
+    mantissa = b & 0x0F
+    sample = (mantissa << (exponent + 3)) + BIAS * (1 << exponent) - BIAS
+    return -sample if sign else sample
 
 
-def adpcm_decode(data, predicted=0, index=0):
-    samples = []
-    for byte in data:
-        for nibble in [byte & 0x0F, (byte >> 4) & 0x0F]:
-            step = STEP_TABLE[index]
-            delta = step >> 3
-            if nibble & 4: delta += step
-            if nibble & 2: delta += step >> 1
-            if nibble & 1: delta += step >> 2
-            if nibble & 8: delta = -delta
-            predicted = max(-32768, min(32767, predicted + delta))
-            index = max(0, min(88, index + INDEX_TABLE[nibble]))
-            samples.append(predicted)
-    return samples
+def ulaw_decode(data):
+    return [ulaw_decode_byte(b) for b in data]
 
 
 # ── Command sender ───────────────────────────────────────────────────────────
@@ -105,7 +90,6 @@ def capture_stream(port, label, out_path, stats):
     frames_lost   = 0
     total_samples = 0
     expected_seq  = None
-    prev_last_sample = 0   # for ADPCM boundary smoothing
 
     while not stop_event.is_set():
         try:
@@ -122,10 +106,10 @@ def capture_stream(port, label, out_path, stats):
 
         seq = struct.unpack_from("<I", data, 0)[0]
         n_frames = data[7]
-        adpcm_data = data[8:]
+        ulaw_data = data[8:]
 
         if n_frames == 0:
-            n_frames = max(1, len(adpcm_data) * 2 // SAMPLES_PER_FRAME)
+            n_frames = max(1, len(ulaw_data) // SAMPLES_PER_FRAME)
 
         expected_samples = n_frames * SAMPLES_PER_FRAME
 
@@ -141,22 +125,12 @@ def capture_stream(port, label, out_path, stats):
 
         expected_seq = seq + n_frames
 
-        pcm = adpcm_decode(adpcm_data, predicted=0, index=0)
+        # Decode µ-law → PCM (no state, no crossfade needed)
+        pcm = ulaw_decode(ulaw_data)
         if len(pcm) > expected_samples:
             pcm = pcm[:expected_samples]
         elif len(pcm) < expected_samples:
             pcm.extend([0] * (expected_samples - len(pcm)))
-
-        # Crossfade first 16 samples to remove ADPCM reset pop
-        # Ramp from previous packet's last sample to current decoded values
-        XFADE = 16
-        if prev_last_sample != 0 and len(pcm) > XFADE:
-            for i in range(XFADE):
-                alpha = i / XFADE
-                pcm[i] = int(prev_last_sample * (1 - alpha) + pcm[i] * alpha)
-
-        if len(pcm) > 0:
-            prev_last_sample = pcm[-1]
 
         wf.writeframes(struct.pack(f"<{len(pcm)}h", *pcm))
         packets_ok  += 1
@@ -245,7 +219,7 @@ def main():
         total = ok + lost
         loss_pct = (lost / total * 100) if total > 0 else 0
         print(f"  [{label:4s}]  {os.path.basename(files[label])}")
-        print(f"         packets: {st.get('packets', 0)} (ADPCM)")
+        print(f"         packets: {st.get('packets', 0)} (µ-law)")
         print(f"         frames : {ok} ok, {lost} lost ({loss_pct:.1f}%)")
         print(f"         duration: {st.get('duration', 0):.1f}s")
     print()

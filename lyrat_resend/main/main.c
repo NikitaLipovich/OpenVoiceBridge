@@ -66,7 +66,7 @@
 
 #include "aec.h"
 #include "spectral_ns.h"
-#include "adpcm.h"
+#include "ulaw.h"
 
 // ---------------------------------------------------------------------------
 // Log tags
@@ -107,7 +107,7 @@
 #define FRAME_BYTES_STEREO   (FRAME_BYTES_MONO * 2)                  // 960
 #define RINGBUF_FRAMES       8              // BT path ring buffers
 #define RINGBUF_UDP_FRAMES   256            // UDP path — 4 sec buffer
-#define UDP_BATCH_FRAMES     4              // 4 frames = 60ms per packet, ~490 bytes ADPCM
+#define UDP_BATCH_FRAMES     6              // 6 frames µ-law = 1444 bytes < MTU 1500
 #define UDP_DUPLICATE        2              // send each packet 3 times (FEC via repetition)
 
 // ---------------------------------------------------------------------------
@@ -143,14 +143,14 @@ typedef struct {
 } dsp_cfg_t;
 
 static dsp_cfg_t s_dsp = {
-    .hpf_on     = 0,    // Step 1
+    .hpf_on     = 1,    // Step 1: HPF 80Hz always on (removes hum before SNS)
     .notch_on   = 0,    // Step 3
     .wiener_on  = 0,    // Step 4
     .gate_on    = 0,    // Step 5
     .aec_on     = 0,    // Step 6
     .limiter_on = 0,    // call audio limiter
     .sns_on     = 1,    // Step 7 — spectral NS active (mode 4 set in init)
-    .mic_gain   = 4,    // Step 2: ×4 (hw_gain=30dB × 4 ≈ peak ~16000, 50% full scale)
+    .mic_gain   = 3,    // Step 2: ×3 AFTER SNS (target ~45% full scale)
     .call_gain  = 2,
     .wifi_on    = 1,
 };
@@ -378,6 +378,20 @@ static void mic_rx_task(void *arg)
                 hp_x_prev = x;
                 hp_y_prev = y;
                 mono_buf[i] = (int16_t)y;
+            }
+        }
+
+        // === LPF 4kHz (always on — cuts MEMS high-freq whine above speech band) ===
+        {
+            // 1-pole LPF: y[n] = α*x[n] + (1-α)*y[n-1]
+            // α = 2π*fc/fs / (2π*fc/fs + 1) ≈ 0.62 for 4kHz @ 16kHz
+            // Q15: 0.62 * 32768 = 20316
+            static const int32_t LPF_ALPHA_Q15 = 20316;
+            static int32_t lp_prev = 0;
+            for (size_t i = 0; i < n; i++) {
+                int32_t x = mono_buf[i];
+                lp_prev = (int32_t)(((int64_t)LPF_ALPHA_Q15 * x + (int64_t)(32768 - LPF_ALPHA_Q15) * lp_prev) >> 15);
+                mono_buf[i] = (int16_t)lp_prev;
             }
         }
 
@@ -633,7 +647,8 @@ static esp_err_t wifi_init_sta(void)
 // No LOCK_TCPIP_CORE — uses non-blocking sendto()
 // ---------------------------------------------------------------------------
 
-#define ADPCM_FRAME_BYTES  (SAMPLES_PER_FRAME / 2)  // 240 → 120 bytes
+// µ-law: each sample = 1 byte (2:1 compression)
+#define ULAW_FRAME_BYTES  SAMPLES_PER_FRAME  // 240 samples → 240 bytes
 
 // PCM collect buffers in PSRAM
 EXT_RAM_BSS_ATTR static int16_t s_pcm_call[SAMPLES_PER_FRAME * UDP_BATCH_FRAMES];
@@ -647,12 +662,9 @@ static int udp_encode_and_send(int sock, struct sockaddr_in *dest,
     int n_frames = n_samples / SAMPLES_PER_FRAME;
     if (n_frames == 0) n_frames = 1;
 
-    // Reset ADPCM state per packet — decoder does the same
-    adpcm_state_t enc;
-    adpcm_init(&enc);
-
-    uint8_t pkt[8 + ADPCM_FRAME_BYTES * UDP_BATCH_FRAMES];
-    size_t adpcm_bytes = adpcm_encode(&enc, pcm, pkt + 8, n_samples);
+    // Packet: [4B seq] [4B header] [µ-law data]
+    uint8_t pkt[8 + ULAW_FRAME_BYTES * UDP_BATCH_FRAMES];
+    ulaw_encode(pcm, pkt + 8, n_samples);
 
     uint32_t s = *seq;
     *seq += n_frames;
@@ -663,7 +675,7 @@ static int udp_encode_and_send(int sock, struct sockaddr_in *dest,
     pkt[4] = 0; pkt[5] = 0; pkt[6] = 0;
     pkt[7] = (uint8_t)n_frames;
 
-    size_t total = 8 + adpcm_bytes;
+    size_t total = 8 + n_samples;  // 1 byte per sample
 
     // Send (non-blocking — returns immediately if WiFi busy)
     // Send original + duplicates (total = 1 + UDP_DUPLICATE times)
