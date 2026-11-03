@@ -5,6 +5,7 @@
   round.py link  --power SOURCE [--reboots 10] [--pairs 5] [--slc-timeout 30] [--label NAME]
   round.py sco   --power SOURCE [--n 5] [--active 20] [--label NAME]
   round.py audio --power SOURCE --codec mSBC|CVSD [--n 10] [--seconds 7] [--label NAME]
+  round.py tap   --power SOURCE [--n 3] [--long 300] [--s3-resets 3] [--label NAME]
 
 power: watches the board, the phone ACL history and Windows USB removal events.
 Writes <runs>/power/<stamp>-<label>/round.json and appends one line to <runs>/rounds.jsonl.
@@ -42,6 +43,18 @@ every trial must be the one asked for: a phone that picks another codec does not
 7 % of the SCO frames are lost in both directions (goal 040, incident 001), which sinks the strict rule on a
 tone that the receiver cannot conceal. Both numbers are reported whatever the rule. --no-wifi is for the
 no_wifi firmware: only the up direction can be measured there, and the strict rule applies.
+
+tap judges what the S3-ETH board captures from the I2S bus (udp_record.TapRecorder, tap_check). Needs the firmware
+with Wi-Fi on the LyraT: its own UDP stream is the reference. Plays nothing on the PC (R15) and holds the LyraT at
+vol 0 during the round, which acts behind the bus, so the phone's tones stay out of the room. The LyraT is reset at
+the end, which brings back its volume and DSP. One trial: the app plays tones through SCO, then a stretch without a
+signal. DSDIN: the expected tones, SNR by blocks of one mSBC frame (a lost Bluetooth frame is an impaired block), and
+each sample equal to the LyraT's stream. ASDOUT: firmware tones never reach this line (they replace the mic after the
+I2S read), so its content is proved by equality with the LyraT's stream, DSP off. The control must fail the tone check
+on both lines. Mic liveness: room sound against stationary copies of itself, never an SNR or a frequency, plus the
+level change caused by the codec's gain. Mic recordings are deleted once judged, unless a check on them failed.
+--long records with SCO open and measures the loss S3 to PC by sequence, apart from the Bluetooth counters.
+--s3-resets restarts the S3 with SCO open: the LyraT must see nothing and the streams return with no action.
 """
 import argparse
 import json
@@ -61,7 +74,9 @@ import audio_check  # noqa: E402
 import phone  # noqa: E402
 from benchlib import DEFAULT_PORT, RUNS_ROOT, keep_awake, powershell, redact, run_dir, write_json  # noqa: E402
 from serial_watch import SerialWatch  # noqa: E402
-from udp_record import UdpRecorder  # noqa: E402
+from udp_record import TapRecorder, UdpRecorder  # noqa: E402
+import s3  # noqa: E402
+import tap_check  # noqa: E402
 
 BOARD_NAME = "LyraT_Phone"
 USB_ID = "VID_10C4"
@@ -982,6 +997,401 @@ def stage_audio(args):
     return {"PASS": 0, "FAIL": 1}.get(verdict, 2)
 
 
+TAP_SLOTS = ("LR", "LR")
+TAP_ROOM_FILES = ("mic.wav", "lyrat_mic.wav")
+TAP_HW_GAIN = 30                # what the firmware sets at boot
+TAP_LOW_GAIN = 0
+TAP_GAIN_MIN_DB = 12.0          # the PGA moves by 24 dB; a smaller step means the level does not come through it
+TAP_EXCERPT_S = 4.3
+TAP_GAIN_SETTLE_S = 2.0
+TAP_LIVE_TRIES = 5
+TAP_LIVE_PAUSE_S = 60.0
+TAP_STEADY_RATIO = 1.2          # short time level as steady as its stationary copy
+TAP_RATE_TOLERANCE = 0.01
+
+
+def board_cmd(watch, cmd, echo, timeout=3.0):
+    """Send a console command; the board's own echo decides."""
+    for _ in range(3):
+        t = watch.now()
+        watch.send(cmd)
+        if wait_line(watch, t, echo, timeout) is not None:
+            return True
+    return False
+
+
+def tap_stream_stats(summary, name):
+    s = summary[name]
+    return {k: s.get(k) for k in ("packets", "unique", "duplicates", "reordered", "lost_packets", "loss_pct", "max_burst",
+                                  "ovf", "send_fail", "rate_hz", "frames", "boots", "channels")}
+
+
+def tap_tones(path, gaps, args):
+    """Tone check of every slot of a line, without the bulk."""
+    result = {}
+    for slot, samples in zip("LR", tap_check.read_channels(path)):
+        r = audio_check.check(samples, AUDIO_RATE, AUDIO_TONES, args.min_snr, args.max_shift, criterion="blocks",
+                              max_impaired=args.max_impaired, exclude=[tuple(g) for g in gaps])
+        result[slot] = {"pass": r["pass"], "peak_abs": r.get("peak_abs"),
+                        "tones": {k: {a: v.get(a) for a in ("pass", "snr_db", "block_snr_median_db", "impaired_pct",
+                                                            "shift_pct", "seconds")} for k, v in r["tones"].items()}}
+    return result
+
+
+def tap_match(out, summary, line):
+    """Each sample of a line against the LyraT's stream of the same line."""
+    channels = tap_check.read_channels(out / (line + ".wav"))
+    other_line = "call" if line == "mic" else "mic"
+    other = tap_check.read_channels(out / (other_line + ".wav"))
+    other = tap_check.predict_mic(other[0], other[1]) if other_line == "mic" else other[0]
+    ref_name = "lyrat_" + line
+    if ref_name not in summary:
+        return {"pass": False, "error": "no %s stream: the LyraT must run with Wi-Fi" % ref_name}
+    pred = tap_check.predict_mic(channels[0], channels[1]) if line == "mic" else channels[0]
+    return tap_check.match(pred, tap_check.read_channels(out / (ref_name + ".wav"))[0],
+                           summary[ref_name]["gaps"], summary[line]["gaps"], other)
+
+
+def tap_slots(path):
+    """How the two slots of a line relate; rms of each."""
+    left, right = tap_check.read_channels(path)
+    rms = lambda c: round(math.sqrt(sum(v * v for v in c) / len(c)), 1) if c else None  # noqa: E731
+    return {"rms": [rms(left), rms(right)],
+            "identical_pct": round(100.0 * sum(a == b for a, b in zip(left, right)) / len(left), 3) if left else None}
+
+
+def tap_delete_room(out):
+    """Room recordings stay only as long as they are needed (R15); the numbers are already in the JSON."""
+    for name in TAP_ROOM_FILES:
+        (out / name).unlink(missing_ok=True)
+
+
+def tap_phase(watch, out, seconds, play_id=None):
+    out.mkdir(parents=True, exist_ok=True)
+    rec = TapRecorder(TAP_SLOTS).start()
+    errors = []
+    if play_id:
+        app_command("play", play_id, "--es", "wav", AUDIO_WAV)
+    watch.pump(time.monotonic() + seconds)
+    if play_id:
+        _, status = wait_app(watch, play_id, lambda s: (s.get("play") or {}).get("id") == play_id
+                             and (s.get("play") or {}).get("state") == "done", AUDIO_WAV_SECONDS + 5.0)
+        if not status or status.get("id") != play_id or not status.get("ok"):
+            errors.append("play failed: %s" % (status and status.get("error")))
+    summary = rec.stop().save(out)
+    return summary, errors
+
+
+def tap_line_ok(stats):
+    return bool(stats["unique"] and stats["ovf"] == 0 and stats["rate_hz"]
+                and abs(stats["rate_hz"] - AUDIO_RATE) <= AUDIO_RATE * TAP_RATE_TOLERANCE)
+
+
+def tap_sco_packets(watch):
+    t = watch.now()
+    watch.send("pkt")
+    wait_line(watch, t, "SCO pkt:", 3.0)
+    found = next((SCO_PKT.search(line) for line in lines_since(watch, t) if SCO_PKT.search(line)), None)
+    keys = ("rx_total", "rx_correct", "rx_err", "rx_none", "rx_lost", "tx_total", "tx_discarded")
+    return dict(zip(keys, (int(v) for v in found.groups()))) if found else None
+
+
+def tap_trial(watch, index, args, out, tag):
+    trial = {"i": index}
+    resets, slc_drops = len(watch.resets), watch.slc_drops
+    trial_dir = out / ("trial-%02d" % index)
+    tag = "%s-%d" % (tag, index)
+    checks = {"opened": channel_open(watch, trial, tag + "-open", args.open_timeout)}
+    if checks["opened"]:
+        watch.pump(time.monotonic() + args.settle)
+        tone_dir, control_dir = trial_dir / "tone", trial_dir / "control"
+        summary, errors = tap_phase(watch, tone_dir, args.seconds, tag + "-play")
+        trial["tone"] = {
+            "call": tap_stream_stats(summary, "call"), "mic": tap_stream_stats(summary, "mic"),
+            "call_tones": tap_tones(tone_dir / "call.wav", summary["call"]["gaps"], args),
+            "call_match": tap_match(tone_dir, summary, "call"), "mic_match": tap_match(tone_dir, summary, "mic"),
+            "call_slots": tap_slots(tone_dir / "call.wav"), "mic_slots": tap_slots(tone_dir / "mic.wav"),
+            "pins_ok": (summary.get("board_status") or {}).get("pins_ok"), "errors": errors}
+        control, control_errors = tap_phase(watch, control_dir, args.control_seconds)
+        trial["control"] = {
+            "call": tap_stream_stats(control, "call"), "mic": tap_stream_stats(control, "mic"),
+            "call_tones": tap_tones(control_dir / "call.wav", control["call"]["gaps"], args),
+            "mic_tones": tap_tones(control_dir / "mic.wav", control["mic"]["gaps"], args),
+            "call_match": tap_match(control_dir, control, "call"), "errors": control_errors}
+        trial["sco_packets"] = tap_sco_packets(watch)
+        t = trial["tone"]
+        c = trial["control"]
+        checks.update({
+            "no_errors": not errors and not control_errors,
+            "call_tones_some_slot": any(v["pass"] for v in t["call_tones"].values()),
+            "call_equals_lyrat": bool(t["call_match"]["pass"]),
+            "mic_equals_lyrat": bool(t["mic_match"]["pass"]),
+            "call_line_ok": tap_line_ok(t["call"]),
+            "mic_line_ok": tap_line_ok(t["mic"]),
+            "pins_inputs": t["pins_ok"] == 1,
+            # The same checks without a signal must fail, otherwise the ones above prove nothing.
+            "control_call_tones_fail": not any(v["pass"] for v in c["call_tones"].values()),
+            "control_mic_tones_fail": not any(v["pass"] for v in c["mic_tones"].values()),
+            "control_call_match_fails": not c["call_match"]["pass"],
+        })
+        if checks["mic_equals_lyrat"]:
+            tap_delete_room(tone_dir)
+        tap_delete_room(control_dir)
+    closed, _ = channel_close(watch, trial, tag + "-close", args.close_timeout)
+    checks["closed"] = closed
+    trial["board_resets"] = len(watch.resets) - resets
+    trial["slc_drops"] = watch.slc_drops - slc_drops
+    checks["board_resets_zero"] = trial["board_resets"] == 0
+    checks["slc_drops_zero"] = trial["slc_drops"] == 0
+    trial["checks"] = checks
+    trial["pass"] = all(checks.values())
+    return trial
+
+
+def tap_excerpt(watch, out):
+    """A short recording of ASDOUT; only the measures stay."""
+    summary, _ = tap_phase(watch, out, TAP_EXCERPT_S)
+    channels = tap_check.read_channels(out / "mic.wav")
+    result = {"slot_" + s: tap_check.liveness(c) for s, c in zip("LR", channels)}
+    result["lost_packets"] = summary["mic"]["lost_packets"]
+    tap_delete_room(out)
+    (out / "call.wav").unlink(missing_ok=True)
+    return result
+
+
+def tap_liveness(watch, out):
+    """Room sound on ASDOUT. A check that the mic is alive, not of its quality: no SNR and no frequency here."""
+    live = {"excerpts": [], "tries": 0}
+    # The room is not always playing something: then the line is steady, which is the noise baseline, and the
+    # owner's rule is to look again later.
+    for attempt in range(TAP_LIVE_TRIES):
+        live["tries"] = attempt + 1
+        for i in range(3):
+            live["excerpts"].append(tap_excerpt(watch, out / ("excerpt-%d-%d" % (attempt, i))))
+            print(json.dumps({"try": attempt, "excerpt": i, "L": live["excerpts"][-1]["slot_L"]}), flush=True)
+        if any(e["slot_L"].get("pass") or e["slot_R"].get("pass") for e in live["excerpts"]):
+            break
+        if attempt + 1 < TAP_LIVE_TRIES:
+            watch.pump(time.monotonic() + TAP_LIVE_PAUSE_S)
+    live["gain_set"] = board_cmd(watch, "hw %d" % TAP_LOW_GAIN, "hw_gain = %d" % TAP_LOW_GAIN)
+    watch.pump(time.monotonic() + TAP_GAIN_SETTLE_S)
+    live["low_gain"] = tap_excerpt(watch, out / "excerpt-lowgain")
+    live["gain_restored"] = board_cmd(watch, "hw %d" % TAP_HW_GAIN, "hw_gain = %d" % TAP_HW_GAIN)
+    watch.pump(time.monotonic() + TAP_GAIN_SETTLE_S)
+    live["high_gain"] = tap_excerpt(watch, out / "excerpt-highgain")
+    # The median of the short time level: a step of the gain leaves a decaying offset that inflates the rms.
+    high, low = live["high_gain"]["slot_L"].get("level_p50"), live["low_gain"]["slot_L"].get("level_p50")
+    live["gain_step_db"] = round(20 * math.log10(high / low), 1) if high and low else None
+    passed = [e for e in live["excerpts"] if e["slot_L"].get("pass") or e["slot_R"].get("pass")]
+    live["excerpts_with_changing_sound"] = len(passed)
+    live["room_sound_seen"] = bool(passed)
+    live["level_follows_gain"] = bool(live["gain_step_db"] and live["gain_step_db"] >= TAP_GAIN_MIN_DB)
+    live["quietest_level_LR"] = [min(e["slot_" + s].get("level_p10") or 0 for e in live["excerpts"]) for s in "LR"]
+    steady = [e for e in live["excerpts"] if (e["slot_L"].get("modulation_ratio") or 9) < TAP_STEADY_RATIO]
+    live["steady_excerpts"] = len(steady)
+    live["steady_level_LR"] = [median([e["slot_" + s]["level_p50"] for e in steady]) for s in "LR"] if steady else None
+    return live
+
+
+def tap_long(watch, args, out, tag):
+    """Loss S3 to PC by sequence, over --long seconds with SCO open, apart from the Bluetooth counters."""
+    result = {}
+    opened = channel_open(watch, result, tag + "-long-open", args.open_timeout)
+    result["opened"] = opened
+    if opened:
+        watch.pump(time.monotonic() + args.settle)
+        before = tap_sco_packets(watch)
+        summary, _ = tap_phase(watch, out, args.long)
+        after = tap_sco_packets(watch)
+        result.update({"seconds": args.long, "call": tap_stream_stats(summary, "call"), "mic": tap_stream_stats(summary, "mic"),
+                       "pins_ok": (summary.get("board_status") or {}).get("pins_ok"), "sco_before": before, "sco_after": after})
+        if before and after:
+            total = after["rx_total"] - before["rx_total"]
+            none = after["rx_none"] - before["rx_none"]
+            result["bluetooth_rx_none_pct"] = round(100.0 * none / total, 3) if total else None
+        for name in ("call.wav", "lyrat_call.wav", *TAP_ROOM_FILES):
+            (out / name).unlink(missing_ok=True)
+    channel_close(watch, {}, tag + "-long-close", args.close_timeout)
+    return result
+
+
+def tap_s3_reset(watch, index, args, out, tag):
+    """Restart the S3 with SCO open: the LyraT must not notice and the streams must come back by themselves."""
+    trial = {"i": index}
+    resets, slc_drops = len(watch.resets), watch.slc_drops
+    checks = {"opened": channel_open(watch, trial, "%s-s3r%d-open" % (tag, index), args.open_timeout)}
+    if checks["opened"]:
+        watch.pump(time.monotonic() + args.settle)
+        here = out / ("s3-reset-%d" % index)
+        here.mkdir(parents=True, exist_ok=True)
+        rec = TapRecorder(TAP_SLOTS).start()
+        watch.pump(time.monotonic() + 3.0)
+        streams_before = rec.received("call"), rec.received("mic")
+        w = s3.watch(here / "s3")
+        w.pump(time.monotonic() + 8, until=lambda: w.sp is not None)
+        t_since = watch.now()
+        t0 = time.monotonic()
+        s3.restart(w)
+        back = None
+        while time.monotonic() - t0 < args.restore_timeout:
+            watch.pump(time.monotonic() + 0.1)
+            w.pump(time.monotonic() + 0.1)
+            if len(rec.streams["call"].boots) >= 2 and len(rec.streams["mic"].boots) >= 2:
+                back = round(time.monotonic() - t0, 2)
+                break
+        watch.pump(time.monotonic() + 3.0)
+        w.close_port()
+        s3_serial = w.finish(0)
+        summary = rec.stop().save(here)
+        for name in ("call.wav", "lyrat_call.wav", *TAP_ROOM_FILES):
+            (here / name).unlink(missing_ok=True)
+        text = lines_since(watch, t_since)
+        trial.update({"packets_before": streams_before, "restored_s": back, "call_boots": summary["call"]["boots"],
+                      "mic_boots": summary["mic"]["boots"], "s3_resets_seen": s3_serial["board_resets"],
+                      "pins_ok": (summary.get("board_status") or {}).get("pins_ok"),
+                      "sco_closed_lines": sum(1 for line in text if SCO_CLOSED_LINE in line)})
+        checks.update({"streaming_before": min(streams_before) > 0, "streams_restored": back is not None,
+                       "pins_inputs_after": trial["pins_ok"] == 1, "sco_stayed_open": trial["sco_closed_lines"] == 0})
+    closed, _ = channel_close(watch, trial, "%s-s3r%d-close" % (tag, index), args.close_timeout)
+    checks["closed"] = closed
+    trial["lyrat_resets"] = len(watch.resets) - resets
+    trial["slc_drops"] = watch.slc_drops - slc_drops
+    checks["lyrat_resets_zero"] = trial["lyrat_resets"] == 0
+    checks["slc_drops_zero"] = trial["slc_drops"] == 0
+    trial["checks"] = checks
+    trial["pass"] = all(checks.values())
+    return trial
+
+
+def stage_tap(args):
+    keep_awake()
+    out = run_dir("tap", args.label)
+    start = datetime.now()
+    t0 = time.monotonic()
+    if SCO_APP not in adb("shell", "pm", "path", SCO_APP):
+        return audio_no_data(args, out, "probe app is not installed, run android/build_apk.py --install")
+    try:
+        before = phone.status()
+        bonds_before = phone.bond_list()
+    except phone.PhoneError as e:
+        return audio_no_data(args, out, str(e))
+    if before["keyguard"]:
+        return audio_no_data(args, out, "phone keyguard is showing")
+    telecom_before = telecom_state()
+    if telecom_before is None or telecom_before["calls_now"] or telecom_before["telephony_busy"]:
+        return audio_no_data(args, out, "a call is in progress or telecom is unreadable: %s" % telecom_before)
+    watch = SerialWatch(args.port, out, False, echo=args.echo)
+    watch.pump(time.monotonic() + 15, until=lambda: watch.sp is not None)
+    if watch.sp is None:
+        watch.finish(0)
+        return audio_no_data(args, out, "port not opened")
+    adb("shell", "am", "force-stop", SCO_APP)
+
+    setup = {}
+    trials, resets_s3 = [], []
+    live, loss = None, None
+    try:
+        # Volume first: nothing of the phone's tones may reach the room. The DSP off makes the reference exact.
+        setup = {"vol_0": board_cmd(watch, "vol 0", "volume = 0"), "dsp_off": board_cmd(watch, "all 0", "ALL DSP = 0"),
+                 "sns_off": board_cmd(watch, "sns 0", "sns=0"), "mic_gain_1": board_cmd(watch, "mg 1", "mic_gain = 1")}
+        print(json.dumps({"setup": setup}), flush=True)
+        if all(setup.values()):
+            wav = out / AUDIO_WAV
+            make_tone_wav(wav)
+            tag = datetime.now().strftime("%H%M%S")
+            app_command("status", tag + "-start")
+            wait_app(watch, tag + "-start", lambda s: True, 10.0)
+            adb("push", str(wav), SCO_DIR + "/" + AUDIO_WAV, timeout=30.0)
+            for i in range(1, args.n + 1):
+                trial = tap_trial(watch, i, args, out, tag)
+                trials.append(trial)
+                print(json.dumps({"trial": i, "pass": trial["pass"], "checks": trial["checks"],
+                                  "tones": (trial.get("tone") or {}).get("call_tones", {}).get("L"),
+                                  "call_match": (trial.get("tone") or {}).get("call_match"),
+                                  "mic_match": (trial.get("tone") or {}).get("mic_match"),
+                                  "control_call_match": (trial.get("control") or {}).get("call_match")}), flush=True)
+                write_json(out / "partial.json", {"trials": trials})
+                watch.pump(time.monotonic() + 2.0)
+            live = tap_liveness(watch, out / "liveness")
+            if args.long:
+                loss = tap_long(watch, args, out / "long", tag)
+                print(json.dumps({"long": loss}), flush=True)
+            for i in range(1, args.s3_resets + 1):
+                resets_s3.append(tap_s3_reset(watch, i, args, out, tag))
+                print(json.dumps({"s3_reset": resets_s3[-1]}), flush=True)
+                watch.pump(time.monotonic() + 2.0)
+    finally:
+        # A reset brings back the volume, gain and DSP of a normal boot.
+        ups = watch.slc_ups
+        resets_before = len(watch.resets)
+        adb("shell", "am", "force-stop", SCO_APP)
+        watch.pulse_reset()
+        slc_after_reset = wait_slc(watch, ups, args.slc_timeout)
+        tone_end = board_tone(watch)
+    watch.close_port()
+    summary = watch.finish(args.n)
+    end = datetime.now()
+    telecom_after = telecom_state()
+    try:
+        phone.go_home()
+        after = phone.status()
+        bonds_after = phone.bond_list()
+    except phone.PhoneError:
+        after, bonds_after = None, None
+    removals = usb_removals(start, end)
+    standby = pc_standby_entries(start, end)
+    passed = sum(1 for t in trials if t["pass"])
+    checks = {
+        "setup": bool(setup) and all(setup.values()),
+        "trials_all_pass": passed == args.n,
+        "mic_room_sound_seen": bool(live and live["room_sound_seen"]),
+        "mic_level_follows_gain": bool(live and live["level_follows_gain"]),
+        "tone_off_at_end": tone_end == 0,
+        "slc_back_after_final_reset": slc_after_reset is not None,
+        "no_call_during_round": bool(telecom_after) and telecom_after["calls_now"] == 0
+                                and telecom_after["telephony_busy"] == 0
+                                and telecom_after["historical_lines"] == telecom_before["historical_lines"],
+        "other_bonds_unchanged": bonds_after is not None and phone.others(bonds_before) == phone.others(bonds_after),
+        "phone_hfp_connected_at_end": bool(after and after["hfp_connected"]),
+        "lyrat_resets_only_final": summary["board_resets"] == resets_before + 1 and resets_before == 0,
+        "panics_zero": summary["panics"] == 0,
+        "slc_drops_zero": summary["slc_drops"] == 0,
+        "port_drops_zero": summary["port_drops"] == 0,
+        "usb_removals_zero": removals == 0,
+    }
+    if args.long:
+        checks["long_loss_within_limit"] = bool(loss and loss.get("call") and loss.get("mic")
+                                                and loss["call"]["loss_pct"] is not None
+                                                and loss["mic"]["loss_pct"] is not None
+                                                and loss["call"]["loss_pct"] <= args.max_loss
+                                                and loss["mic"]["loss_pct"] <= args.max_loss
+                                                and loss["call"]["ovf"] == 0 and loss["mic"]["ovf"] == 0)
+    if args.s3_resets:
+        checks["s3_resets_all_pass"] = len(resets_s3) == args.s3_resets and all(t["pass"] for t in resets_s3)
+    verdict = "INVALID_WINDOW" if standby != 0 else ("PASS" if all(checks.values()) else "FAIL")
+    result = {"stage": "tap", "label": args.label, "power": args.power, "verdict": verdict, "checks": checks,
+              "start": start.isoformat(timespec="seconds"), "end": end.isoformat(timespec="seconds"),
+              "seconds": round(time.monotonic() - t0, 1), "dir": str(out),
+              "planned": {"trials": args.n, "min_snr_db": args.min_snr, "max_shift_pct": args.max_shift,
+                          "max_impaired_pct": args.max_impaired, "max_loss_pct": args.max_loss, "long_s": args.long,
+                          "s3_resets": args.s3_resets, "tones": AUDIO_TONES},
+              "not_checked": "ASDOUT tones and SNR: no digital source reaches this line and no sound is played (R15). "
+                             "Liveness by room sound is not a measure of quality.",
+              "trials_passed": passed, "setup": setup, "liveness": live, "long": loss, "s3_resets": resets_s3,
+              "tone_end": tone_end, "slc_after_final_reset_s": slc_after_reset,
+              "telecom_before": telecom_before, "telecom_after": telecom_after, "phone_before": before,
+              "phone_after": after, "pc_standby_entries": standby, "usb_removals": removals, "trials": trials,
+              "serial": summary}
+    write_json(out / "round.json", result)
+    with (RUNS_ROOT / "rounds.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(redact(json.dumps({k: result[k] for k in ("stage", "label", "power", "verdict", "start", "seconds",
+                                                           "trials_passed", "usb_removals", "dir")}, ensure_ascii=False)) + "\n")
+    print(json.dumps({k: v for k, v in result.items() if k not in ("trials", "phone_before", "phone_after")},
+                     ensure_ascii=False, indent=2))
+    return {"PASS": 0, "FAIL": 1}.get(verdict, 2)
+
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="stage", required=True)
@@ -1036,13 +1446,32 @@ def main():
     p.add_argument("--label", default="")
     p.add_argument("--port", default=DEFAULT_PORT)
     p.add_argument("--echo", action="store_true", help="print events live")
+    p = sub.add_parser("tap", help="content of both I2S lines captured by the S3-ETH board, no sound on the PC")
+    p.add_argument("--power", required=True, help="what feeds the board, e.g. adapter or battery (R11)")
+    p.add_argument("--n", type=int, default=3, help="number of trials")
+    p.add_argument("--seconds", type=int, default=8, help="length of the tone phase")
+    p.add_argument("--control-seconds", type=int, default=4, help="length of the phase without a signal")
+    p.add_argument("--min-snr", type=float, default=30.0)
+    p.add_argument("--max-shift", type=float, default=1.0, help="percent")
+    p.add_argument("--max-impaired", type=float, default=30.0, help="percent of blocks, Bluetooth losses with Wi-Fi on")
+    p.add_argument("--max-loss", type=float, default=0.5, help="percent of packets S3 to PC")
+    p.add_argument("--long", type=float, default=0.0, help="seconds of the loss measurement, 0 skips it")
+    p.add_argument("--s3-resets", type=int, default=0, help="restarts of the S3 with SCO open")
+    p.add_argument("--restore-timeout", type=float, default=30.0, help="seconds for the streams to return")
+    p.add_argument("--settle", type=float, default=1.0)
+    p.add_argument("--open-timeout", type=float, default=15.0)
+    p.add_argument("--close-timeout", type=float, default=10.0)
+    p.add_argument("--slc-timeout", type=float, default=30.0)
+    p.add_argument("--label", default="")
+    p.add_argument("--port", default=DEFAULT_PORT)
+    p.add_argument("--echo", action="store_true", help="print events live")
     args = ap.parse_args()
     if getattr(args, "no_wifi", False):
         args.criterion_up = "strict"
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
-    return {"link": stage_link, "sco": stage_sco, "power": stage_power, "audio": stage_audio}[args.stage](args)
+    return {"link": stage_link, "sco": stage_sco, "power": stage_power, "audio": stage_audio, "tap": stage_tap}[args.stage](args)
 
 
 if __name__ == "__main__":
