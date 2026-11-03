@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Bench round runner: one command, one JSON verdict based on measured values only.
 
-  round.py power [--seconds 900] [--no-open] [--label NAME]
+  round.py power --power SOURCE [--seconds 900] [--no-open] [--label NAME]
 
 power: watches the board, the phone ACL history and Windows USB removal events.
 Writes <runs>/power/<stamp>-<label>/round.json and appends one line to <runs>/rounds.jsonl.
 Later goals add stages here. Exit code: 0 PASS, 1 FAIL, 2 could not measure.
+Holds off PC sleep during a round; a window the PC still slept through is INVALID_WINDOW.
 
 PASS for power, port open: no port drop, no board reset, no USB removal event, no panic,
 no SLC drop, and the board uptime grew over the whole window.
-PASS for power, port closed: no USB removal event and no ACL teardown with the board;
-with the port closed there is no reset counter, so the phone link stands in as liveness.
+PASS for power, port closed: no USB removal event, and the uptime read right after the window
+covers it; with adb available also no ACL teardown with the board.
 """
 import argparse
 import json
@@ -21,11 +22,12 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from benchlib import DEFAULT_PORT, RUNS_ROOT, powershell, redact, run_dir, write_json  # noqa: E402
+from benchlib import DEFAULT_PORT, RUNS_ROOT, keep_awake, powershell, redact, run_dir, write_json  # noqa: E402
 from serial_watch import SerialWatch  # noqa: E402
 
 BOARD_NAME = "LyraT_Phone"
 USB_ID = "VID_10C4"
+CLOSED_SAMPLE_S = 15.0
 ACL_LINE = re.compile(
     r"shim::acl peer:\S*?([0-9a-f]{2}:[0-9a-f]{2}) handle:\S+ is_locally_initiated:(\w+) "
     r"creation_time:(\S+ \S+)(?: teardown_time:(\S+ \S+) disconnect_reason:(\S+))?")
@@ -81,20 +83,40 @@ def usb_removals(start: datetime, end: datetime):
     return int(text[-1]) if text and text[-1].isdigit() else None
 
 
+def pc_standby_entries(start: datetime, end: datetime):
+    """Kernel-Power event 506: the PC entered Modern Standby, so the window is not a real measurement."""
+    fmt = "%Y-%m-%dT%H:%M:%S"
+    script = (
+        "$a=[datetime]'%s'; $b=[datetime]'%s'; "
+        "@(Get-WinEvent -FilterHashtable @{LogName='System';ProviderName='Microsoft-Windows-Kernel-Power';"
+        "Id=506;StartTime=$a;EndTime=$b} -ErrorAction SilentlyContinue).Count" % (start.strftime(fmt), end.strftime(fmt)))
+    text = powershell(script, timeout=60).stdout.strip().splitlines()
+    return int(text[-1]) if text and text[-1].isdigit() else None
+
+
 def stage_power(args):
+    keep_awake()
     out = run_dir("power", args.label)
     start = datetime.now()
     phone_before = adb("get-state").strip() or "gone"
     watch = SerialWatch(args.port, out, args.no_open, echo=args.echo).run(args.seconds)
     end = datetime.now()
+    closed_sample = None
+    if args.no_open:
+        # Liveness without the phone: the first uptime read after the closed window must cover it.
+        closed_sample = SerialWatch(args.port, out / "after_close", False, echo=args.echo).run(CLOSED_SAMPLE_S)
     acl = phone_acl(start, end)
     removals = usb_removals(start, end)
+    standby = pc_standby_entries(start, end)
+    # The monotonic clock keeps running through standby, so an overrun also exposes a sleeping PC.
+    window_valid = standby == 0 and watch["elapsed_s"] <= args.seconds + 30
 
     checks = {"usb_removals_zero": removals == 0, "port_drops_zero": watch["port_drops"] == 0}
     if args.no_open:
-        checks["acl_measured"] = acl is not None
-        checks["acl_teardowns_zero"] = bool(acl) and acl["acl_teardowns"] == 0
-        checks["acl_open_at_end"] = bool(acl) and acl["acl_open_at_end"]
+        if acl is not None:
+            checks["acl_teardowns_zero"] = acl["acl_teardowns"] == 0
+            checks["acl_open_at_end"] = acl["acl_open_at_end"]
+        checks["uptime_covers_closed_window"] = (closed_sample["max_uptime_ms"] or 0) >= args.seconds * 1000
     else:
         checks["board_resets_zero"] = watch["board_resets"] == 0
         checks["panics_zero"] = watch["panics"] == 0
@@ -102,16 +124,22 @@ def stage_power(args):
         # Guards against a silently missed reset: the uptime must have grown over the window.
         checks["uptime_covers_window"] = (watch["last_uptime_ms"] or 0) >= (args.seconds - 30) * 1000
     measured = watch["lines"] > 0 or args.no_open
-    verdict = "NO_DATA" if not measured else ("PASS" if all(checks.values()) else "FAIL")
+    if not window_valid:
+        verdict = "INVALID_WINDOW"
+    elif not measured:
+        verdict = "NO_DATA"
+    else:
+        verdict = "PASS" if all(checks.values()) else "FAIL"
 
-    result = {"stage": "power", "label": args.label, "verdict": verdict, "checks": checks,
+    result = {"stage": "power", "label": args.label, "power": args.power, "verdict": verdict, "checks": checks,
               "start": start.isoformat(timespec="seconds"), "end": end.isoformat(timespec="seconds"),
-              "dir": str(out), "phone_before": phone_before, "usb_removals": removals, "acl": acl}
+              "dir": str(out), "phone_before": phone_before, "pc_standby_entries": standby, "window_valid": window_valid,
+              "usb_removals": removals, "acl": acl, "closed_sample": closed_sample}
     result.update(watch)
     write_json(out / "round.json", result)
     with (RUNS_ROOT / "rounds.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(redact(json.dumps({k: result[k] for k in (
-            "stage", "label", "verdict", "start", "seconds", "port_drops", "board_resets",
+            "stage", "label", "power", "verdict", "start", "seconds", "port_drops", "board_resets",
             "usb_removals", "slc_drops", "dir")}, ensure_ascii=False)) + "\n")
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return {"PASS": 0, "FAIL": 1}.get(verdict, 2)
@@ -124,6 +152,7 @@ def main():
     p.add_argument("--seconds", type=float, default=900.0)
     p.add_argument("--no-open", action="store_true", help="keep the serial port closed")
     p.add_argument("--label", default="")
+    p.add_argument("--power", required=True, help="what feeds the board, e.g. adapter or battery (R11)")
     p.add_argument("--port", default=DEFAULT_PORT)
     p.add_argument("--echo", action="store_true", help="print events live")
     args = ap.parse_args()

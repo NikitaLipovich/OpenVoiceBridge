@@ -1391,7 +1391,7 @@ void app_main(void)
     // Diagnostic: let a supply sag reset the chip with a distinct reason code,
     // since POWERON alone cannot tell a sag from an EN pulse.
     brownout_hal_config_t bod = {
-        .threshold = 0, .enabled = true, .reset_enabled = true,
+        .threshold = BENCH_BROWNOUT_RESET - 1, .enabled = true, .reset_enabled = true,
         .flash_power_down = false, .rf_power_down = false,
     };
     brownout_hal_config(&bod);

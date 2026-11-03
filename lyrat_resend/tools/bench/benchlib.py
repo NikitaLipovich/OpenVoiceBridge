@@ -38,6 +38,14 @@ def write_json(path: Path, obj) -> None:
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def keep_awake() -> None:
+    """Hold off Windows sleep and display-off for the life of this process; no settings change."""
+    if os.name == "nt":
+        import ctypes
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED, ES_DISPLAY_REQUIRED = 0x80000000, 0x1, 0x2
+        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)
+
+
 def powershell(script: str, timeout: float = 120.0) -> subprocess.CompletedProcess:
     # ESP-IDF refuses to activate when it sees MSYSTEM, which leaks in from Git Bash.
     env = {k: v for k, v in os.environ.items() if k != "MSYSTEM"}
