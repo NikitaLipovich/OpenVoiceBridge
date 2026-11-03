@@ -32,6 +32,8 @@ ACL_LINE = re.compile(
     r"shim::acl peer:\S*?([0-9a-f]{2}:[0-9a-f]{2}) handle:\S+ is_locally_initiated:(\w+) "
     r"creation_time:(\S+ \S+)(?: teardown_time:(\S+ \S+) disconnect_reason:(\S+))?")
 RECORD_LINE = re.compile(r"([0-9a-fA-F]{2}:[0-9a-fA-F]{2})\s+BR_EDR\b[^\n]*name:\"" + BOARD_NAME + '"')
+# The security record list empties after a phone reboot; the bonded list stays.
+BONDED_LINE = re.compile(r"([0-9a-fA-F]{2}:[0-9a-fA-F]{2})\s+\[[^\]\n]*\]\[[^\]\n]*\]\s+" + BOARD_NAME)
 
 
 def adb(*args, timeout=60.0):
@@ -44,16 +46,20 @@ def adb(*args, timeout=60.0):
 
 
 def phone_acl(start: datetime, end: datetime):
-    """ACL sessions with the board as seen by the phone inside the window; None if adb is gone."""
+    """Closed ACL sessions with the board inside the window; None if unmeasured.
+
+    The phone records a session only at its teardown, so a live link is not visible here.
+    """
     dump = adb("shell", "dumpsys", "bluetooth_manager")
     if not dump:
         return None
-    m = RECORD_LINE.search(dump)
-    suffix = m.group(1).lower() if m else None
+    m = RECORD_LINE.search(dump) or BONDED_LINE.search(dump)
+    if not m:
+        return None   # board unknown to the phone: this is "not measured", not "zero sessions"
+    suffix = m.group(1).lower()
     fmt = "%Y-%m-%d %H:%M:%S.%f"
     created = teardowns = 0
     reasons = {}
-    open_now = False
     for m in ACL_LINE.finditer(dump):
         if suffix is None or m.group(1) != suffix:
             continue
@@ -64,10 +70,8 @@ def phone_acl(start: datetime, end: datetime):
             if start <= gone <= end:
                 teardowns += 1
                 reasons[m.group(5)] = reasons.get(m.group(5), 0) + 1
-        else:
-            open_now = True
     return {"board_suffix": suffix, "acl_created": created, "acl_teardowns": teardowns,
-            "teardown_reasons": reasons, "acl_open_at_end": open_now}
+            "teardown_reasons": reasons}
 
 
 def usb_removals(start: datetime, end: datetime):
@@ -115,7 +119,6 @@ def stage_power(args):
     if args.no_open:
         if acl is not None:
             checks["acl_teardowns_zero"] = acl["acl_teardowns"] == 0
-            checks["acl_open_at_end"] = acl["acl_open_at_end"]
         checks["uptime_covers_closed_window"] = (closed_sample["max_uptime_ms"] or 0) >= args.seconds * 1000
     else:
         checks["board_resets_zero"] = watch["board_resets"] == 0

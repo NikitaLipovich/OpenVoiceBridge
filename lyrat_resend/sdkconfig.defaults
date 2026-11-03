@@ -73,3 +73,7 @@ CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 # Нужна т.к. BT стек требует > 1MB app-раздела
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_bt_sink_example.csv"
+
+# PHY: the radio start pulls the chip supply below 2.8 V at 20 dBm (goal 010 RESULTS),
+# 10 dBm is the cap that keeps the board alive. Runtime power is 8 dBm anyway.
+CONFIG_ESP_PHY_MAX_WIFI_TX_POWER=10
