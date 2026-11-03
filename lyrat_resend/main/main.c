@@ -67,6 +67,7 @@
 #include "aec.h"
 #include "spectral_ns.h"
 #include "ulaw.h"
+#include "wifi_secrets.h"
 
 // ---------------------------------------------------------------------------
 // Log tags
@@ -114,12 +115,11 @@
 // WiFi settings (edit for your network)
 // ---------------------------------------------------------------------------
 
-#define WIFI_SSID        "lipovich"
-#define WIFI_PASS        "Wonsik13_"
+// WIFI_SSID and WIFI_PASS come from wifi_secrets.h (see wifi_secrets.h.example)
 #define UDP_REMOTE_IP_A  192
 #define UDP_REMOTE_IP_B  168
-#define UDP_REMOTE_IP_C  1
-#define UDP_REMOTE_IP_D  214
+#define UDP_REMOTE_IP_C  0
+#define UDP_REMOTE_IP_D  248
 #define UDP_CALL_PORT    5004   // call audio: phone → headphones
 #define UDP_MIC_PORT     5005   // mic audio: headset mic → phone
 
@@ -176,6 +176,96 @@ static RingbufHandle_t         s_rb_udp_call = NULL;  // call audio → UDP 5004
 static RingbufHandle_t         s_rb_udp_mic  = NULL;  // mic audio → UDP 5005
 
 static volatile bool s_sco_active = false;
+
+// --- F4 (harness): headset-initiated HFP reconnect ------------------------
+// A Windows AG never connects on its own: it waits for the headset to initiate.
+// Keep up to HF_MAX_PEERS recent peers (phone + PC) and try them in turn while
+// SLC is down. A live link is never interrupted.
+#define HF_MAX_PEERS 2
+
+static esp_bd_addr_t s_peers[HF_MAX_PEERS];
+static uint8_t       s_peer_cnt = 0;
+static volatile bool s_slc_up   = false;
+
+static void hf_peers_save(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("lyrat", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "peer_cnt", s_peer_cnt);
+    nvs_set_blob(h, "peers", s_peers, sizeof(s_peers));
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static void hf_peers_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("lyrat", NVS_READONLY, &h) != ESP_OK) return;
+    uint8_t cnt = 0;
+    size_t  len = sizeof(s_peers);
+    if (nvs_get_u8(h, "peer_cnt", &cnt) == ESP_OK &&
+        nvs_get_blob(h, "peers", s_peers, &len) == ESP_OK) {
+        s_peer_cnt = (cnt > HF_MAX_PEERS) ? HF_MAX_PEERS : cnt;
+    }
+    nvs_close(h);
+
+    // First boot after the patch: NVS is empty but the stack already has bonds,
+    // so seed the peer list from the bond list, otherwise there is nobody to call.
+    if (s_peer_cnt == 0) {
+        int num = esp_bt_gap_get_bond_device_num();
+        if (num > 0) {
+            esp_bd_addr_t *list = calloc((size_t)num, sizeof(esp_bd_addr_t));
+            if (list && esp_bt_gap_get_bond_device_list(&num, list) == ESP_OK) {
+                for (int i = 0; i < num && s_peer_cnt < HF_MAX_PEERS; i++) {
+                    memcpy(s_peers[s_peer_cnt++], list[i], ESP_BD_ADDR_LEN);
+                }
+                hf_peers_save();
+                ESP_LOGI(TAG_BT, "seeded %u peer(s) from bond list", s_peer_cnt);
+            }
+            free(list);
+        }
+    }
+
+    for (uint8_t i = 0; i < s_peer_cnt; i++) {
+        ESP_LOGI(TAG_BT, "peer[%u] = %02x:%02x:%02x:%02x:%02x:%02x", i,
+                 s_peers[i][0], s_peers[i][1], s_peers[i][2],
+                 s_peers[i][3], s_peers[i][4], s_peers[i][5]);
+    }
+}
+
+// MRU: the latest peer goes first, duplicates collapse
+static void hf_peer_add(const esp_bd_addr_t bda)
+{
+    esp_bd_addr_t tmp[HF_MAX_PEERS];
+    uint8_t n = 0;
+    memcpy(tmp[n++], bda, ESP_BD_ADDR_LEN);
+    for (uint8_t i = 0; i < s_peer_cnt && n < HF_MAX_PEERS; i++) {
+        if (memcmp(s_peers[i], bda, ESP_BD_ADDR_LEN) == 0) continue;
+        memcpy(tmp[n++], s_peers[i], ESP_BD_ADDR_LEN);
+    }
+    memcpy(s_peers, tmp, sizeof(esp_bd_addr_t) * n);
+    s_peer_cnt = n;
+    hf_peers_save();
+}
+
+static void hf_reconnect_task(void *arg)
+{
+    (void)arg;
+    uint32_t idx = 0;
+    vTaskDelay(pdMS_TO_TICKS(4000));          // let the stack come up
+    for (;;) {
+        if (!s_slc_up && s_peer_cnt > 0) {
+            uint8_t i = (uint8_t)(idx % s_peer_cnt);
+            ESP_LOGI(TAG_BT, "HFP connect try peer[%u] %02x:%02x:%02x:%02x:%02x:%02x",
+                     i, s_peers[i][0], s_peers[i][1], s_peers[i][2],
+                     s_peers[i][3], s_peers[i][4], s_peers[i][5]);
+            esp_hf_client_connect(s_peers[i]);
+            idx++;
+        }
+        vTaskDelay(pdMS_TO_TICKS(8000));
+    }
+}
+
 
 // WiFi / UDP
 static EventGroupHandle_t s_wifi_event_group = NULL;
@@ -597,7 +687,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         }
 
         // Reduce WiFi TX power (less coex contention, less power draw)
-        esp_wifi_set_max_tx_power(52);  // 13 dBm, enough for same room
+        esp_wifi_set_max_tx_power(32);  // 8 dBm: less contention with BT on the shared antenna
 
         s_wifi_ready = true;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
@@ -758,7 +848,11 @@ static void hf_client_cb(esp_hf_client_cb_event_t    event,
 
     case ESP_HF_CLIENT_CONNECTION_STATE_EVT:
         ESP_LOGI(TAG_BT, "HFP conn state=%d", param->conn_stat.state);
+        if (param->conn_stat.state == ESP_HF_CLIENT_CONNECTION_STATE_DISCONNECTED)
+            s_slc_up = false;
         if (param->conn_stat.state == ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED) {
+            s_slc_up = true;
+            hf_peer_add(param->conn_stat.remote_bda);
             ESP_LOGI(TAG_BT, "*** SLC CONNECTED ***");
         }
         break;
@@ -773,9 +867,9 @@ static void hf_client_cb(esp_hf_client_cb_event_t    event,
             st == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC) {
             s_sco_active = true;
             esp_hf_client_outgoing_data_ready();
-            // WiFi priority — BT SCO has built-in retransmission (eSCO + mSBC PLC)
-            esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
-            ESP_LOGI(TAG_BT, "*** SCO OPEN — coex=WIFI priority ***");
+            // BT priority: shared antenna, WiFi priority starves SCO and drops the link
+            esp_coex_preference_set(ESP_COEX_PREFER_BT);
+            ESP_LOGI(TAG_BT, "*** SCO OPEN — coex=BT priority ***");
         } else if (st == ESP_HF_CLIENT_AUDIO_STATE_DISCONNECTED) {
             s_sco_active = false;
             esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
@@ -1012,6 +1106,8 @@ static esp_err_t bt_init(void)
     esp_hf_client_register_data_callback(incoming_pcm_cb, outgoing_pcm_cb);
 
     esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+    hf_peers_load();
+    xTaskCreatePinnedToCore(hf_reconnect_task, "hf_recon", 3072, NULL, 6, NULL, 0);
 
     const uint8_t *mac = esp_bt_dev_get_address();
     ESP_LOGI(TAG_BT, "BT ready: '%s' MAC=%02x:%02x:%02x:%02x:%02x:%02x",
@@ -1040,6 +1136,11 @@ static void print_status(void)
     ESP_LOGI(TAG_CMD, "  call_gain = %d", s_dsp.call_gain);
     ESP_LOGI(TAG_CMD, "  wifi    = %d", s_dsp.wifi_on);
     ESP_LOGI(TAG_CMD, "  SCO     = %s", s_sco_active ? "active" : "idle");
+    ESP_LOGI(TAG_CMD, "  SLC     = %s", s_slc_up ? "up" : "down");
+    for (uint8_t i = 0; i < s_peer_cnt; i++)
+        ESP_LOGI(TAG_CMD, "  peer[%u] = %02x:%02x:%02x:%02x:%02x:%02x", i,
+                 s_peers[i][0], s_peers[i][1], s_peers[i][2],
+                 s_peers[i][3], s_peers[i][4], s_peers[i][5]);
     ESP_LOGI(TAG_CMD, "  heap    = %"PRIu32, esp_get_free_heap_size());
 }
 

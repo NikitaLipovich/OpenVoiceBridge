@@ -32,3 +32,5 @@ __pycache__/
 
 # Windows
 Thumbs.db
+# goal-extruder harness (local only)
+goals_harness/
