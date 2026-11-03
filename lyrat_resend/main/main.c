@@ -26,6 +26,7 @@
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <math.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -316,30 +317,187 @@ static esp_err_t es8388_read_reg_raw(uint8_t reg, uint8_t *val)
 // HFP Legacy PCM callbacks
 // ---------------------------------------------------------------------------
 
+//
+// The pipeline always runs at 16 kHz. mSBC blocks are 16 kHz PCM as they are; CVSD blocks are 8 kHz
+// PCM and get resampled here, at the Bluetooth boundary, through one half-band FIR.
+//
+// A single esp_hf_client_outgoing_data_ready() makes the stack call outgoing_pcm_cb in a loop until
+// the callback returns a short count or its SCO queue is full. Returning 0 is what stops the loop;
+// padding with zeros here would feed silence into the stream and drop real frames from the ring.
+
+#define HB_ODD_TAPS   12        // odd half of a 47 tap half-band FIR, sums to 0.25 (Q15)
+#define HB_UP_HIST    (2 * HB_ODD_TAPS)
+#define HB_DOWN_HIST  (4 * HB_ODD_TAPS - 1)
+#define HB_CENTER     (2 * HB_ODD_TAPS - 1)
+#define BT_CHUNK_8K   120       // 8 kHz samples handled per pass
+
+static const int16_t s_hb_odd[HB_ODD_TAPS] = {
+    10379, -3318, 1830, -1150, 750, -489, 311, -189, 107, -55, 23, -7
+};
+
+static volatile bool s_bt_8k        = false;   // set from the connected state of AUDIO_STATE_EVT
+static volatile bool s_bt_reset_in  = false;   // consumed by the callback that owns the state
+static volatile bool s_bt_reset_out = false;
+
+// Loss counters of the current SCO link
+static volatile uint32_t s_sco_in_bytes, s_sco_in_dropped, s_sco_in_block;
+static volatile uint32_t s_sco_out_bytes, s_sco_out_short, s_sco_out_block;
+static volatile uint16_t s_sco_handle;
+
+static void sco_stats_log(const char *when)
+{
+    ESP_LOGI(TAG_BT, "SCO stats %s: rate=%d in=%"PRIu32" in_block=%"PRIu32" in_dropped=%"PRIu32
+             " out=%"PRIu32" out_block=%"PRIu32" out_short=%"PRIu32,
+             when, s_bt_8k ? 8000 : 16000, s_sco_in_bytes, s_sco_in_block, s_sco_in_dropped,
+             s_sco_out_bytes, s_sco_out_block, s_sco_out_short);
+}
+
+static inline int16_t sat16(int32_t v)
+{
+    return (int16_t)(v > 32767 ? 32767 : (v < -32768 ? -32768 : v));
+}
+
+// 8 kHz -> 16 kHz: every input gives its delayed self and one interpolated sample.
+static void resample_up(const int16_t *in, size_t n, int16_t *out)
+{
+    static int16_t h[HB_UP_HIST];
+    if (s_bt_reset_in) {
+        memset(h, 0, sizeof(h));
+        s_bt_reset_in = false;
+    }
+    for (size_t i = 0; i < n; i++) {
+        memmove(&h[1], &h[0], (HB_UP_HIST - 1) * sizeof(int16_t));
+        h[0] = in[i];
+        int32_t acc = 0;
+        for (int k = 0; k < HB_ODD_TAPS; k++) {
+            acc += s_hb_odd[k] * ((int32_t)h[HB_ODD_TAPS - 1 - k] + h[HB_ODD_TAPS + k]);
+        }
+        out[2 * i]     = h[HB_ODD_TAPS];
+        out[2 * i + 1] = sat16(acc >> 14);      // interpolation gain of 2
+    }
+}
+
+// 16 kHz -> 8 kHz: 2n input samples give n output samples.
+static void resample_down(const int16_t *in, size_t n, int16_t *out)
+{
+    static int16_t h[HB_DOWN_HIST];
+    if (s_bt_reset_out) {
+        memset(h, 0, sizeof(h));
+        s_bt_reset_out = false;
+    }
+    for (size_t i = 0; i < n; i++) {
+        memmove(&h[2], &h[0], (HB_DOWN_HIST - 2) * sizeof(int16_t));
+        h[1] = in[2 * i];
+        h[0] = in[2 * i + 1];
+        int32_t acc = (int32_t)h[HB_CENTER] << 14;
+        for (int k = 0; k < HB_ODD_TAPS; k++) {
+            acc += s_hb_odd[k] * ((int32_t)h[HB_CENTER - (2 * k + 1)] + h[HB_CENTER + (2 * k + 1)]);
+        }
+        out[i] = sat16(acc >> 15);
+    }
+}
+
 static void incoming_pcm_cb(const uint8_t *buf, uint32_t sz)
 {
+    s_sco_in_bytes += sz;
+    s_sco_in_block = sz;
     if (s_rb_call_rx) {
-        xRingbufferSend(s_rb_call_rx, buf, sz, 0);
+        if (s_bt_8k) {
+            static int16_t in8[BT_CHUNK_8K];
+            static int16_t out16[BT_CHUNK_8K * 2];
+            uint32_t left = sz;
+            while (left >= sizeof(int16_t)) {
+                size_t n = left / sizeof(int16_t);
+                if (n > BT_CHUNK_8K) n = BT_CHUNK_8K;
+                memcpy(in8, buf, n * sizeof(int16_t));       // the block may be unaligned
+                resample_up(in8, n, out16);
+                if (xRingbufferSend(s_rb_call_rx, out16, n * 2 * sizeof(int16_t), 0) != pdTRUE) {
+                    s_sco_in_dropped += (uint32_t)(n * sizeof(int16_t));
+                }
+                buf  += n * sizeof(int16_t);
+                left -= (uint32_t)(n * sizeof(int16_t));
+            }
+        } else if (xRingbufferSend(s_rb_call_rx, buf, sz, 0) != pdTRUE) {
+            s_sco_in_dropped += sz;
+        }
     }
     esp_hf_client_outgoing_data_ready();
 }
 
+// Takes exactly `want` bytes or nothing: a byte ring can hand back two pieces at its wrap point.
+static bool mic_ring_read(uint8_t *dst, size_t want)
+{
+    UBaseType_t waiting = 0;
+    vRingbufferGetInfo(s_rb_mic_tx, NULL, NULL, NULL, NULL, &waiting);
+    if (waiting < want) return false;
+    size_t done = 0;
+    while (done < want) {
+        size_t got = 0;
+        uint8_t *data = (uint8_t *)xRingbufferReceiveUpTo(s_rb_mic_tx, &got, 0, want - done);
+        if (!data || got == 0) {
+            memset(dst + done, 0, want - done);     // cannot happen after the check above
+            break;
+        }
+        memcpy(dst + done, data, got);
+        vRingbufferReturnItem(s_rb_mic_tx, data);
+        done += got;
+    }
+    return true;
+}
+
 static uint32_t outgoing_pcm_cb(uint8_t *buf, uint32_t sz)
 {
-    if (!s_rb_mic_tx) {
-        memset(buf, 0, sz);
-        return sz;
+    s_sco_out_block = sz;
+    if (!s_rb_mic_tx) return 0;
+    if (s_bt_8k) {
+        static int16_t in16[BT_CHUNK_8K * 2];
+        static int16_t out8[BT_CHUNK_8K];
+        size_t n = sz / sizeof(int16_t);
+        if (n > BT_CHUNK_8K) n = BT_CHUNK_8K;
+        if (!mic_ring_read((uint8_t *)in16, n * 2 * sizeof(int16_t))) {
+            s_sco_out_short++;
+            return 0;
+        }
+        resample_down(in16, n, out8);
+        memcpy(buf, out8, n * sizeof(int16_t));
+        s_sco_out_bytes += (uint32_t)(n * sizeof(int16_t));
+        return (uint32_t)(n * sizeof(int16_t));
     }
-    size_t got = 0;
-    uint8_t *data = (uint8_t *)xRingbufferReceiveUpTo(s_rb_mic_tx, &got, 0, sz);
-    if (data && got > 0) {
-        memcpy(buf, data, got);
-        vRingbufferReturnItem(s_rb_mic_tx, data);
-        if (got < sz) memset(buf + got, 0, sz - got);
-        return sz;
+    if (!mic_ring_read(buf, sz)) {
+        s_sco_out_short++;
+        return 0;
     }
-    memset(buf, 0, sz);
+    s_sco_out_bytes += sz;
     return sz;
+}
+
+// ---------------------------------------------------------------------------
+// Test tone (R5): replaces the microphone toward the phone, off after every boot
+// ---------------------------------------------------------------------------
+
+#define TONE_LEVEL          8000.0f
+#define TONE_SAMPLES_EACH   SAMPLE_RATE     // 1 s per frequency
+
+static const uint16_t s_tone_hz[] = {400, 1000, 1800};
+static volatile int   s_tone_on   = 0;
+
+static void tone_fill(int16_t *out, size_t n, bool restart)
+{
+    static uint32_t phase   = 0;
+    static uint32_t in_tone = 0;
+    static uint8_t  index   = 0;
+    if (restart) {              // every "tone 1" starts the sequence over
+        phase = in_tone = 0;
+        index = 0;
+    }
+    for (size_t i = 0; i < n; i++) {
+        out[i] = (int16_t)(TONE_LEVEL * sinf((float)phase * (2.0f * (float)M_PI / 4294967296.0f)));
+        phase += (uint32_t)(((uint64_t)s_tone_hz[index] << 32) / SAMPLE_RATE);
+        if (++in_tone >= TONE_SAMPLES_EACH) {
+            in_tone = 0;
+            index = (uint8_t)((index + 1) % (sizeof(s_tone_hz) / sizeof(s_tone_hz[0])));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +587,7 @@ static void mic_rx_task(void *arg)
     static int16_t sns_out[SAMPLES_PER_FRAME];
     static uint32_t frame_cnt = 0;
     static int16_t  peak      = 0;
+    int tone_was_on = 0;
     int sns_cal_frames = 0;        // noise calibration counter
     const int SNS_CAL_TARGET = 66; // ~1 sec of noise (66 × 15ms)
 
@@ -628,6 +787,13 @@ after_dsp:
                     mono_buf[i] = (int16_t)v;
                 }
             }
+        }
+
+        // Test tone replaces everything above, so neither the mic nor the DSP can colour it
+        {
+            int on = s_tone_on;
+            if (on) tone_fill(mono_buf, n, !tone_was_on);
+            tone_was_on = on;
         }
 
         // Peak measurement
@@ -890,6 +1056,10 @@ static void hf_client_cb(esp_hf_client_cb_event_t    event,
 
         if (st == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED ||
             st == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC) {
+            s_bt_8k = !msbc;
+            s_sco_handle = param->audio_stat.sync_conn_handle;
+            s_bt_reset_in = s_bt_reset_out = true;
+            s_sco_in_bytes = s_sco_in_dropped = s_sco_out_bytes = s_sco_out_short = 0;
             s_sco_active = true;
             esp_hf_client_outgoing_data_ready();
             // BT priority: shared antenna, WiFi priority starves SCO and drops the link
@@ -897,11 +1067,20 @@ static void hf_client_cb(esp_hf_client_cb_event_t    event,
             ESP_LOGI(TAG_BT, "*** SCO OPEN — coex=BT priority ***");
         } else if (st == ESP_HF_CLIENT_AUDIO_STATE_DISCONNECTED) {
             s_sco_active = false;
+            sco_stats_log("close");
             esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
             ESP_LOGI(TAG_BT, "*** SCO CLOSED — coex=balance ***");
         }
         break;
     }
+
+    case ESP_HF_CLIENT_PKT_STAT_NUMS_GET_EVT:
+        ESP_LOGI(TAG_BT, "SCO pkt: rx_total=%"PRIu32" rx_correct=%"PRIu32" rx_err=%"PRIu32" rx_none=%"PRIu32
+                 " rx_lost=%"PRIu32" tx_total=%"PRIu32" tx_discarded=%"PRIu32,
+                 param->pkt_nums.rx_total, param->pkt_nums.rx_correct, param->pkt_nums.rx_err,
+                 param->pkt_nums.rx_none, param->pkt_nums.rx_lost, param->pkt_nums.tx_total,
+                 param->pkt_nums.tx_discarded);
+        break;
 
     case ESP_HF_CLIENT_RING_IND_EVT:
         ESP_LOGI(TAG_BT, "RING — auto-answer");
@@ -1171,6 +1350,8 @@ static esp_err_t bt_init(void)
 #define UART_BUF_SIZE  256
 #define CMD_LINE_MAX   128
 
+static const char *reset_reason_name(esp_reset_reason_t r);
+
 static void print_status(void)
 {
     ESP_LOGI(TAG_CMD, "=== DSP Pipeline Status ===");
@@ -1183,7 +1364,10 @@ static void print_status(void)
     ESP_LOGI(TAG_CMD, "  mic_gain  = %d", s_dsp.mic_gain);
     ESP_LOGI(TAG_CMD, "  call_gain = %d", s_dsp.call_gain);
     ESP_LOGI(TAG_CMD, "  wifi    = %d", s_dsp.wifi_on);
-    ESP_LOGI(TAG_CMD, "  SCO     = %s", s_sco_active ? "active" : "idle");
+    ESP_LOGI(TAG_CMD, "  tone=%d", s_tone_on);
+    // A reset can take the USB bridge away, and then the BOOT line is never seen.
+    ESP_LOGI(TAG_CMD, "  boot_reason=%s", reset_reason_name(esp_reset_reason()));
+    ESP_LOGI(TAG_CMD, "  SCO     = %s bt_rate=%d", s_sco_active ? "active" : "idle", s_bt_8k ? 8000 : 16000);
     ESP_LOGI(TAG_CMD, "  SLC     = %s", s_slc_up ? "up" : "down");
     ESP_LOGI(TAG_CMD, "  bonds=%d", esp_bt_gap_get_bond_device_num());
     for (uint8_t i = 0; i < s_peer_cnt; i++)
@@ -1209,6 +1393,8 @@ static void print_help(void)
     ESP_LOGI(TAG_CMD, "  cg N   — Call gain (1-8)");
     ESP_LOGI(TAG_CMD, "  vol N  — ES8388 output vol (0-100)");
     ESP_LOGI(TAG_CMD, "  wifi   — UDP stream on/off");
+    ESP_LOGI(TAG_CMD, "  tone 1|0 — 400/1000/1800 Hz, 1 s each, instead of the mic");
+    ESP_LOGI(TAG_CMD, "  pkt    — SCO packet counters of the open link");
     ESP_LOGI(TAG_CMD, "  all    — ALL DSP on/off");
     ESP_LOGI(TAG_CMD, "  s      — Status");
     ESP_LOGI(TAG_CMD, "  h|?    — This help");
@@ -1277,6 +1463,10 @@ static void process_cmd(char *line)
     } else if (strcmp(cmd, "wifi") == 0) {
         int r = toggle(&s_dsp.wifi_on, val);
         ESP_LOGI(TAG_CMD, "wifi = %d (UDP %s)", r, r ? "ON" : "OFF");
+    } else if (strcmp(cmd, "pkt") == 0) {
+        if (s_sco_active) esp_hf_client_pkt_stat_nums_get(s_sco_handle);
+    } else if (strcmp(cmd, "tone") == 0) {
+        ESP_LOGI(TAG_CMD, "tone = %d", toggle(&s_tone_on, val));
     } else if (strcmp(cmd, "mic_gain") == 0 || strcmp(cmd, "mg") == 0) {
         if (val >= 1 && val <= 8) {
             s_dsp.mic_gain = val;
@@ -1501,5 +1691,9 @@ void app_main(void)
                  s_sco_active ? "active" : "idle",
                  esp_get_free_heap_size(),
                  s_dsp.wifi_on);
+        if (s_sco_active) {
+            sco_stats_log("live");
+            esp_hf_client_pkt_stat_nums_get(s_sco_handle);
+        }
     }
 }

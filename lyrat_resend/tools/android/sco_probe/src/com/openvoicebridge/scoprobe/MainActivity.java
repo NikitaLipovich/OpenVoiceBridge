@@ -18,6 +18,10 @@ import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
 import android.media.MediaRecorder;
+import android.media.audiofx.AcousticEchoCanceler;
+import android.media.audiofx.AudioEffect;
+import android.media.audiofx.AutomaticGainControl;
+import android.media.audiofx.NoiseSuppressor;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -48,7 +52,8 @@ import java.util.List;
  *   close                                release the route, back to MODE_NORMAL
  *   play   --es tone 1000[,1800] [--ei seconds 5] [--ei level 8000]    sum of sines over the open route
  *   play   --es wav NAME.wav             16 bit PCM mono from the files dir, at the file's sample rate
- *   record --ei seconds 5 [--ei rate 16000] [--es out NAME.wav]        WAV from the headset into the files dir
+ *   record --ei seconds 5 [--ei rate 16000] [--es out NAME.wav] [--es source vc|mic|recog|raw] [--ei fx 1]
+ *                                        WAV from the headset into the files dir; fx 0 disables AEC, NS, AGC
  *   status                               refresh status.json
  *
  * The result of every command is in status.json in getExternalFilesDir(null) and in logcat, tag ScoProbe.
@@ -486,14 +491,19 @@ public class MainActivity extends Activity {
         int rate = intent.getIntExtra("rate", RECORD_RATE);
         String out = intent.getStringExtra("out");
         String name = new File(out == null ? "record.wav" : out).getName();
+        String source = intent.getStringExtra("source");
+        source = source == null ? "vc" : source;
+        boolean fx = intent.getIntExtra("fx", 1) != 0;
         JSONObject info = new JSONObject();
         put(info, "file", name);
         put(info, "seconds", seconds);
         put(info, "rate", rate);
+        put(info, "source", source);
+        put(info, "fx", fx);
         put(info, "state", "recording");
         put(info, "id", lastId);
         lastRecord = info;
-        recorder = new RecordLoop(new File(filesDir, name), seconds, rate, am.getCommunicationDevice());
+        recorder = new RecordLoop(new File(filesDir, name), seconds, rate, am.getCommunicationDevice(), source, fx, info);
         recorder.start();
     }
 
@@ -516,14 +526,20 @@ public class MainActivity extends Activity {
         private final int seconds;
         private final int rate;
         private final AudioDeviceInfo device;
+        private final int source;
+        private final boolean fx;
+        private final JSONObject info;
         private volatile boolean stop = false;
 
-        RecordLoop(File file, int seconds, int rate, AudioDeviceInfo device) {
+        RecordLoop(File file, int seconds, int rate, AudioDeviceInfo device, String source, boolean fx, JSONObject info) {
             super("sco-record");
             this.file = file;
             this.seconds = seconds;
             this.rate = rate;
             this.device = device;
+            this.source = audioSource(source);
+            this.fx = fx;
+            this.info = info;
         }
 
         void cancel() {
@@ -543,7 +559,7 @@ public class MainActivity extends Activity {
                 out.write(WavFile.header(0, rate));
                 int min = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
                 rec = new AudioRecord.Builder()
-                        .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+                        .setAudioSource(source)
                         .setAudioFormat(new AudioFormat.Builder()
                                 .setSampleRate(rate)
                                 .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
@@ -552,6 +568,7 @@ public class MainActivity extends Activity {
                         .setBufferSizeInBytes(Math.max(min, rate / 2 * 2))
                         .build();
                 rec.setPreferredDevice(device);
+                configureEffects(rec.getAudioSessionId(), fx, info);
                 rec.startRecording();
                 short[] buf = new short[rate / 50];
                 ByteBuffer bytes = ByteBuffer.allocate(buf.length * 2).order(ByteOrder.LITTLE_ENDIAN);
@@ -591,6 +608,42 @@ public class MainActivity extends Activity {
                 }
             });
         }
+    }
+
+    private static int audioSource(String name) {
+        switch (name) {
+            case "mic":
+                return MediaRecorder.AudioSource.MIC;
+            case "recog":
+                return MediaRecorder.AudioSource.VOICE_RECOGNITION;
+            case "raw":
+                return MediaRecorder.AudioSource.UNPROCESSED;
+            default:
+                return MediaRecorder.AudioSource.VOICE_COMMUNICATION;
+        }
+    }
+
+    /** Reports which platform effects exist on this recording and switches them when asked. */
+    private static void configureEffects(int session, boolean enable, JSONObject info) {
+        JSONObject state = new JSONObject();
+        AudioEffect[] effects = {
+                AcousticEchoCanceler.isAvailable() ? AcousticEchoCanceler.create(session) : null,
+                NoiseSuppressor.isAvailable() ? NoiseSuppressor.create(session) : null,
+                AutomaticGainControl.isAvailable() ? AutomaticGainControl.create(session) : null,
+        };
+        String[] names = {"aec", "ns", "agc"};
+        for (int i = 0; i < effects.length; i++) {
+            if (effects[i] == null) {
+                put(state, names[i], "none");
+                continue;
+            }
+            boolean before = effects[i].getEnabled();
+            if (!enable) {
+                effects[i].setEnabled(false);
+            }
+            put(state, names[i], before + "->" + effects[i].getEnabled());
+        }
+        put(info, "effects", state);
     }
 
     // --- status --------------------------------------------------------------------------------

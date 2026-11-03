@@ -161,9 +161,17 @@ class SerialWatch:
             self.sp = None
 
     def send(self, text):
-        """Send one console command. The passive `run` modes never call this."""
-        self.sp.write((text + "\n").encode())
+        """Send one console command, False if the port is gone. The passive `run` modes never call this."""
+        if self.sp is None:
+            self.event("send_no_port", text=text)
+            return False
+        try:
+            self.sp.write((text + "\n").encode())
+        except (OSError, serial.SerialException) as e:
+            self.event("send_failed", text=text, err=str(e)[:80])
+            return False
         self.event("sent", text=text)
+        return True
 
     def pulse_reset(self, hold_s=0.15):
         """Hardware reset through EN: RTS low while DTR stays released keeps IO0 high, so the app boots."""
