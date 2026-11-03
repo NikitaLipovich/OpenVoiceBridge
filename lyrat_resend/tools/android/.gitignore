@@ -1,0 +1,7 @@
+# Built apps and signing keys never go to git, even if someone builds with --out here.
+*.apk
+*.apk.idsig
+*.keystore
+*.jks
+*.dex
+*.class

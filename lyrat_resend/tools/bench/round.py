@@ -3,6 +3,7 @@
 
   round.py power --power SOURCE [--seconds 900] [--no-open] [--label NAME]
   round.py link  --power SOURCE [--reboots 10] [--pairs 5] [--slc-timeout 30] [--label NAME]
+  round.py sco   --power SOURCE [--n 5] [--active 20] [--label NAME]
 
 power: watches the board, the phone ACL history and Windows USB removal events.
 Writes <runs>/power/<stamp>-<label>/round.json and appends one line to <runs>/rounds.jsonl.
@@ -21,6 +22,13 @@ SLC up, passkey equal on both sides, bonds>=1, then one reboot to prove the peer
 The board is erased before the phone forgets: a board that still holds the key would page the phone
 and raise a pairing dialog of its own. The other bonds of the phone must end identical.
 PASS only with every trial passed and the planned number of trials run.
+
+sco drives the probe app (android/sco_probe, built and installed by android/build_apk.py --install).
+One cycle: open, the board logs SCO OPEN and the app confirms the route, stays active for --active seconds,
+close, the board logs SCO CLOSED and the app reports the route gone. The codec comes from the open line of
+the board only: the board prints a meaningless codec with every other SCO state. No call may exist before or
+after the round, checked through telecom and telephony; call indicators on the board are the phone's virtual
+call that belongs to SCO without a call, not a call.
 """
 import argparse
 import json
@@ -386,6 +394,222 @@ def stage_link(args):
     return {"PASS": 0, "FAIL": 1}.get(verdict, 2)
 
 
+SCO_APP = "com.openvoicebridge.scoprobe"
+SCO_ACTIVITY = SCO_APP + "/.MainActivity"
+SCO_STATUS = "/sdcard/Android/data/%s/files/status.json" % SCO_APP
+SCO_OPEN_LINE = "*** SCO OPEN"
+SCO_CLOSED_LINE = "*** SCO CLOSED"
+# States 2 (CVSD) and 3 (mSBC) are the connected ones; any other state prints a meaningless codec.
+SCO_CODEC = re.compile(r"SCO audio state=[23] codec=([A-Za-z]+)")
+SCO_HEARTBEAT = "SCO=active"
+SCO_POLL_S = 0.5
+
+
+def app_command(cmd, cmd_id, *extra):
+    return adb("shell", "am", "start", "-n", SCO_ACTIVITY, "--es", "cmd", cmd, "--es", "id", cmd_id, *extra)
+
+
+def app_status():
+    try:
+        return json.loads(adb("exec-out", "cat", SCO_STATUS))
+    except ValueError:
+        return None
+
+
+def telecom_state():
+    """Counts only: the dump may hold a caller number, so nothing of it is ever saved."""
+    dump = adb("shell", "dumpsys", "telecom")
+    registry = adb("shell", "dumpsys", "telephony.registry")
+    if not dump or not registry:
+        return None
+    lines = dump.splitlines()
+    index = next((i for i, line in enumerate(lines) if line.strip() == "mCalls:"), None)
+    history = next((i for i, line in enumerate(lines) if line.strip() == "Historical Events:"), None)
+    if index is None or history is None:
+        return None
+    current = 0
+    for line in lines[index + 1:]:
+        if line.strip().startswith("mCallAudioManager"):
+            break
+        current += 1 if line.strip() else 0
+    states = re.findall(r"mCallState=(\d+)", registry)
+    return {"calls_now": current, "historical_lines": sum(1 for line in lines[history + 1:] if line.strip()),
+            "telephony_busy": sum(1 for v in states if v != "0"), "telephony_states": len(states)}
+
+
+def wait_app(watch, cmd_id, done, timeout):
+    """Pump the serial log until the app reports this command done. Returns (seconds, last status)."""
+    t0 = time.monotonic()
+    status = None
+    while time.monotonic() - t0 < timeout:
+        status = app_status()
+        if status and status.get("id") == cmd_id and (not status.get("ok") or done(status)):
+            return round(time.monotonic() - t0, 2), status
+        watch.pump(time.monotonic() + SCO_POLL_S)
+    return None, status
+
+
+def wait_line(watch, since, text, timeout):
+    """Seconds until the line appears after `since`, counted from this call; None if it does not."""
+    t0 = time.monotonic()
+    seen = lambda: any(text in line for line in lines_since(watch, since))  # noqa: E731
+    watch.pump(t0 + timeout, until=seen)
+    return round(time.monotonic() - t0, 2) if seen() else None
+
+
+def sco_cycle(watch, index, args, tag):
+    trial = {"i": index, "pass": False}
+    resets = len(watch.resets)
+    slc_drops = watch.slc_drops
+    t_open = watch.now()
+
+    open_id = "%s-%d-open" % (tag, index)
+    app_command("open", open_id)
+    seconds, status = wait_app(watch, open_id, lambda s: s.get("route_confirmed"), args.open_timeout)
+    trial["app_confirm_s"] = seconds
+    trial["app_open"] = status and {k: status.get(k) for k in (
+        "ok", "error", "route_confirmed", "route_sco", "headset_audio", "mode", "sco_state", "open_latency_ms")}
+    app_confirmed = bool(status and status.get("id") == open_id and status.get("ok") and status.get("route_confirmed"))
+    trial["board_open_wait_s"] = wait_line(watch, t_open, SCO_OPEN_LINE, args.open_timeout)
+    text = lines_since(watch, t_open)
+    trial["codec"] = next((SCO_CODEC.search(line).group(1) for line in text if SCO_CODEC.search(line)), None)
+
+    active_ok = False
+    if app_confirmed and trial["board_open_wait_s"] is not None:
+        t_active = watch.now()
+        watch.pump(time.monotonic() + args.active)
+        text = lines_since(watch, t_active)
+        # A new id makes the app answer now: a dead app leaves its last good status.json behind.
+        active_id = "%s-%d-active" % (tag, index)
+        app_command("status", active_id)
+        _, status = wait_app(watch, active_id, lambda s: True, args.close_timeout)
+        if not status or status.get("id") != active_id:
+            status = None
+        trial["closed_while_active"] = sum(1 for line in text if SCO_CLOSED_LINE in line)
+        trial["board_heartbeats_active"] = sum(1 for line in text if SCO_HEARTBEAT in line)
+        trial["app_active_end"] = status and {k: status.get(k) for k in (
+            "route_confirmed", "headset_audio", "mode", "route_losses")}
+        active_ok = bool(status and status.get("route_confirmed") and status.get("route_losses") == 0
+                         and trial["closed_while_active"] == 0 and trial["board_heartbeats_active"] >= 1)
+    trial["active_ok"] = active_ok
+
+    # A failed cycle closes too: the next one must start from a released route.
+    t_close = watch.now()
+    close_id = "%s-%d-close" % (tag, index)
+    app_command("close", close_id)
+    seconds, status = wait_app(watch, close_id, lambda s: not s.get("opened") and not s.get("route_sco")
+                               and s.get("mode") == 0, args.close_timeout)
+    trial["app_close_s"] = seconds
+    trial["app_close"] = status and {k: status.get(k) for k in ("ok", "opened", "route_sco", "mode", "sco_state")}
+    app_closed = bool(status and status.get("id") == close_id and status.get("ok") and seconds is not None)
+    trial["board_close_wait_s"] = wait_line(watch, t_close, SCO_CLOSED_LINE, args.close_timeout)
+
+    trial["board_resets"] = len(watch.resets) - resets
+    trial["reset_reasons"] = [r["reason"] for r in watch.resets[resets:]]
+    trial["slc_drops"] = watch.slc_drops - slc_drops
+    trial["pass"] = bool(app_confirmed and trial["board_open_wait_s"] is not None and trial["codec"] and active_ok
+                         and app_closed and trial["board_close_wait_s"] is not None
+                         and trial["board_resets"] == 0 and trial["slc_drops"] == 0)
+    return trial
+
+
+def sco_no_data(args, out, error):
+    result = {"stage": "sco", "label": args.label, "power": args.power, "verdict": "NO_DATA", "error": redact(error),
+              "dir": str(out)}
+    write_json(out / "round.json", result)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 2
+
+
+def stage_sco(args):
+    keep_awake()
+    out = run_dir("sco", args.label)
+    start = datetime.now()
+    t0 = time.monotonic()
+    if SCO_APP not in adb("shell", "pm", "path", SCO_APP):
+        return sco_no_data(args, out, "probe app is not installed, run android/build_apk.py --install")
+    try:
+        before = phone.status()
+        bonds_before = phone.bond_list()
+    except phone.PhoneError as e:
+        return sco_no_data(args, out, str(e))
+    if before["keyguard"] or not before["hfp_connected"]:
+        return sco_no_data(args, out, "phone not usable: keyguard=%s hfp_connected=%s"
+                           % (before["keyguard"], before["hfp_connected"]))
+    telecom_before = telecom_state()
+    if telecom_before is None or telecom_before["calls_now"] or telecom_before["telephony_busy"]:
+        return sco_no_data(args, out, "a call is in progress or telecom is unreadable: %s" % telecom_before)
+    watch = SerialWatch(args.port, out, False, echo=args.echo)
+    watch.pump(time.monotonic() + 15, until=lambda: watch.sp is not None)
+    if watch.sp is None:
+        watch.finish(0)
+        return sco_no_data(args, out, "port not opened")
+    watch.slc_up = True     # the phone just reported the headset connected, so a drop must count
+    adb("shell", "am", "force-stop", SCO_APP)
+    tag = datetime.now().strftime("%H%M%S")
+
+    trials = []
+    for i in range(1, args.n + 1):
+        trial = sco_cycle(watch, i, args, tag)
+        trials.append(trial)
+        print(json.dumps({"cycle": trial}, ensure_ascii=False), flush=True)
+        write_json(out / "partial.json", {"cycles": trials})
+        if args.stop_on_fail and not trial["pass"]:
+            break
+        if i < args.n:
+            watch.pump(time.monotonic() + args.gap)
+
+    app_command("status", tag + "-end")
+    watch.pump(time.monotonic() + 1)
+    app_final = app_status()
+    adb("shell", "am", "force-stop", SCO_APP)
+    watch.close_port()
+    summary = watch.finish(args.n)
+    end = datetime.now()
+    telecom_after = telecom_state()
+    try:
+        phone.go_home()
+        after = phone.status()
+        bonds_after = phone.bond_list()
+    except phone.PhoneError:
+        after, bonds_after = None, None
+    removals = usb_removals(start, end)
+    standby = pc_standby_entries(start, end)
+    passed = sum(1 for t in trials if t["pass"])
+    codecs = sorted({t["codec"] for t in trials if t.get("codec")})
+    checks = {
+        "cycles_all_pass": passed == args.n,
+        "codec_recorded": bool(codecs),
+        "no_call_during_round": bool(telecom_after) and telecom_after["calls_now"] == 0
+                                and telecom_after["telephony_busy"] == 0
+                                and telecom_after["historical_lines"] == telecom_before["historical_lines"],
+        "other_bonds_unchanged": bonds_after is not None and phone.others(bonds_before) == phone.others(bonds_after),
+        "phone_hfp_connected_at_end": bool(after and after["hfp_connected"]),
+        "board_resets_zero": summary["board_resets"] == 0,
+        "panics_zero": summary["panics"] == 0,
+        "slc_drops_zero": summary["slc_drops"] == 0,
+        "port_drops_zero": summary["port_drops"] == 0,
+        "usb_removals_zero": removals == 0,
+    }
+    verdict = "INVALID_WINDOW" if standby != 0 else ("PASS" if all(checks.values()) else "FAIL")
+    result = {
+        "stage": "sco", "label": args.label, "power": args.power, "verdict": verdict, "checks": checks,
+        "start": start.isoformat(timespec="seconds"), "end": end.isoformat(timespec="seconds"),
+        "seconds": round(time.monotonic() - t0, 1), "dir": str(out),
+        "planned": {"cycles": args.n, "active_s": args.active}, "cycles_passed": passed, "codecs": codecs,
+        "telecom_before": telecom_before, "telecom_after": telecom_after, "phone_before": before, "phone_after": after,
+        "app_final": app_final, "pc_standby_entries": standby, "usb_removals": removals,
+        "cycles": trials, "serial": summary,
+    }
+    write_json(out / "round.json", result)
+    with (RUNS_ROOT / "rounds.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(redact(json.dumps({k: result[k] for k in (
+            "stage", "label", "power", "verdict", "start", "seconds", "cycles_passed", "codecs",
+            "usb_removals", "dir")}, ensure_ascii=False)) + "\n")
+    print(json.dumps({k: v for k, v in result.items() if k != "cycles"}, ensure_ascii=False, indent=2))
+    return {"PASS": 0, "FAIL": 1}.get(verdict, 2)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="stage", required=True)
@@ -406,11 +630,22 @@ def main():
     p.add_argument("--label", default="")
     p.add_argument("--port", default=DEFAULT_PORT)
     p.add_argument("--echo", action="store_true", help="print events live")
+    p = sub.add_parser("sco", help="open and close the headset channel without a call, through the probe app")
+    p.add_argument("--power", required=True, help="what feeds the board, e.g. adapter or battery (R11)")
+    p.add_argument("--n", type=int, default=5, help="number of cycles")
+    p.add_argument("--active", type=float, default=20.0, help="seconds to hold the channel open")
+    p.add_argument("--open-timeout", type=float, default=15.0)
+    p.add_argument("--close-timeout", type=float, default=10.0)
+    p.add_argument("--gap", type=float, default=3.0, help="seconds between cycles")
+    p.add_argument("--stop-on-fail", action="store_true", help="stop at the first failed cycle")
+    p.add_argument("--label", default="")
+    p.add_argument("--port", default=DEFAULT_PORT)
+    p.add_argument("--echo", action="store_true", help="print events live")
     args = ap.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
-    return stage_link(args) if args.stage == "link" else stage_power(args)
+    return {"link": stage_link, "sco": stage_sco, "power": stage_power}[args.stage](args)
 
 
 if __name__ == "__main__":
