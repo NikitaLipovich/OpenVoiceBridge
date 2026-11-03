@@ -36,6 +36,7 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_bt_device.h"
@@ -196,6 +197,8 @@ static volatile bool s_sco_active = false;
 static esp_bd_addr_t s_peers[HF_MAX_PEERS];
 static uint8_t       s_peer_cnt = 0;
 static volatile bool s_slc_up   = false;
+static int64_t       s_slc_up_us = 0;     // when SLC last came up
+static volatile int  s_acl_reason = -1;   // reason of the last ACL teardown, -1 = none yet
 
 static void hf_peers_save(void)
 {
@@ -210,17 +213,23 @@ static void hf_peers_save(void)
 static void hf_peers_load(void)
 {
     nvs_handle_t h;
-    if (nvs_open("lyrat", NVS_READONLY, &h) != ESP_OK) return;
-    uint8_t cnt = 0;
-    size_t  len = sizeof(s_peers);
-    if (nvs_get_u8(h, "peer_cnt", &cnt) == ESP_OK &&
-        nvs_get_blob(h, "peers", s_peers, &len) == ESP_OK) {
-        s_peer_cnt = (cnt > HF_MAX_PEERS) ? HF_MAX_PEERS : cnt;
+    // A missing "lyrat" namespace (ESP_ERR_NVS_NOT_FOUND) is the normal state before
+    // the first SLC: it must not skip the bond list below.
+    esp_err_t err = nvs_open("lyrat", NVS_READONLY, &h);
+    if (err == ESP_OK) {
+        uint8_t cnt = 0;
+        size_t  len = sizeof(s_peers);
+        if (nvs_get_u8(h, "peer_cnt", &cnt) == ESP_OK &&
+            nvs_get_blob(h, "peers", s_peers, &len) == ESP_OK) {
+            s_peer_cnt = (cnt > HF_MAX_PEERS) ? HF_MAX_PEERS : cnt;
+        }
+        nvs_close(h);
+    } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG_BT, "peer list not readable: %s", esp_err_to_name(err));
     }
-    nvs_close(h);
 
-    // First boot after the patch: NVS is empty but the stack already has bonds,
-    // so seed the peer list from the bond list, otherwise there is nobody to call.
+    // NVS has no peer list but the stack already has bonds: seed the peer list
+    // from the bond list, otherwise there is nobody to call.
     if (s_peer_cnt == 0) {
         int num = esp_bt_gap_get_bond_device_num();
         if (num > 0) {
@@ -858,10 +867,16 @@ static void hf_client_cb(esp_hf_client_cb_event_t    event,
 
     case ESP_HF_CLIENT_CONNECTION_STATE_EVT:
         ESP_LOGI(TAG_BT, "HFP conn state=%d", param->conn_stat.state);
-        if (param->conn_stat.state == ESP_HF_CLIENT_CONNECTION_STATE_DISCONNECTED)
+        if (param->conn_stat.state == ESP_HF_CLIENT_CONNECTION_STATE_DISCONNECTED) {
+            if (s_slc_up) {
+                ESP_LOGW(TAG_BT, "SLC DOWN after %"PRId64" s, last_acl_reason=0x%x",
+                         (esp_timer_get_time() - s_slc_up_us) / 1000000, s_acl_reason);
+            }
             s_slc_up = false;
+        }
         if (param->conn_stat.state == ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED) {
             s_slc_up = true;
+            s_slc_up_us = esp_timer_get_time();
             hf_peer_add(param->conn_stat.remote_bda);
             ESP_LOGI(TAG_BT, "*** SLC CONNECTED ***");
         }
@@ -935,6 +950,17 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
             ESP_LOGI(TAG_BT, "Paired: '%s'", param->auth_cmpl.device_name);
         else
             ESP_LOGW(TAG_BT, "Pairing failed: %d", param->auth_cmpl.stat);
+        break;
+
+    case ESP_BT_GAP_ACL_CONN_CMPL_STAT_EVT:
+        ESP_LOGI(TAG_BT, "ACL UP stat=0x%x handle=0x%x",
+                 param->acl_conn_cmpl_stat.stat, param->acl_conn_cmpl_stat.handle);
+        break;
+
+    case ESP_BT_GAP_ACL_DISCONN_CMPL_STAT_EVT:
+        s_acl_reason = param->acl_disconn_cmpl_stat.reason;
+        ESP_LOGW(TAG_BT, "ACL DOWN reason=0x%x handle=0x%x",
+                 param->acl_disconn_cmpl_stat.reason, param->acl_disconn_cmpl_stat.handle);
         break;
 
     case ESP_BT_GAP_CFM_REQ_EVT:
@@ -1159,6 +1185,7 @@ static void print_status(void)
     ESP_LOGI(TAG_CMD, "  wifi    = %d", s_dsp.wifi_on);
     ESP_LOGI(TAG_CMD, "  SCO     = %s", s_sco_active ? "active" : "idle");
     ESP_LOGI(TAG_CMD, "  SLC     = %s", s_slc_up ? "up" : "down");
+    ESP_LOGI(TAG_CMD, "  bonds=%d", esp_bt_gap_get_bond_device_num());
     for (uint8_t i = 0; i < s_peer_cnt; i++)
         ESP_LOGI(TAG_CMD, "  peer[%u] = %02x:%02x:%02x:%02x:%02x:%02x", i,
                  s_peers[i][0], s_peers[i][1], s_peers[i][2],

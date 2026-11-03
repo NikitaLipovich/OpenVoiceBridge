@@ -105,7 +105,7 @@ def main():
     ap.add_argument("action", choices=["build", "flash", "erase-bonds"])
     ap.add_argument("--variant", default="base")
     ap.add_argument("--port", default=DEFAULT_PORT)
-    ap.add_argument("--retries", type=int, default=5)
+    ap.add_argument("--retries", type=int, default=12)   # "Wrong boot mode" came 8 times in a row
     args = ap.parse_args()
     if args.action == "build":
         return build(args.variant)

@@ -50,6 +50,8 @@ class SerialWatch:
         self.boot_seen = False      # a ROM banner was seen and no uptime line followed yet
         self.slc_ups = self.slc_drops = 0
         self.slc_up = False
+        self.sp = None
+        self.recent = []            # redacted lines with their time, for the caller to inspect
 
     def now(self):
         return round(time.monotonic() - self.t0, 3)
@@ -72,6 +74,8 @@ class SerialWatch:
         self.lines += 1
         self.log.write("%9.3f %s\n" % (self.now(), line))
         self.log.flush()
+        self.recent.append((self.now(), line))
+        del self.recent[:-4000]
         m = ROM_RST.search(line)
         if m:
             self.rom_reasons[m.group(2)] += 1
@@ -119,40 +123,58 @@ class SerialWatch:
                 self.event("port_back")
             was = now
 
-    def run_open(self, seconds):
-        end = self.t0 + seconds
-        sp = None
-        while time.monotonic() < end:
-            if sp is None:
+    def pump(self, end, until=None):
+        """Read lines until the monotonic time `end` or until `until()` is true. Opens the port as needed."""
+        while time.monotonic() < end and not (until and until()):
+            if self.sp is None:
                 try:
                     # DTR/RTS are wired to EN/IO0: keep them released before open().
                     sp = serial.Serial()
                     sp.port, sp.baudrate, sp.timeout, sp.dtr, sp.rts = self.port, self.baud, 0.3, False, False
                     sp.open()
+                    self.sp = sp
                     self.port_opens += 1
                     self.event("port_open")
                 except Exception as e:
                     denied = "PermissionError" in str(e)
                     self.open_denied += 1 if denied else 0
                     self.event("open_failed", denied=denied, err=str(e)[:80])
-                    sp = None
                     time.sleep(0.5)
                 continue
             try:
-                raw = sp.readline()
+                raw = self.sp.readline()
             except Exception as e:
                 self.port_drops += 1
                 self.event("port_drop", err=str(e)[:80])
-                try:
-                    sp.close()
-                except Exception:
-                    pass
-                sp = None
+                self.close_port()
                 continue
             if raw:
                 self.feed(raw)
-        if sp is not None:
-            sp.close()
+
+    def close_port(self):
+        """Release the port, for example so that esptool can use it."""
+        if self.sp is not None:
+            try:
+                self.sp.close()
+            except Exception:
+                pass
+            self.sp = None
+
+    def send(self, text):
+        """Send one console command. The passive `run` modes never call this."""
+        self.sp.write((text + "\n").encode())
+        self.event("sent", text=text)
+
+    def pulse_reset(self, hold_s=0.15):
+        """Hardware reset through EN: RTS low while DTR stays released keeps IO0 high, so the app boots."""
+        self.sp.rts = True
+        time.sleep(hold_s)
+        self.sp.rts = False
+        self.event("reset_pulse")
+
+    def run_open(self, seconds):
+        self.pump(self.t0 + seconds)
+        self.close_port()
 
     def summary(self, seconds):
         closed = self.no_open
@@ -178,16 +200,19 @@ class SerialWatch:
             "slc_up_at_end": None if closed else self.slc_up,
         }
 
-    def run(self, seconds):
-        if self.no_open:
-            self.run_no_open(seconds)
-        else:
-            self.run_open(seconds)
+    def finish(self, seconds):
         result = self.summary(seconds)
         write_json(self.out / "summary.json", result)
         self.log.close()
         self.events.close()
         return result
+
+    def run(self, seconds):
+        if self.no_open:
+            self.run_no_open(seconds)
+        else:
+            self.run_open(seconds)
+        return self.finish(seconds)
 
 
 def main():
