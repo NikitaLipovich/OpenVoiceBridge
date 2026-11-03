@@ -61,8 +61,7 @@ FSC-BT1036  ── I2S (BCLK/WS/DO) ──►  ESP32-S3
 Открой файл и измени три строки:
 
 ```c
-#define WIFI_SSID       "имя_твоей_сети"
-#define WIFI_PASS       "пароль_сети"
+// Network name and password live in main/wifi_secrets.h (template: lyrat_resend/main/wifi_secrets.h.example)
 #define UDP_REMOTE_IP   "192.168.1.50"   // IP твоего ПК в локальной сети
 #define UDP_REMOTE_PORT (5004)
 ```
@@ -444,7 +443,7 @@ python scripts/udp_capture.py --bind 192.168.1.50 --port 5004 --outfile test_cal
 ## 9. Диагностика проблем
 
 ### "ESP32 не видит Wi-Fi / failed to connect to AP"
-- Проверь `WIFI_SSID` и `WIFI_PASS` в `main.c` — они чувствительны к регистру
+- Проверь имя сети и пароль в `main/wifi_secrets.h` — они чувствительны к регистру
 - ESP32-S3 работает только с 2.4 GHz, не 5 GHz
 - Убедись что роутер не скрывает SSID
 
@@ -518,7 +517,7 @@ python scripts/udp_capture.py --bind 192.168.1.50 --port 5004 --outfile test_cal
 ### Быстрый чеклист запуска
 
 ```
-[ ] WIFI_SSID и WIFI_PASS исправлены в main.c
+[ ] Имя сети и пароль заданы в main/wifi_secrets.h
 [ ] UDP_REMOTE_IP указывает на реальный IP ПК
 [ ] idf.py flash завершился без ошибок
 [ ] BT1036 настроен AT-командами (I2SCFG=3, HFPSR=16000, PROFILE=1, REBOOT)

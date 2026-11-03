@@ -231,8 +231,7 @@ static esp_err_t i2s_init(void)
 }
 
 /* Wi-Fi STA connect */
-#define WIFI_SSID "YOUR_SSID"
-#define WIFI_PASS "YOUR_PASSWORD"
+#include "wifi_secrets.h"
 
 #define WIFI_CONNECTED_BIT BIT0
 static EventGroupHandle_t s_wifi_event_group = NULL;

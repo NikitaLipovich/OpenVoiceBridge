@@ -34,3 +34,4 @@ __pycache__/
 Thumbs.db
 # goal-extruder harness (local only)
 goals_harness/
+old_version/main/wifi_secrets.h

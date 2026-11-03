@@ -130,8 +130,7 @@ idf.py build flash monitor
 
 2. Edit Wi-Fi credentials and UDP target in `main/main.c`:
 ```c
-#define WIFI_SSID       "your_ssid"
-#define WIFI_PASS       "your_password"
+// Network name and password live in main/wifi_secrets.h (template: lyrat_resend/main/wifi_secrets.h.example)
 #define UDP_REMOTE_IP   "192.168.1.50"
 #define UDP_REMOTE_PORT (5004)
 ```

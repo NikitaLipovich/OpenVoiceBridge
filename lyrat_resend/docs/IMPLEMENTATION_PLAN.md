@@ -450,8 +450,7 @@ aec_process(mic_mono, mic_samples);            // убирает эхо науш
 - `wifi_connect_sta()` (строки ~277-321) — изменить SSID/PASS
 
 ```c
-#define WIFI_SSID "YOUR_SSID"
-#define WIFI_PASS "YOUR_PASS"
+// Network name and password live in main/wifi_secrets.h (template: lyrat_resend/main/wifi_secrets.h.example)
 ```
 
 ### Шаг 5.2 — Скопировать UDP tasks из S3
