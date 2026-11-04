@@ -307,6 +307,8 @@ def reboot_trial(watch, index, slc_timeout):
         "bonds": bonds, "peer0": peer, "phone_hfp_connected": connected,
         "acl_down_reasons": [ACL_DOWN.search(line).group(1) for line in text if ACL_DOWN.search(line)],
         "panics_lines": sum(1 for line in text if "Guru Meditation" in line or "Backtrace:" in line),
+        # Above zero with no SLC: the phone has no key for this address and waits for a tap (goal 055 #003).
+        "ssp_confirm_lines": sum(1 for line in text if SSP_LINE.search(line)),
     }
     trial["pass"] = bool(latency is not None and latency <= slc_timeout and trial["resets_seen"] == 1
                          and trial["peer_at_boot"] and bonds and bonds >= 1 and connected is True
