@@ -11,8 +11,9 @@ Variants compile bench switches through the ignored main/bench_variant.h:
   no_bt    Bluetooth never started
   bod      normal firmware plus the hardware brownout reset at level 0, about 2.43 V (diagnostic)
   bod7     the same at level 7, about 2.80 V
-  mac_b5, mac_b3, mac_b2   one byte of the Bluetooth address plus 1: the phone sees a new device, see goal 044 DECISIONS D7
+  mac_b5, mac_b3, mac_b2, mac_b1   one byte of the Bluetooth address plus 1: the phone sees a new device, see goal 044 DECISIONS D7
   no_wbs   CONFIG_BT_HFP_WBS_ENABLE=n in sdkconfig: the phone can only choose CVSD; any other variant restores =y
+  fdrop    test build: console commands fdrop P B and fdstat replace frames with a marked loss, see goal 045
 Combine with "+": no_pa+no_wbs.
 
 A flash counts as done only when esptool confirmed the hash of all three images.
@@ -38,7 +39,8 @@ MACROS = {"no_pa": ("BENCH_NO_PA", 1), "no_bt": ("BENCH_NO_BT", 1),
           "bod": ("BENCH_BROWNOUT_RESET", 1), "bod7": ("BENCH_BROWNOUT_RESET", 8),
           # BENCH_MAC_PATCH: byte index * 256 + what to add to that byte of the address.
           "mac_b5": ("BENCH_MAC_PATCH", 5 * 256 + 1), "mac_b3": ("BENCH_MAC_PATCH", 3 * 256 + 1),
-          "mac_b2": ("BENCH_MAC_PATCH", 2 * 256 + 1)}
+          "mac_b2": ("BENCH_MAC_PATCH", 2 * 256 + 1), "mac_b1": ("BENCH_MAC_PATCH", 1 * 256 + 1),
+          "fdrop": ("BENCH_FRAME_DROP", 1)}
 PORT_ERRORS = ("could not open port", "serial port", "Failed to connect", "Write timeout",
                "The device does not recognize", "PermissionError", "Lost connection", "Serial data stream stopped",
                "No serial data", "FileNotFoundError", "ClearCommError", "chip stopped responding", "Wrong boot mode")

@@ -7,6 +7,7 @@
   round.py audio --power SOURCE --codec mSBC|CVSD [--n 10] [--seconds 7] [--label NAME]
   round.py tap   --power SOURCE [--n 3] [--long 300] [--s3-resets 3] [--label NAME]
   round.py btloss --power SOURCE [--seconds 1800] [--ab 3] [--phone-wifi asis|on|off] [--label NAME]
+  round.py plc   --power SOURCE --codec mSBC|CVSD [--n 3] [--period 30] [--keep-wav] [--label NAME]
 
 power: watches the board, the phone ACL history and Windows USB removal events.
 Writes <runs>/power/<stamp>-<label>/round.json and appends one line to <runs>/rounds.jsonl.
@@ -60,6 +61,13 @@ packet counters are read every --pkt-period seconds. --board-cmd sends console c
 only whether all was measured and the phone was left as found; the numbers themselves are the result. With --ab N the
 phone's Wi-Fi alternates off, on over N pairs of windows (R4). What the phone's Wi-Fi was is saved to a file before it is
 touched, it comes back in a finally block, a later round restores it if the process was killed, and it is verified.
+
+plc checks the concealment of lost frames on a signal that a repeat cannot fake (voice_check.py), through the same path
+as audio: sco_probe plays, the S3 captures DSDIN. It needs a test build (fw.py --variant ...+fdrop): the firmware replaces
+frames with a marked loss on a plan and measures the concealment against the true samples it still has. Each trial runs
+the plan with and without concealment. PASS only if the counters agree with the plan, the run without concealment is worse
+against the reference, replaced frames are digital silence on the bus only without concealment, true silence stays
+silent, a long loss fades out in the time the firmware promises, and the concealment beats a plain repeat of the last block.
 """
 import argparse
 import json
@@ -83,6 +91,7 @@ from udp_record import TapRecorder  # noqa: E402
 import s3  # noqa: E402
 import tap_check  # noqa: E402
 import tone_blocks  # noqa: E402
+import voice_check  # noqa: E402
 
 BOARD_NAME = "LyraT_Phone"
 USB_ID = "VID_10C4"
@@ -682,6 +691,9 @@ SCO_PKT = re.compile(r"SCO pkt: rx_total=(\d+) rx_correct=(\d+) rx_err=(\d+) rx_
 SCO_PKT_KEYS = ("rx_total", "rx_correct", "rx_err", "rx_none", "rx_lost", "tx_total", "tx_discarded")
 SCO_STATS = re.compile(r"SCO stats close: rate=(\d+) in=(\d+) in_block=(\d+) in_dropped=(\d+) "
                        r"out=(\d+) out_block=(\d+) out_short=(\d+)")
+SCO_PLC = re.compile(r"SCO plc: on=(\d+) frames=(\d+) bad=(\d+) undecoded=(\d+) concealed=(\d+) out_fail=(\d+) zero=(\d+)")
+SCO_CPU = re.compile(r"SCO cpu: frames=(\d+) avg_us=(\d+) max_us=(\d+) load_permille=(\d+)")
+SCO_RING = re.compile(r"SCO ring: mic_dropped=(\d+) level_min=(\d+) level_max=(\d+) sn_jumps=(\d+)")
 
 
 def make_tone_wav(path):
@@ -763,6 +775,19 @@ def packet_delta(before, after):
     delta["rx_none_pct"] = round(100.0 * delta["rx_none"] / delta["rx_total"], 3) if delta["rx_total"] else None
     delta["rx_err_pct"] = round(100.0 * delta["rx_err"] / delta["rx_total"], 3) if delta["rx_total"] else None
     return delta
+
+
+def closing_counters(watch, since):
+    """Frame status and cost of the channel, as the board prints them when it closes; None on an older firmware."""
+    text = lines_since(watch, since)
+    plc = next((SCO_PLC.search(line) for line in text if SCO_PLC.search(line)), None)
+    cpu = next((SCO_CPU.search(line) for line in text if SCO_CPU.search(line)), None)
+    ring = next((SCO_RING.search(line) for line in text if SCO_RING.search(line)), None)
+    if not plc or not cpu:
+        return None
+    return {**(dict(zip(("mic_dropped", "level_min", "level_max", "sn_jumps"), (int(v) for v in ring.groups()))) if ring else {}),
+            **dict(zip(("plc_on", "frames", "bad", "undecoded", "concealed", "out_fail", "zero"), (int(v) for v in plc.groups()))),
+            **dict(zip(("cpu_frames", "avg_us", "max_us", "load_permille"), (int(v) for v in cpu.groups())))}
 
 
 def tap_tones_quiet(path, gaps, criterion, args):
@@ -873,6 +898,8 @@ def audio_trial(watch, index, args, out, tag):
     if stats:
         keys = ("bt_rate", "in_bytes", "in_block", "in_dropped", "out_bytes", "out_block", "out_short")
         trial["sco_stats"] = dict(zip(keys, (int(v) for v in stats.groups())))
+    watch.pump(time.monotonic() + 0.3)     # the lines after the stats line
+    trial["sco_frames"] = closing_counters(watch, t_close)
     trial["board_resets"] = len(watch.resets) - resets
     trial["reset_reasons"] = [r["reason"] for r in watch.resets[resets:]]
     trial["reset_at_s"] = [round(r["t"] - t_start, 1) for r in watch.resets[resets:]]
@@ -1758,6 +1785,307 @@ def stage_btloss(args):
     return {"PASS": 0, "FAIL": 1}.get(verdict, 2)
 
 
+PLC_WAV = "plc_voice.wav"
+PLC_WAV_SECONDS = 9.0
+PLC_PLAY_LEAD_S = 1.0           # the recorder starts before the phone's track
+PLC_SILENCE_S = 4
+FDSTAT = re.compile(r"fdstat injected=(\d+) concealed=(\d+) bad=(\d+) plc=(\d) sig=(\d+) err=(\d+) "
+                    r"err_repeat=(\d+) err_next=(\d+)")
+FDSTAT_KEYS = ("injected", "concealed", "bad", "plc", "sig", "err", "err_repeat", "err_next")
+PLC_BLOCK_S = 0.0075
+PLC_TONE_HZ = 1000
+PLC_LONG_BURST = 40             # frames: 300 ms, past the point where the concealment has faded out
+PLC_LONG_PERIOD = 400
+PLC_FADE_END_S = 0.0675         # hold and fade of main/plc.c
+PLC_FADE_SLACK_S = 0.03
+PLC_QUIET_FRACTION = 0.05       # of the tone's level: what counts as gone
+PLC_SILENCE_MAX_RMS = 10.0      # the bus carries a signal at about 10000 rms
+
+
+def plc_fdstat(watch):
+    for _ in range(3):
+        t = watch.now()
+        watch.send("fdstat")
+        if wait_line(watch, t, "fdstat injected=", 3.0) is not None:
+            found = next((FDSTAT.search(line) for line in lines_since(watch, t) if FDSTAT.search(line)), None)
+            if found:
+                return dict(zip(FDSTAT_KEYS, (int(v) for v in found.groups())))
+    return None
+
+
+def plc_quiet_runs(path, level):
+    """Lengths in seconds of the stretches below a share of the level, in blocks of one frame."""
+    samples, rate = audio_check.read_wav(path)
+    size = int(PLC_BLOCK_S * rate)
+    runs, run = [], 0
+    limit = (PLC_QUIET_FRACTION * level) ** 2
+    seen_signal = False
+    for at in range(0, len(samples) - size + 1, size):
+        block = samples[at:at + size]
+        if sum(v * v for v in block) / size < limit:
+            run += 1
+        else:
+            if seen_signal and run:
+                runs.append(round(run * PLC_BLOCK_S, 4))
+            seen_signal = True
+            run = 0
+    return runs
+
+
+def plc_level(path):
+    samples, _ = audio_check.read_wav(path)
+    return {"rms": round(math.sqrt(sum(v * v for v in samples) / max(len(samples), 1)), 2),
+            "peak": max((abs(v) for v in samples), default=0), "samples": len(samples)}
+
+
+def plc_case(watch, args, out, tag, name, plc, period, burst, signal, ref, zeros=0):
+    """One recording of the bus with the plan of frame replacement; signal: voice, tone or None."""
+    case = {"name": name, "plc": plc, "period": period, "burst": burst, "signal": signal, "zeros": zeros, "errors": []}
+    case_dir = out / name
+    case_dir.mkdir(parents=True, exist_ok=True)
+    if not board_cmd(watch, "plc %d" % plc, "plc = %d" % plc):
+        case["errors"].append("plc %d not confirmed" % plc)
+    if not board_cmd(watch, "fdrop %d %d %d" % (period, burst, zeros), "fdrop = %d" % period):
+        case["errors"].append("fdrop not confirmed")
+    before = plc_fdstat(watch)
+    pkt_before = sco_packets(watch)
+    recorder = TapRecorder(("L", "L")).start()
+    watch.pump(time.monotonic() + PLC_PLAY_LEAD_S)
+    seconds = PLC_SILENCE_S
+    if signal == "voice":
+        seconds = int(PLC_WAV_SECONDS)
+        app_command("play", tag + "-play", "--es", "wav", PLC_WAV)
+    elif signal == "tone":
+        seconds = int(PLC_WAV_SECONDS)
+        app_command("play", tag + "-play", "--es", "tone", str(PLC_TONE_HZ), "--ei", "seconds", str(seconds),
+                    "--ei", "level", str(AUDIO_LEVEL))
+    if signal:
+        _, status = wait_app(watch, tag + "-play", lambda s: (s.get("play") or {}).get("id") == tag + "-play", 10.0)
+        if not status or not status.get("ok"):
+            case["errors"].append("play not accepted: %s" % (status and status.get("error")))
+    watch.pump(time.monotonic() + seconds + PLC_PLAY_LEAD_S)
+    summary = recorder.stop().save(case_dir)
+    (case_dir / "mic.wav").unlink(missing_ok=True)
+    after = plc_fdstat(watch)
+    pkt_after = sco_packets(watch)
+    board_cmd(watch, "fdrop 0", "fdrop = 0")
+    case["tap"] = tap_stream_stats(summary, "call")
+    case["packets"] = packet_delta(pkt_before, pkt_after)
+    if before and after:
+        # The injection counters restart with fdrop; the concealment counters run from the opening of the channel.
+        stat = {"injected": after["injected"], "concealed": after["concealed"] - before["concealed"],
+                "bad": after["bad"] - before["bad"], "sig": after["sig"], "err": after["err"],
+                "err_repeat": after["err_repeat"], "err_next": after["err_next"]}
+        if stat["sig"] and stat["err"]:
+            stat["conceal_snr_db"] = round(10 * math.log10(stat["sig"] / stat["err"]), 2)
+        if stat["sig"] and stat["err_repeat"]:
+            stat["repeat_snr_db"] = round(10 * math.log10(stat["sig"] / stat["err_repeat"]), 2)
+        case["frames"] = stat
+    else:
+        case["errors"].append("fdstat did not answer")
+    wav = case_dir / "call.wav"
+    if signal == "voice":
+        rec, _ = audio_check.read_wav(wav)
+        case["voice"] = voice_check.compare(ref, rec)
+    elif signal == "tone":
+        case["quiet_runs_s"] = plc_quiet_runs(wav, AUDIO_LEVEL)
+    else:
+        case["level"] = plc_level(wav)
+    if not args.keep_wav:
+        wav.unlink(missing_ok=True)
+    return case
+
+
+def plc_case_ok(case):
+    """A counter that agrees with the plan: every replaced frame is concealed when concealment is on, none when off."""
+    stat = case.get("frames")
+    if not stat or case["errors"]:
+        return False
+    if case["period"] and not stat["injected"]:
+        return False
+    natural = 0
+    if case.get("packets"):
+        natural = case["packets"]["rx_err"] + case["packets"]["rx_none"] + case["packets"]["rx_lost"]
+    if not case["plc"]:
+        return stat["concealed"] == 0
+    # Concealed frames are the replaced ones plus the real losses; both fell in the window, a real loss may fall on a
+    # replaced frame, and a frame of the counter window may lie just outside the replacement window: two frames of slack.
+    if case.get("zeros"):
+        # Zeros count as a loss only inside a loud signal: pauses and the starts of syllables stay out by design.
+        return stat["injected"] * 0.25 <= stat["concealed"] <= stat["injected"] + natural + 2
+    return stat["injected"] - 2 <= stat["concealed"] <= stat["injected"] + natural + 2
+
+
+def plc_summary(cases):
+    by_name = {}
+    for c in cases:
+        by_name.setdefault(c["name"], []).append(c)
+
+    def values(name, key, sub):
+        return [(c.get(sub) or {}).get(key) for c in by_name.get(name, []) if (c.get(sub) or {}).get(key) is not None]
+
+    return {name: {"conceal_snr_db": values(name, "conceal_snr_db", "frames"),
+                   "repeat_snr_db": values(name, "repeat_snr_db", "frames"),
+                   "injected": values(name, "injected", "frames"), "concealed": values(name, "concealed", "frames"),
+                   "voice_snr_db": values(name, "snr_db", "voice"),
+                   "voice_p02_db": values(name, "block_snr_p02_db", "voice"),
+                   "voice_under_0db_pct": values(name, "blocks_under_0db_pct", "voice"),
+                   "zero_runs": values(name, "zero_runs", "voice"),
+                   "level_rms": values(name, "rms", "level"), "level_peak": values(name, "peak", "level"),
+                   "quiet_runs_s": [c.get("quiet_runs_s") for c in by_name[name] if "quiet_runs_s" in c]}
+            for name in by_name}
+
+
+def stage_plc(args):
+    keep_awake()
+    out = run_dir("plc", args.label)
+    start = datetime.now()
+    t0 = time.monotonic()
+    if SCO_APP not in adb("shell", "pm", "path", SCO_APP):
+        return audio_no_data(args, out, "probe app is not installed, run android/build_apk.py --install")
+    try:
+        before = phone.status()
+        bonds_before = phone.bond_list()
+    except phone.PhoneError as e:
+        return audio_no_data(args, out, str(e))
+    telecom_before = telecom_state()
+    if before["keyguard"] or telecom_before is None or telecom_before["calls_now"] or telecom_before["telephony_busy"]:
+        return audio_no_data(args, out, "phone not usable: %s %s" % (before["keyguard"], telecom_before))
+    watch = SerialWatch(args.port, out, False, echo=args.echo)
+    watch.pump(time.monotonic() + 15, until=lambda: watch.sp is not None)
+    if watch.sp is None:
+        watch.finish(0)
+        return audio_no_data(args, out, "port not opened")
+    app_ready()
+    # The same start as audio: a known state and a live link before anything is asked of the channel.
+    ups = watch.slc_ups
+    watch.pulse_reset()
+    if wait_slc(watch, ups, args.slc_timeout) is None:
+        watch.close_port()
+        watch.finish(0)
+        return audio_no_data(args, out, "no SLC after reset")
+    boot_resets = len(watch.resets)
+    if plc_fdstat(watch) is None:
+        watch.close_port()
+        watch.finish(0)
+        return audio_no_data(args, out, "the board has no fdrop command: flash a build with the variant fdrop")
+    if not board_cmd(watch, "vol 0", "volume = 0"):     # R15; the volume acts behind the bus
+        watch.close_port()
+        watch.finish(0)
+        return audio_no_data(args, out, "the board did not confirm vol 0")
+
+    ref = voice_check.make(PLC_WAV_SECONDS, AUDIO_LEVEL)
+    voice_check.write_wav(out / PLC_WAV, ref)
+    tag = datetime.now().strftime("%H%M%S")
+    app_command("status", tag + "-start")
+    wait_app(watch, tag + "-start", lambda s: True, 10.0)
+    adb("push", str(out / PLC_WAV), SCO_DIR + "/" + PLC_WAV, timeout=30.0)
+
+    # name, plc, period, burst, signal. The order alternates so that a slow change of the link falls on both sides.
+    plan = [("voice_clean", 1, 0, 1, "voice", 0),
+            ("voice_on", 1, args.period, 1, "voice", 0), ("voice_off", 0, args.period, 1, "voice", 0),
+            ("burst_on", 1, args.period * 3, 3, "voice", 0), ("burst_off", 0, args.period * 3, 3, "voice", 0),
+            ("silence_on", 1, args.period, 1, None, 0), ("silence_off", 0, args.period, 1, None, 0),
+            ("fade_on", 1, PLC_LONG_PERIOD, PLC_LONG_BURST, "tone", 0)]
+    if args.codec == "CVSD":    # zeros with a good status: a loss only the content shows
+        plan += [("zeros_on", 1, args.period, 1, "voice", 1), ("zeros_off", 0, args.period, 1, "voice", 1)]
+    cases = []
+    codec = None
+    opened = False
+    for i in range(1, args.n + 1):
+        trial = {}
+        opened = channel_open(watch, trial, "%s-%d-open" % (tag, i), args.open_timeout)
+        codec = trial.get("codec")
+        if opened and codec == args.codec:
+            watch.pump(time.monotonic() + args.settle)
+            for name, plc, period, burst, signal, zeros in plan:
+                case = plc_case(watch, args, out / ("trial-%02d" % i), "%s-%d-%s" % (tag, i, name), name, plc, period,
+                                burst, signal, ref, zeros)
+                case["trial"] = i
+                cases.append(case)
+                print(json.dumps({k: case.get(k) for k in ("trial", "name", "frames", "voice", "level", "quiet_runs_s",
+                                                           "errors")}, ensure_ascii=False), flush=True)
+        board_cmd(watch, "plc 1", "plc = 1")
+        channel_close(watch, trial, "%s-%d-close" % (tag, i), args.close_timeout)
+        watch.pump(time.monotonic() + args.gap)
+        if not opened or codec != args.codec:
+            break
+    board_cmd(watch, "vol 100", "volume = 100")
+    adb("shell", "am", "force-stop", SCO_APP)
+    watch.close_port()
+    summary = watch.finish(args.n)
+    end = datetime.now()
+    telecom_after = telecom_state()
+    try:
+        phone.go_home()
+        after = phone.status()
+        bonds_after = phone.bond_list()
+    except phone.PhoneError:
+        after, bonds_after = None, None
+    removals = usb_removals(start, end)
+    standby = pc_standby_entries(start, end)
+    table = plc_summary(cases)
+
+    def side(name, key):
+        return table.get(name, {}).get(key) or []
+
+    def pairs_better(on, off, key):
+        a, b = side(on, key), side(off, key)
+        return bool(a) and len(a) == len(b) and all(x > y for x, y in zip(a, b))
+
+    fade = [r for runs in side("fade_on", "quiet_runs_s") for r in runs if r > 0.1]
+    fade_expected = PLC_LONG_BURST * PLC_BLOCK_S - PLC_FADE_END_S
+    checks = {
+        "codec_expected": codec == args.codec,
+        "all_cases_run": len(cases) == len(plan) * args.n,
+        "counters_match_plan": bool(cases) and all(plc_case_ok(c) for c in cases),
+        # The same plan without concealment must be worse, on the bus and against the reference.
+        "voice_off_worse": pairs_better("voice_on", "voice_off", "voice_snr_db"),
+        "burst_off_worse": pairs_better("burst_on", "burst_off", "voice_snr_db"),
+        "voice_p02_off_worse": pairs_better("voice_on", "voice_off", "voice_p02_db"),
+        # Without concealment each replaced frame is digital silence on the bus; with it none is left.
+        "zero_runs_seen_off": bool(side("voice_off", "zero_runs")) and all(v > 0 for v in side("voice_off", "zero_runs")),
+        "zero_runs_gone_on": bool(side("voice_on", "zero_runs")) and all(v == 0 for v in side("voice_on", "zero_runs")),
+        **({"zeros_off_worse": pairs_better("zeros_on", "zeros_off", "voice_snr_db"),
+            # A zero frame after a quiet one is left alone by design, so a rare one remains on a fall of the signal.
+            "zero_frames_gone_on": bool(side("zeros_on", "zero_runs")) and all(v <= 1 for v in side("zeros_on", "zero_runs")),
+            "zero_frames_seen_off": bool(side("zeros_off", "zero_runs")) and all(v > 0 for v in side("zeros_off", "zero_runs"))}
+           if args.codec == "CVSD" else {}),
+        # On the frames it replaced, the concealment must beat the plain repeat of the last block that goal 044 refuted.
+        "better_than_repeat": bool(side("voice_on", "conceal_snr_db")) and all(
+            a > b for a, b in zip(side("voice_on", "conceal_snr_db"), side("voice_on", "repeat_snr_db"))),
+        # True silence stays silent: the phone's own rare clicks differ from one recording to the next, so two levels
+        # cannot be compared; the level with concealment stays 60 dB under the signal, whichever frames it replaced.
+        "silence_untouched": bool(side("silence_on", "level_rms")) and all(
+            a <= PLC_SILENCE_MAX_RMS for a in side("silence_on", "level_rms")),
+        # A long loss ends in silence, in the time the firmware says.
+        "long_loss_fades": bool(fade) and abs(sorted(fade)[len(fade) // 2] - fade_expected) <= PLC_FADE_SLACK_S,
+        "no_call_during_round": bool(telecom_after) and telecom_after["calls_now"] == 0
+                                and telecom_after["telephony_busy"] == 0
+                                and telecom_after["historical_lines"] == telecom_before["historical_lines"],
+        "other_bonds_unchanged": bonds_after is not None and phone.others(bonds_before) == phone.others(bonds_after),
+        "board_resets_only_start": summary["board_resets"] == boot_resets,
+        "panics_zero": summary["panics"] == 0,
+        "slc_drops_zero": summary["slc_drops"] == 0,
+        "port_drops_zero": summary["port_drops"] == 0,
+        "usb_removals_zero": removals == 0,
+    }
+    verdict = "INVALID_WINDOW" if standby != 0 else ("PASS" if all(checks.values()) else "FAIL")
+    result = {"stage": "plc", "label": args.label, "power": args.power, "verdict": verdict, "checks": checks,
+              "start": start.isoformat(timespec="seconds"), "end": end.isoformat(timespec="seconds"),
+              "seconds": round(time.monotonic() - t0, 1), "dir": str(out),
+              "planned": {"n": args.n, "codec": args.codec, "period": args.period, "long_burst": PLC_LONG_BURST},
+              "codec": codec, "table": table, "fade_expected_s": round(fade_expected, 4), "cases": cases,
+              "telecom_before": telecom_before, "telecom_after": telecom_after,
+              "pc_standby_entries": standby, "usb_removals": removals, "serial": summary}
+    write_json(out / "round.json", result)
+    with (RUNS_ROOT / "rounds.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(redact(json.dumps({k: result[k] for k in ("stage", "label", "power", "verdict", "start", "seconds", "table",
+                                                           "usb_removals", "dir")}, ensure_ascii=False)) + "\n")
+    print(json.dumps({k: v for k, v in result.items() if k not in ("cases", "serial")}, ensure_ascii=False, indent=2))
+    return {"PASS": 0, "FAIL": 1}.get(verdict, 2)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="stage", required=True)
@@ -1847,12 +2175,26 @@ def main():
     p.add_argument("--label", default="")
     p.add_argument("--port", default=DEFAULT_PORT)
     p.add_argument("--echo", action="store_true", help="print events live")
+    p = sub.add_parser("plc", help="the concealment on a voice-like signal, with controls; needs the variant fdrop")
+    p.add_argument("--power", required=True, help="what feeds the board, e.g. adapter or battery (R11)")
+    p.add_argument("--codec", required=True, choices=["mSBC", "CVSD"], help="the codec this firmware must negotiate")
+    p.add_argument("--n", type=int, default=3, help="number of trials")
+    p.add_argument("--period", type=int, default=30, help="one replaced frame out of this many")
+    p.add_argument("--keep-wav", action="store_true")
+    p.add_argument("--settle", type=float, default=1.0)
+    p.add_argument("--open-timeout", type=float, default=15.0)
+    p.add_argument("--close-timeout", type=float, default=10.0)
+    p.add_argument("--slc-timeout", type=float, default=60.0)
+    p.add_argument("--gap", type=float, default=3.0)
+    p.add_argument("--label", default="")
+    p.add_argument("--port", default=DEFAULT_PORT)
+    p.add_argument("--echo", action="store_true", help="print events live")
     args = ap.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     return {"link": stage_link, "sco": stage_sco, "power": stage_power, "audio": stage_audio, "tap": stage_tap,
-            "btloss": stage_btloss}[args.stage](args)
+            "btloss": stage_btloss, "plc": stage_plc}[args.stage](args)
 
 
 if __name__ == "__main__":

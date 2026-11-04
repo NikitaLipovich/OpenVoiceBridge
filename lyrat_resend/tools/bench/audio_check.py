@@ -10,7 +10,8 @@ within 5 % of that tone, which is wide enough to report a wrong frequency as a s
 silence. A sample rate error of 2 lands outside every window and reads as a missing tone.
 
 For each tone, over the frames inside its runs (the first and the last frame of a run overlap the
-neighbouring tone and are left out):
+neighbouring tone and are left out; so are frames of low level at the very start and end of the signal in the file, where
+the window holds the start or the end of the track itself, and which of them count would otherwise depend on the grid):
   snr_db     tone power / everything else above 50 Hz, summed over the frames, so that short dropouts
              lower it instead of disappearing in a median
   freq_hz    median of the peak frequency, parabolic interpolation on the log spectrum
@@ -47,6 +48,7 @@ TONE_HALF_BINS = 3          # the Hann main lobe plus a little
 LOW_CUT_HZ = 50.0           # DC and hum are not what this tool judges
 SILENCE_RMS = 3.0           # frames below this level belong to no tone
 BLOCK_S = 0.0075            # one mSBC frame
+EDGE_LEVEL = 0.9            # a frame at an edge of the signal under this part of the run's level holds the end of the track
 
 
 def read_wav(path):
@@ -209,13 +211,24 @@ def check(samples, rate, tones, min_snr=20.0, max_shift=1.0, min_seconds=0.5, cr
 
     # Interior frames of each run; a run shorter than three frames has none.
     interior = {t: [] for t in tones}
+    assigned = [k for k, label in enumerate(labels) if label is not None]
+    first_signal, last_signal = (assigned[0], assigned[-1]) if assigned else (-1, -1)
     i = 0
     while i < len(frames):
         j = i
         while j + 1 < len(frames) and labels[j + 1] == labels[i]:
             j += 1
         if labels[i] is not None:
-            interior[labels[i]].extend(frames[i + 1:j])
+            run = frames[i + 1:j]
+            if run:
+                level = sorted(f["rms"] for f in run)[len(run) // 2] * EDGE_LEVEL
+                if i == first_signal:
+                    while run and run[0]["rms"] < level:
+                        run = run[1:]
+                if j == last_signal:
+                    while run and run[-1]["rms"] < level:
+                        run = run[:-1]
+            interior[labels[i]].extend(run)
         i = j + 1
 
     all_ok = True
