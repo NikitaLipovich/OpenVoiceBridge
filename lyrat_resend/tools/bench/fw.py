@@ -8,12 +8,12 @@
 Variants compile bench switches through the ignored main/bench_variant.h:
   base     normal firmware
   no_pa    PA (GPIO21) off and codec volume 0
-  no_wifi  Wi-Fi and UDP never started
   no_bt    Bluetooth never started
   bod      normal firmware plus the hardware brownout reset at level 0, about 2.43 V (diagnostic)
   bod7     the same at level 7, about 2.80 V
+  mac_b5, mac_b3, mac_b2   one byte of the Bluetooth address plus 1: the phone sees a new device, see goal 044 DECISIONS D7
   no_wbs   CONFIG_BT_HFP_WBS_ENABLE=n in sdkconfig: the phone can only choose CVSD; any other variant restores =y
-Combine with "+": no_pa+no_wifi.
+Combine with "+": no_pa+no_wbs.
 
 A flash counts as done only when esptool confirmed the hash of all three images.
 
@@ -34,8 +34,11 @@ IDF_PATH = os.environ.get("IDF_PATH", r"C:\esp\v5.5.2\esp-idf")
 IDF_TOOLS = os.environ.get("IDF_TOOLS_PATH", r"C:\Espressif")
 VARIANT_H = FW_DIR / "main" / "bench_variant.h"
 # Macro and value; BENCH_BROWNOUT_RESET carries the threshold level plus one.
-MACROS = {"no_pa": ("BENCH_NO_PA", 1), "no_wifi": ("BENCH_NO_WIFI", 1), "no_bt": ("BENCH_NO_BT", 1),
-          "bod": ("BENCH_BROWNOUT_RESET", 1), "bod7": ("BENCH_BROWNOUT_RESET", 8)}
+MACROS = {"no_pa": ("BENCH_NO_PA", 1), "no_bt": ("BENCH_NO_BT", 1),
+          "bod": ("BENCH_BROWNOUT_RESET", 1), "bod7": ("BENCH_BROWNOUT_RESET", 8),
+          # BENCH_MAC_PATCH: byte index * 256 + what to add to that byte of the address.
+          "mac_b5": ("BENCH_MAC_PATCH", 5 * 256 + 1), "mac_b3": ("BENCH_MAC_PATCH", 3 * 256 + 1),
+          "mac_b2": ("BENCH_MAC_PATCH", 2 * 256 + 1)}
 PORT_ERRORS = ("could not open port", "serial port", "Failed to connect", "Write timeout",
                "The device does not recognize", "PermissionError", "Lost connection", "Serial data stream stopped",
                "No serial data", "FileNotFoundError", "ClearCommError", "chip stopped responding", "Wrong boot mode")
@@ -58,6 +61,10 @@ def idf(args: str, log_name: str, timeout: float = 900.0):
 
 def set_kconfig(names) -> None:
     """Switch the options of KCONFIG_OFF in sdkconfig; the build notices the change and reconfigures."""
+    if not SDKCONFIG.exists():      # generated and ignored by git: sdkconfig.defaults is the source
+        res = idf("idf.py -C '%s' reconfigure" % FW_DIR, "reconfigure")
+        if res.returncode != 0:
+            raise SystemExit((res.stdout + res.stderr)[-3000:])
     text = original = SDKCONFIG.read_text(encoding="utf-8")
     for variant, option in KCONFIG_OFF.items():
         on, off = "%s=y\n" % option, "# %s is not set\n" % option

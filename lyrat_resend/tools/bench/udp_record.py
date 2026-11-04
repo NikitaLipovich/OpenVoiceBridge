@@ -180,6 +180,13 @@ def local_addresses():
     return [a for a in found if not a.startswith("127.")] or ["0.0.0.0"]
 
 
+def route_address(target):
+    """The local address the routing table picks for target. UDP connect sends nothing."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect((target, TAP_REQUEST_PORT))
+        return s.getsockname()[0]
+
+
 class _TapStream:
     def __init__(self, name):
         self.name = name
@@ -311,7 +318,11 @@ class TapRecorder:
         for s in self.senders:
             try:
                 if fresh:
-                    s.sendto(self.request, (self.board, TAP_REQUEST_PORT))
+                    # Unicast only from the address the route to the board uses. Another adapter may be a phone's
+                    # USB tethering, which forwards the request by NAT: the board then sees the phone as the
+                    # requester and turns the stream to it, and most packets never reach this PC.
+                    if s.getsockname()[0] == route_address(self.board):
+                        s.sendto(self.request, (self.board, TAP_REQUEST_PORT))
                 else:
                     s.sendto(self.request, ("255.255.255.255", TAP_REQUEST_PORT))
             except OSError:
@@ -358,7 +369,8 @@ class TapRecorder:
         self._thread.join(timeout=2)
         if release and self.board and self.senders:
             try:
-                self.senders[0].sendto(b"TAP0", (self.board, TAP_REQUEST_PORT))
+                next((x for x in self.senders if x.getsockname()[0] == route_address(self.board)),
+                     self.senders[0]).sendto(b"TAP0", (self.board, TAP_REQUEST_PORT))
             except OSError:
                 pass
         for s in list(self.socks) + self.senders:
