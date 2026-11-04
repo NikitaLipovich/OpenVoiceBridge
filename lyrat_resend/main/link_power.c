@@ -18,10 +18,14 @@
 #define QUIET_BEFORE_REQUEST_US (3 * 1000000LL)  // well before the phone's 7 s
 #define REQUEST_RETRY_US        (5 * 1000000LL)
 #define CHECK_PERIOD_US         (500 * 1000LL)
+// 3 s, against the stack's 5 s. If the board dies while the phone waits for its reply to +BCS, the phone adds the same
+// entry when its 5 s timer ends, unless the link has dropped before that (goal 055 #005). Slots are 0.625 ms.
+#define LINK_SUPERVISION_SLOTS  4800
 
 // Not in a public header. Parameters are the stack's own for an HFP link (BTA_DM_PM_SNIFF).
 extern uint8_t btsnd_hcic_sniff_mode(uint16_t handle, uint16_t max_sniff_period, uint16_t min_sniff_period,
                                      uint16_t sniff_attempt, uint16_t sniff_timeout);
+extern void BTM_SetDefaultLinkSuperTout(uint16_t timeout);
 
 static volatile bool s_acl_up, s_slc_up, s_sco_open, s_mode_active;
 static volatile uint16_t s_handle;
@@ -44,6 +48,8 @@ static void check_cb(void *arg)
 
 void link_power_init(void)
 {
+    // The board is the central on links it pages, so this value is the link's. See LINK_SUPERVISION_SLOTS.
+    BTM_SetDefaultLinkSuperTout(LINK_SUPERVISION_SLOTS);
 #ifndef BENCH_NO_FIRST_SNIFF
     const esp_timer_create_args_t args = {.callback = check_cb, .name = "link_power"};
     esp_timer_handle_t timer;
