@@ -1422,7 +1422,7 @@ static esp_err_t audio_init(void)
 #else
     esp_codec_dev_set_out_vol(s_codec_dev, 100);
 #endif
-    esp_codec_dev_set_in_gain(s_codec_dev, 30.0f);  // 30dB — louder signal, better ADPCM tracking
+    esp_codec_dev_set_in_gain(s_codec_dev, 30.0f);  // 30dB — louder signal
 
     ESP_LOGI(TAG, "ES8388 OK — vol=100 gain=30dB PA=GPIO%d", PA_PIN);
     return ESP_OK;

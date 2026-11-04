@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """Record the board's UDP audio streams into WAV files: duplicates removed, losses counted.
 
+  udp_record.py --tap [--seconds N] [--out DIR] [--slots L,LR] [--forward HOST:PORT,HOST:PORT]
+  udp_record.py --receive PORT,PORT [--seconds N] [--idle-exit S] --out DIR
   udp_record.py --seconds N --out DIR [--ports 5004,5005]
-  udp_record.py --tap --seconds N --out DIR [--slots L,L]
 
-Two sources use the same ports. --tap asks the S3-ETH board for the I2S bus as PCM (TapRecorder), the default
-form takes the mu-law stream of a LyraT that has Wi-Fi.
+Three forms. --tap asks the S3-ETH board for the I2S bus as PCM (TapRecorder): this is the recording of a conversation.
+Without --seconds it runs until Ctrl+C, without --out it writes to <bench runs>/record/<stamp>. It plays nothing on the PC.
+--receive is the far end of --forward, an example of a second consumer and the one the tests use. The last form takes the
+mu-law stream of a LyraT that has Wi-Fi, firmware before goal 044.
+
+--forward gives the live stream to a second consumer while recording, a translator for instance: the first copy of each
+packet goes out as it arrives, unchanged and still with its S3 header (docs/S3_TAP.md), the call to the first address and
+the mic to the second. A consumer that is absent or slow costs the recording nothing: the send does not wait.
 
 TapRecorder finds the board by itself: it broadcasts "TAP1 <call> <mic>" to port 5006 once a second and turns to
 unicast as soon as a stream arrives, returning to broadcast when the stream stops, so a restarted board needs no
@@ -14,7 +21,11 @@ It writes call.wav and mic.wav (16 kHz, 1 or 2 channels as asked) with silence i
 time axis stays real, and DIR/tap.json with, for each stream: packets, unique, duplicates, reordered, lost_packets,
 loss_pct, max_burst, gaps ([first frame, frames] in the WAV), boots, ovf and send_fail (growth during the
 recording, these are losses on the board), rate_hz (samples against the PC clock, least squares over arrival
-times) and frames. As a module: TapRecorder(slots).start(), .stop(), .save(out_dir), .report().
+times), frames, seconds, first_at and last_at (time.monotonic of the first and last packet, one clock for all processes
+of this PC), wall_s (first packet to the end of the last, on the PC clock) and marks ([seq, arrival] of every 500th
+packet), floor_rms (per channel, the 10th percentile of the 100 ms level: a voice or music leaves quiet moments, the codec
+noise seen in goal 050 #001 does not); with --forward also forward: target, forwarded, failed for each stream.
+As a module: TapRecorder(slots, forward=..., listen_only=...).start(), .stop(), .save(out_dir).
 
 Stream names: 5004 is call.wav (phone to headphones), 5005 is mic.wav (headset mic to phone).
 A packet is [4 bytes seq, LE][3 zero bytes][1 byte frame count][mu-law, 1 byte per sample]. The board
@@ -40,7 +51,11 @@ import time
 import wave
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from benchlib import run_dir  # noqa: E402
+
 RATE = 16000
+PROGRESS_S = 30.0
 SAMPLES_PER_FRAME = 240
 HEADER = 8
 MAX_GAP_FRAMES = RATE * 30 // SAMPLES_PER_FRAME   # a larger jump is a board restart, not a loss
@@ -169,6 +184,11 @@ TAP_REQUEST_S = 1.0
 TAP_SILENT_S = 3.0        # no stream for this long: the board may be back with another address, broadcast again
 TAP_STREAMS = {0: "call", 1: "mic"}
 TAP_PORTS = {"call": 5004, "mic": 5005}
+MARK_EVERY = 500          # about every 7.5 s at 240 frames a packet
+FLOOR_WINDOW = RATE // 10
+MIC_FLOOR_WARN = 400.0    # a healthy mic stays near 100 in the quiet moments; the noisy periods of #001 show 450 and up
+MIC_WARNING = ("mic floor %s: steady noise on the mic line of the LyraT. It came for minutes at a time on the bench, resets "
+               "did not clear it, and this part of mic.wav is spoiled. Steady loud sound in the room looks the same.")
 
 
 def local_addresses():
@@ -185,6 +205,25 @@ def route_address(target):
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.connect((target, TAP_REQUEST_PORT))
         return s.getsockname()[0]
+
+
+def floor_rms(pcm, channels):
+    """Per channel: the 10th percentile of the level over 100 ms windows; windows of pure silence (losses) do not count."""
+    result = []
+    for c in range(channels or 0):
+        data = pcm[c::channels]
+        levels = []
+        for start in range(0, len(data) - FLOOR_WINDOW + 1, FLOOR_WINDOW):
+            power = sum(v * v for v in data[start:start + FLOOR_WINDOW])
+            if power:
+                levels.append(power)
+        levels.sort()
+        result.append(round((levels[len(levels) // 10] / FLOOR_WINDOW) ** 0.5, 1) if levels else None)
+    return result
+
+
+def floor_too_high(floors):
+    return any(f is not None and f > MIC_FLOOR_WARN for f in floors or ())
 
 
 class _TapStream:
@@ -208,11 +247,12 @@ class _TapStream:
         self.last_at = at
         if seq in packets:
             self.duplicates += 1
-            return
+            return False
         if self.last_seq is not None and packets and seq < self.last_seq:
             self.reordered += 1
         self.last_seq = seq
         packets[seq] = (frame, channels, at, ovf, send_fail, data[TAP_HEADER:])
+        return True
 
     @staticmethod
     def _rate(points):
@@ -281,23 +321,36 @@ class _TapStream:
                  "boots": len(self.boots), "ovf": ovf, "send_fail": send_fail,
                  "rate_hz": round(sum(t * r for t, r in rates) / seconds, 2) if seconds else None,
                  "channels": channels, "frames": len(pcm) // (channels or 1),
-                 "seconds": round(len(pcm) / (channels or 1) / RATE, 3)}
+                 "seconds": round(len(pcm) / (channels or 1) / RATE, 3), "floor_rms": floor_rms(pcm, channels),
+                 "first_at": self.first_at, "last_at": self.last_at,
+                 "wall_s": round(self.last_at - self.first_at + SAMPLES_PER_FRAME / RATE, 3) if self.first_at else None,
+                 "marks": [[q, round(p[q][2], 4)] for p in self.boots.values() for q in sorted(p) if q % MARK_EVERY == 0]}
         return channels, pcm, stats
 
 
 class TapRecorder:
-    def __init__(self, slots=("L", "L"), board=None):
+    def __init__(self, slots=("L", "L"), board=None, forward=None, listen_only=False, ports=None):
+        """forward: {"call": (host, port), "mic": (host, port)}. listen_only: never talk to the board, take what
+        arrives on ports ({"call": port, "mic": port}): the far end of someone else's forward."""
         self.request = ("TAP1 %s %s" % tuple(slots)).encode()
         self.board = board          # known address, or None to find it by broadcast
+        self.listen_only = listen_only
+        self.forward = dict(forward or {})
+        self.forwarded = {name: 0 for name in self.forward}
+        self.forward_failed = {name: 0 for name in self.forward}
+        self.forward_sock = None
+        if self.forward:
+            self.forward_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.forward_sock.setblocking(False)
         self.socks = {}
-        for name, port in TAP_PORTS.items():
+        for name, port in (ports or TAP_PORTS).items():
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_BUFFER)
             s.bind(("0.0.0.0", port))
             s.setblocking(False)
             self.socks[s] = name
         self.senders = []
-        for address in local_addresses():
+        for address in [] if listen_only else local_addresses():
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             s.bind((address, 0))
@@ -334,7 +387,7 @@ class TapRecorder:
         next_ask = 0.0
         while not self._stop.is_set():
             now = time.monotonic()
-            if now >= next_ask:
+            if now >= next_ask and not self.listen_only:
                 self._ask(now)
                 next_ask = now + TAP_REQUEST_S
             ready, _, _ = select.select(list(self.socks) + self.senders, [], [], 0.05)
@@ -348,7 +401,9 @@ class TapRecorder:
                     name = self.socks[s]
                     if data[:2] == TAP_MAGIC and data[2] == TAP_VERSION and len(data) > TAP_HEADER:
                         self.board = sender[0]
-                        self.streams[TAP_STREAMS.get(data[3], name)].add(data, now)
+                        stream = TAP_STREAMS.get(data[3], name)
+                        if self.streams[stream].add(data, now) and stream in self.forward:
+                            self._pass_on(stream, data)
                     else:
                         self.foreign[name].add(data, now)
                 else:
@@ -358,6 +413,14 @@ class TapRecorder:
                         self.board = sender[0]
                     except ValueError:
                         pass
+
+    def _pass_on(self, stream, data):
+        """Never waits and never raises: the recording does not depend on the second consumer."""
+        try:
+            self.forward_sock.sendto(data, self.forward[stream])
+            self.forwarded[stream] += 1
+        except OSError:
+            self.forward_failed[stream] += 1
 
     def start(self):
         self.t0 = time.monotonic()
@@ -373,9 +436,20 @@ class TapRecorder:
                      self.senders[0]).sendto(b"TAP0", (self.board, TAP_REQUEST_PORT))
             except OSError:
                 pass
-        for s in list(self.socks) + self.senders:
+        for s in list(self.socks) + self.senders + ([self.forward_sock] if self.forward_sock else []):
             s.close()
         return self
+
+    def recent_floor(self, name, packets=200):
+        """floor_rms of about the last 3 s of a stream, while recording."""
+        boots = list(self.streams[name].boots.values())
+        recent = list(boots[-1].values())[-packets:] if boots else []
+        if not recent:
+            return []
+        pcm = array.array("h")
+        for item in recent:
+            pcm.frombytes(item[5][:len(item[5]) // 2 * 2])
+        return floor_rms(pcm, recent[0][1])
 
     def received(self, name):
         """Packets of one stream so far; safe to read while recording."""
@@ -386,6 +460,9 @@ class TapRecorder:
         out_dir.mkdir(parents=True, exist_ok=True)
         summary = {"requests": self.requests, "broadcasts": self.broadcasts, "replies": self.replies,
                    "board_status": self.board_status}
+        if self.forward:
+            summary["forward"] = {name: {"target": "%s:%d" % target, "forwarded": self.forwarded[name],
+                                         "failed": self.forward_failed[name]} for name, target in self.forward.items()}
         for name, stream in self.streams.items():
             channels, pcm, stats = stream.assemble()
             stats["first_packet_s"] = round(stream.first_at - self.t0, 3) if stream.first_at else None
@@ -415,25 +492,102 @@ class TapRecorder:
         return summary
 
 
+def parse_forward(text):
+    """HOST:PORT,HOST:PORT into {"call": ..., "mic": ...}."""
+    targets = {}
+    parts = text.split(",")
+    if len(parts) != 2:
+        raise ValueError("--forward takes two addresses, call and mic: %s" % text)
+    for name, part in zip(("call", "mic"), parts):
+        host, port = part.rsplit(":", 1)
+        targets[name] = (host, int(port))
+    return targets
+
+
+def wait_recording(rec, seconds):
+    """Until the time is up or Ctrl+C, with a line of progress; a board that is not there is said at once."""
+    start = time.monotonic()
+    next_line = start + PROGRESS_S
+    try:
+        while seconds is None or time.monotonic() - start < seconds:
+            time.sleep(0.2)
+            now = time.monotonic()
+            if now >= next_line:
+                next_line = now + PROGRESS_S
+                got = {name: rec.received(name) for name in rec.streams}
+                note = "" if all(got.values()) else "  no stream yet: is the S3-ETH board on and in this network?"
+                print("%6.0f s  packets call %d, mic %d%s" % (now - start, got["call"], got["mic"], note), flush=True)
+                floors = rec.recent_floor("mic")
+                if floor_too_high(floors):
+                    print("WARNING " + MIC_WARNING % floors, flush=True)
+    except KeyboardInterrupt:
+        print("stopping", flush=True)
+
+
+def brief(summary):
+    """The numbers a person looks at; everything else is in tap.json."""
+    keep = ("seconds", "wall_s", "rate_hz", "unique", "lost_packets", "loss_pct", "max_burst", "ovf", "send_fail", "channels",
+            "floor_rms")
+    result = {name: {k: summary[name].get(k) for k in keep} for name in ("call", "mic")}
+    if "forward" in summary:
+        result["forward"] = summary["forward"]
+    return result
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--seconds", type=float, required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--seconds", type=float, help="length; with --tap and --receive it may be left out")
+    ap.add_argument("--out", help="directory; with --tap the default is <bench runs>/record/<stamp>")
     ap.add_argument("--ports", default="5004,5005")
     ap.add_argument("--tap", action="store_true", help="take the PCM streams of the S3-ETH board")
-    ap.add_argument("--slots", default="L,L", help="--tap: slots of the call and mic lines: L, R or LR")
+    ap.add_argument("--slots", default="L,LR", help="--tap: slots of the call and mic lines: L, R or LR. The call has the "
+                                                    "same samples in both slots, the mic has two different channels")
+    ap.add_argument("--forward", help="--tap: HOST:PORT,HOST:PORT of a second consumer, call then mic")
+    ap.add_argument("--receive", help="PORT,PORT, call then mic: be the second consumer of a --forward")
+    ap.add_argument("--idle-exit", type=float, help="--receive: stop this long after the last packet")
     args = ap.parse_args()
+    if args.receive:
+        return receive(args)
     if args.tap:
-        rec = TapRecorder(tuple(args.slots.split(","))).start()
-        time.sleep(args.seconds)
-        summary = rec.stop().save(args.out)
-        print(json.dumps(summary, indent=2))
+        forward = parse_forward(args.forward) if args.forward else None
+        out = Path(args.out) if args.out else run_dir("record")
+        rec = TapRecorder(tuple(args.slots.split(",")), forward=forward).start()
+        print("recording to %s, %s" % (out, "Ctrl+C stops" if args.seconds is None else "%g s" % args.seconds), flush=True)
+        wait_recording(rec, args.seconds)
+        summary = rec.stop().save(out)
+        print(json.dumps(brief(summary), indent=2))
+        if floor_too_high(summary["mic"]["floor_rms"]):
+            print("WARNING " + MIC_WARNING % summary["mic"]["floor_rms"], flush=True)
+        print("written: %s" % out, flush=True)
         return 0 if summary["call"]["unique"] and summary["mic"]["unique"] else 2
+    if args.seconds is None or not args.out:
+        ap.error("the form without --tap needs --seconds and --out")
     rec = UdpRecorder([int(p) for p in args.ports.split(",")]).start()
     time.sleep(args.seconds)
     summary = rec.stop().save(args.out)
     print(json.dumps(summary, indent=2))
     return 0 if any(s["unique"] for s in summary.values()) else 2
+
+
+def receive(args):
+    """The far end of --forward: says when it listens, ends after the stream has stopped, saves what it got."""
+    if not args.out:
+        raise SystemExit("--receive needs --out")
+    call, mic = (int(p) for p in args.receive.split(","))
+    rec = TapRecorder(listen_only=True, ports={"call": call, "mic": mic}).start()
+    print("listening", flush=True)
+    start = time.monotonic()
+    try:
+        while args.seconds is None or time.monotonic() - start < args.seconds:
+            time.sleep(0.05)
+            last = max((st.last_at for st in rec.streams.values() if st.last_at), default=None)
+            if args.idle_exit and last and time.monotonic() - last > args.idle_exit:
+                break
+    except KeyboardInterrupt:
+        pass
+    summary = rec.stop(release=False).save(args.out)
+    print(json.dumps(brief(summary), indent=2))
+    return 0 if summary["call"]["unique"] and summary["mic"]["unique"] else 2
 
 
 if __name__ == "__main__":

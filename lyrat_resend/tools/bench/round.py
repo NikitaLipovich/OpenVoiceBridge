@@ -9,6 +9,7 @@
   round.py btloss --power SOURCE [--seconds 1800] [--ab 3] [--phone-wifi asis|on|off] [--label NAME]
   round.py plc   --power SOURCE --codec mSBC|CVSD [--n 3] [--period 30] [--keep-wav] [--label NAME]
   round.py uart  --power SOURCE [--commands 1000] [--lyrat-resets 3] [--s3-resets 3] [--line-low 8] [--label NAME]
+  round.py record --power SOURCE [--n 1] [--seconds 300] [--max-loss 2] [--label NAME]
 
 power: watches the board, the phone ACL history and Windows USB removal events.
 Writes <runs>/power/<stamp>-<label>/round.json and appends one line to <runs>/rounds.jsonl.
@@ -77,11 +78,25 @@ too big, frames that stop, noise, a repeat. A good frame by the same route is th
 restarts, whose boot garbage reaches the S3's RX, and with SCO open the S3 restarts and its TX goes off so that the line is
 held low; the sound up to the phone is judged by the strict rule during those, and the LyraT must see no reset, no SLC or SCO
 drop. audio --uart-load HZ runs the audio stage with commands going through the channel at the same time.
+
+record proves the recording a person gets from udp_record.py --tap, call and mic through the S3-ETH board, with a second
+consumer of the stream alive at the same time. One trial: --seconds of SCO, the app plays the tone sequence, udp_record
+forwards to a separate process, its --receive form. Call: audio_check finds the tones by the strict rule over the whole file
+and without a shift. Mic: firmware tones cannot reach this line and no sound is played (R15), so the same check must fail
+there, which guards against a swapped or shorted line. The mic must be alive: its level has to follow the codec's PGA, which
+needs no sound in the room, and its floor must be low. Room sound in the excerpts is reported, not required (a quiet room is
+no fault). None of that measures the quality of the mic. Periods of steady noise come over the mic line for minutes (goal 050
+#001), and no reset clears them: the round waits for one to end before it starts, reports the wait in mic_wait, and a period
+inside a trial fails it. Duration of each WAV against the PC clock, twice: the arrival of the packets and the time the
+recorder ran. Second consumer: the first copy of every packet was passed on, both its WAV files equal the recorder's byte
+for byte, and it had the packets within RECORD_MAX_DELAY_S of the recorder through the whole trial, not only at the end.
+Room recordings are deleted once judged; call.wav of the recorder stays.
 """
 import argparse
 import json
 import math
 import random
+import hashlib
 import re
 import subprocess
 import sys
@@ -97,7 +112,7 @@ import audio_check  # noqa: E402
 import phone  # noqa: E402
 from benchlib import DEFAULT_PORT, RUNS_ROOT, keep_awake, powershell, redact, run_dir, write_json  # noqa: E402
 from serial_watch import SerialWatch  # noqa: E402
-from udp_record import TapRecorder  # noqa: E402
+from udp_record import MIC_FLOOR_WARN, TapRecorder, floor_too_high  # noqa: E402
 import s3  # noqa: E402
 import s3_uart  # noqa: E402
 import tap_check  # noqa: E402
@@ -707,11 +722,11 @@ SCO_CPU = re.compile(r"SCO cpu: frames=(\d+) avg_us=(\d+) max_us=(\d+) load_perm
 SCO_RING = re.compile(r"SCO ring: mic_dropped=(\d+) level_min=(\d+) level_max=(\d+) sn_jumps=(\d+)")
 
 
-def make_tone_wav(path):
+def make_tone_wav(path, seconds=AUDIO_WAV_SECONDS):
     """The sequence the board plays, at the same level; continuous phase, so no clicks between tones."""
     samples = array("h")
     phase = 0.0
-    for i in range(AUDIO_WAV_SECONDS * AUDIO_RATE):
+    for i in range(int(seconds) * AUDIO_RATE):
         tone = AUDIO_TONES[(i // AUDIO_RATE) % len(AUDIO_TONES)]
         phase += 2 * math.pi * tone / AUDIO_RATE
         samples.append(int(AUDIO_LEVEL * math.sin(phase)))
@@ -956,7 +971,7 @@ def tap_losses(trials):
 
 
 def audio_no_data(args, out, error):
-    result = {"stage": "audio", "label": args.label, "power": args.power, "verdict": "NO_DATA", "error": redact(error),
+    result = {"stage": args.stage, "label": args.label, "power": args.power, "verdict": "NO_DATA", "error": redact(error),
               "dir": str(out)}
     write_json(out / "round.json", result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -2590,6 +2605,380 @@ class UartLoad(threading.Thread):
                 "other_status": self.not_on}
 
 
+RECORD_WAV = "record_tones.wav"
+RECORD_SLOTS = ("L", "LR")          # what udp_record --tap writes by default
+RECORD_SECOND_PORTS = (6004, 6005)  # the second consumer, on this PC
+RECORD_TRACK_LEAD_S = 20            # the track outlasts the recording, so the tones cover all of it
+# audio_check leaves out the first and last frame of a run, so runs of 1 s can cover at most 0.73 of a file (measured). This
+# guards against tones in only a part of the recording.
+RECORD_TONE_COVERAGE = 0.65
+RECORD_QUIET_WAIT_S = 900.0         # for a noisy period on the mic line to end before the round
+RECORD_QUIET_POLL_S = 25.0
+RECORD_MAX_DELAY_S = 0.5            # second consumer behind the recorder: a live feed for a translator, not a copy afterwards
+RECORD_EXCERPTS = 10                # of the mic file, evenly spread; liveness looks at excerpts, never at the whole room
+RECORD_MIC_CONTROL_S = 30           # of the mic file, for the tone check that must fail there
+RECORD_STREAMS = ("call", "mic")
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_wav_part(path, start_s, seconds):
+    """The channels of a stretch of a WAV, without loading the whole recording."""
+    with wave.open(str(path), "rb") as w:
+        channels, rate = w.getnchannels(), w.getframerate()
+        w.setpos(min(int(start_s * rate), w.getnframes()))
+        raw = w.readframes(int(seconds * rate))
+    data = array("h")
+    data.frombytes(raw[:len(raw) // 2 * 2])
+    if sys.byteorder == "big":
+        data.byteswap()
+    return [list(data[i::channels]) for i in range(channels)]
+
+
+def mic_floor_of(excerpt):
+    """The quiet level of both slots of a tap_excerpt result."""
+    return [excerpt["slot_" + s].get("level_p10") for s in "LR"]
+
+
+def record_mic_wait(watch, out):
+    """A noisy period on the mic line (#001) is not what a round measures; it is waited out, measured and reported."""
+    state = {"floors": [], "waited_s": 0.0, "ok": False}
+    start = time.monotonic()
+    while True:
+        floors = mic_floor_of(tap_excerpt(watch, out / "wait"))
+        state["floors"].append(floors)
+        state["waited_s"] = round(time.monotonic() - start, 1)
+        if not floor_too_high(floors):
+            state["ok"] = True
+            break
+        if time.monotonic() - start > RECORD_QUIET_WAIT_S:
+            break
+        watch.pump(time.monotonic() + RECORD_QUIET_POLL_S)
+    print(json.dumps({"mic_wait": state}), flush=True)
+    return state
+
+
+def record_gain_step(watch, out):
+    """The mic's level against the codec's PGA, a check of the input that needs no sound in the room. Recordings not kept."""
+    result = {"low_set": board_cmd(watch, "hw %d" % TAP_LOW_GAIN, "hw_gain = %d" % TAP_LOW_GAIN)}
+    watch.pump(time.monotonic() + TAP_GAIN_SETTLE_S)
+    low = tap_excerpt(watch, out / "gain-low")
+    result["high_set"] = board_cmd(watch, "hw %d" % TAP_HW_GAIN, "hw_gain = %d" % TAP_HW_GAIN)
+    watch.pump(time.monotonic() + TAP_GAIN_SETTLE_S)
+    high = tap_excerpt(watch, out / "gain-high")
+    a, b = high["slot_L"].get("level_p50"), low["slot_L"].get("level_p50")
+    result["low_p50"], result["high_p50"] = b, a
+    result["step_db"] = round(20 * math.log10(a / b), 1) if a and b else None
+    return result
+
+
+def record_start_second(out, seconds):
+    """The second consumer in its own process; it answers once its sockets are bound."""
+    tool = Path(__file__).resolve().parent / "udp_record.py"
+    far = subprocess.Popen([sys.executable, str(tool), "--receive", "%d,%d" % RECORD_SECOND_PORTS, "--idle-exit", "3",
+                            "--seconds", str(seconds + 60), "--out", str(out)], stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, text=True)
+    first = far.stdout.readline().strip()
+    return far, first == "listening", first
+
+
+def record_second_consumer(summary, near_dir, far_dir, far_exit):
+    """What the second consumer got against the recorder, per stream. Reads the far process's own files."""
+    try:
+        far = json.loads((far_dir / "tap.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return {"error": "no result from the second consumer: %s" % e, "exit": far_exit}
+    result = {"exit": far_exit}
+    for name in RECORD_STREAMS:
+        near_stream, far_stream = summary[name], far[name]
+        sent = (summary.get("forward") or {}).get(name) or {}
+        near_marks = dict(map(tuple, near_stream["marks"]))
+        delays = [at - near_marks[seq] for seq, at in far_stream["marks"] if seq in near_marks]
+        result[name] = {"forwarded": sent.get("forwarded"), "forward_failed": sent.get("failed"),
+                        "recorder_unique": near_stream["unique"], "second_unique": far_stream["unique"],
+                        "second_duplicates": far_stream["duplicates"], "second_lost_packets": far_stream["lost_packets"],
+                        "same_bytes": sha256_file(near_dir / (name + ".wav")) == sha256_file(far_dir / (name + ".wav")),
+                        "delay_points": len(delays), "delay_max_s": round(max(delays), 4) if delays else None,
+                        "delay_min_s": round(min(delays), 4) if delays else None}
+    return result
+
+
+def record_trial(watch, index, args, out, tag):
+    """Everything with the channel open. The judging is left for record_judge: it takes minutes on this much sound."""
+    trial = {"i": index}
+    resets, slc_drops = len(watch.resets), watch.slc_drops
+    trial_dir = out / ("trial-%02d" % index)
+    near_dir, far_dir = trial_dir / "recorder", trial_dir / "second"
+    tag = "%s-%d" % (tag, index)
+    errors = []
+    opened = channel_open(watch, trial, tag + "-open", args.open_timeout)
+    if opened:
+        watch.pump(time.monotonic() + args.settle)
+        before = sco_packets(watch)
+        far, listening, first_line = record_start_second(far_dir, args.seconds)
+        if not listening:
+            errors.append("second consumer did not start: %s" % first_line)
+        forward = {name: ("127.0.0.1", port) for name, port in zip(RECORD_STREAMS, RECORD_SECOND_PORTS)}
+        started = time.monotonic()
+        rec = TapRecorder(RECORD_SLOTS, forward=forward).start()
+        app_command("play", tag + "-play", "--es", "wav", RECORD_WAV)
+        watch.pump(started + args.seconds)
+        play = (app_status() or {}).get("play") or {}
+        rec.stop()
+        trial["recorder_ran_s"] = round(time.monotonic() - started, 3)
+        summary = rec.save(near_dir)
+        after = sco_packets(watch)
+        try:
+            far_exit = far.wait(timeout=20.0)
+        except subprocess.TimeoutExpired:
+            far.kill()
+            far_exit = "killed"
+        trial["play"] = {k: play.get(k) for k in ("id", "state", "error")}
+        trial["summary"] = {name: dict(tap_stream_stats(summary, name), gaps=summary[name]["gaps"],
+                                       wall_s=summary[name]["wall_s"], seconds=summary[name]["seconds"],
+                                       floor_rms=summary[name]["floor_rms"])
+                            for name in RECORD_STREAMS}
+        trial["pins_ok"] = (summary.get("board_status") or {}).get("pins_ok")
+        trial["second"] = record_second_consumer(summary, near_dir, far_dir, far_exit)
+        trial["sco_before"], trial["sco_after"] = before, after
+        if before and after and after["rx_total"] > before["rx_total"]:
+            total = after["rx_total"] - before["rx_total"]
+            trial["bluetooth_rx_none_pct"] = round(100.0 * (after["rx_none"] - before["rx_none"]) / total, 3)
+            trial["bluetooth_rx_err_pct"] = round(100.0 * (after["rx_err"] - before["rx_err"]) / total, 3)
+        # The far copy has done its work; it is the room as well.
+        for name in RECORD_STREAMS:
+            (far_dir / (name + ".wav")).unlink(missing_ok=True)
+    closed, _ = channel_close(watch, trial, tag + "-close", args.close_timeout)
+    if opened:
+        watch.pump(time.monotonic() + 1.0)
+        trial["mic_gain"] = record_gain_step(watch, trial_dir / "gain")
+    trial["errors"] = errors
+    trial["opened"], trial["closed"] = opened, closed
+    trial["board_resets"] = len(watch.resets) - resets
+    trial["slc_drops"] = watch.slc_drops - slc_drops
+    return trial
+
+
+def record_mic_measures(path):
+    """Liveness by room sound on excerpts of the recorded file; the excerpts are not kept. Not a measure of quality."""
+    with wave.open(str(path), "rb") as w:
+        length = w.getnframes() / w.getframerate()
+    excerpts = []
+    for i in range(RECORD_EXCERPTS):
+        at = (length - TAP_EXCERPT_S) * i / max(RECORD_EXCERPTS - 1, 1)
+        channels = read_wav_part(path, at, TAP_EXCERPT_S)
+        entry = {"at_s": round(at, 1), "channels": len(channels)}
+        for slot, samples in zip("LR", channels):
+            live = tap_check.liveness(samples)
+            entry[slot] = {k: live.get(k) for k in ("pass", "rms", "peak", "modulation_ratio", "flux_ratio", "control_pass")}
+        if len(channels) == 2 and channels[0]:
+            entry["same_samples_pct"] = round(100.0 * sum(a == b for a, b in zip(*channels)) / len(channels[0]), 3)
+        excerpts.append(entry)
+    return {"excerpts": excerpts,
+            "with_changing_sound": sum(1 for e in excerpts if (e.get("L") or {}).get("pass") or (e.get("R") or {}).get("pass")),
+            "rms_min": min((e[s]["rms"] or 0) for e in excerpts for s in "LR" if s in e),
+            "rms_max": max((e[s]["rms"] or 0) for e in excerpts for s in "LR" if s in e),
+            "same_samples_pct_max": max((e.get("same_samples_pct", 100.0) for e in excerpts), default=None)}
+
+
+def record_mic_control(path, args):
+    """The tone check on the first stretch of the mic: it must fail, the tones are not on this line."""
+    result = {}
+    for slot, samples in zip("LR", read_wav_part(path, 0.0, RECORD_MIC_CONTROL_S)):
+        r = audio_check.check(samples, AUDIO_RATE, AUDIO_TONES, args.min_snr, args.max_shift)
+        result[slot] = {"pass": r["pass"], "tones": {k: {a: v.get(a) for a in ("pass", "snr_db", "seconds")}
+                                                     for k, v in r["tones"].items()}}
+    return result
+
+
+def record_stream_checks(stats, ran_s, args):
+    limit = args.max_duration_error / 100.0
+    wall_error = abs(stats["seconds"] - stats["wall_s"]) / stats["wall_s"] if stats["wall_s"] else None
+    ran_error = abs(stats["seconds"] - ran_s) / ran_s
+    gap_frames = sum(g[1] for g in stats["gaps"])
+    measures = {"wav_vs_arrival_pct": round(100.0 * wall_error, 3) if wall_error is not None else None,
+                "wav_vs_recorder_pct": round(100.0 * ran_error, 3),
+                "gap_frames_pct": round(100.0 * gap_frames / stats["frames"], 3) if stats["frames"] else None}
+    checks = {"loss_within_limit": stats["loss_pct"] is not None and stats["loss_pct"] <= args.max_loss,
+              "gaps_within_limit": measures["gap_frames_pct"] is not None and measures["gap_frames_pct"] <= args.max_loss,
+              "no_board_overflow": stats["ovf"] == 0,
+              "one_board_boot": stats["boots"] == 1,
+              "rate_on_pc_clock": tap_line_ok(stats),
+              "duration_vs_arrival": wall_error is not None and wall_error <= limit,
+              "duration_vs_recorder": ran_error <= limit}
+    return measures, checks
+
+
+def record_judge(trial, out, args):
+    """Verdict of one trial from its files; the mic recordings are gone after this."""
+    near_dir = out / ("trial-%02d" % trial["i"]) / "recorder"
+    checks = {"opened": trial["opened"], "closed": trial["closed"], "codec_expected": trial.get("codec") == args.codec,
+              "no_errors": not trial["errors"], "board_resets_zero": trial["board_resets"] == 0,
+              "slc_drops_zero": trial["slc_drops"] == 0}
+    if trial["opened"] and "summary" in trial:
+        trial["streams"] = {}
+        for name in RECORD_STREAMS:
+            measures, stream_checks = record_stream_checks(trial["summary"][name], trial["recorder_ran_s"], args)
+            trial["streams"][name] = measures
+            checks.update({"%s_%s" % (name, k): v for k, v in stream_checks.items()})
+        call = trial["summary"]["call"]
+        trial["call_tones"] = judge_wav(near_dir / "call.wav", args, "strict", [tuple(g) for g in call["gaps"]])
+        tones = trial["call_tones"].get("tones") or {}
+        covered = sum(t.get("seconds") or 0 for t in tones.values())
+        trial["call_tones_cover_s"] = round(covered, 1)
+        checks["call_tones_found"] = bool(trial["call_tones"]["pass"])
+        checks["call_tones_no_shift"] = bool(tones) and all(t.get("shift_pct") is not None and abs(t["shift_pct"]) <= args.max_shift
+                                                            for t in tones.values())
+        checks["call_tones_cover_the_file"] = covered >= RECORD_TONE_COVERAGE * call["seconds"]
+        mic_path = near_dir / "mic.wav"
+        trial["mic_control"] = record_mic_control(mic_path, args)
+        trial["mic_live"] = record_mic_measures(mic_path)
+        checks["mic_two_slots"] = trial["summary"]["mic"]["channels"] == 2
+        checks["mic_tones_absent"] = not any(v["pass"] for v in trial["mic_control"].values())
+        checks["mic_line_not_stuck"] = trial["mic_live"]["rms_min"] > 0 and trial["mic_live"]["same_samples_pct_max"] < 50.0
+        checks["mic_floor_normal"] = not floor_too_high(trial["summary"]["mic"]["floor_rms"])
+        gain = trial.get("mic_gain") or {}
+        checks["mic_level_follows_gain"] = bool(gain.get("low_set") and gain.get("high_set") and gain.get("step_db")
+                                                and gain["step_db"] >= TAP_GAIN_MIN_DB)
+        checks["pins_inputs"] = trial["pins_ok"] == 1
+        second = trial["second"]
+        checks["second_ran"] = second.get("exit") == 0
+        for name in RECORD_STREAMS:
+            got = second.get(name) or {}
+            checks["second_%s_got_every_packet" % name] = (got.get("forwarded") == got.get("recorder_unique") == got.get("second_unique")
+                                                           and bool(got.get("second_unique")) and got.get("forward_failed") == 0)
+            checks["second_%s_same_bytes" % name] = bool(got.get("same_bytes"))
+            checks["second_%s_live" % name] = bool(got.get("delay_points")) and got.get("delay_max_s") <= RECORD_MAX_DELAY_S
+    else:
+        checks["recorded"] = False
+    (near_dir / "mic.wav").unlink(missing_ok=True)
+    trial["checks"] = checks
+    trial["pass"] = all(checks.values())
+    return trial
+
+
+def stage_record(args):
+    keep_awake()
+    out = run_dir("record", args.label)
+    start = datetime.now()
+    t0 = time.monotonic()
+    if SCO_APP not in adb("shell", "pm", "path", SCO_APP):
+        return audio_no_data(args, out, "probe app is not installed, run android/build_apk.py --install")
+    try:
+        before = phone.status()
+        bonds_before = phone.bond_list()
+    except phone.PhoneError as e:
+        return audio_no_data(args, out, str(e))
+    if before["keyguard"]:
+        return audio_no_data(args, out, "phone keyguard is showing")
+    telecom_before = telecom_state()
+    if telecom_before is None or telecom_before["calls_now"] or telecom_before["telephony_busy"]:
+        return audio_no_data(args, out, "a call is in progress or telecom is unreadable: %s" % telecom_before)
+    watch = SerialWatch(args.port, out, False, echo=args.echo)
+    watch.pump(time.monotonic() + 15, until=lambda: watch.sp is not None)
+    if watch.sp is None:
+        watch.finish(0)
+        return audio_no_data(args, out, "port not opened")
+    app_ready()
+    setup = {}
+    trials = []
+    wifi = phone_wifi()
+    mic_wait = None
+    try:
+        mic_wait = record_mic_wait(watch, out / "wait")
+        # Volume first: nothing of the phone's tones may reach the room.
+        setup = {"vol_0": board_cmd(watch, "vol 0", "volume = 0"), "mic_quiet_at_start": mic_wait["ok"]}
+        print(json.dumps({"setup": setup}), flush=True)
+        if all(setup.values()):
+            wav = out / RECORD_WAV
+            make_tone_wav(wav, args.seconds + RECORD_TRACK_LEAD_S)
+            tag = datetime.now().strftime("%H%M%S")
+            app_command("status", tag + "-start")
+            wait_app(watch, tag + "-start", lambda s: True, 10.0)
+            adb("push", str(wav), SCO_DIR + "/" + RECORD_WAV, timeout=120.0)
+            wav.unlink(missing_ok=True)
+            for i in range(1, args.n + 1):
+                trials.append(record_trial(watch, i, args, out, tag))
+                print(json.dumps({"trial": i, "summary": {k: {a: v.get(a) for a in ("seconds", "wall_s", "loss_pct", "rate_hz")}
+                                                          for k, v in trials[-1].get("summary", {}).items()},
+                                  "codec": trials[-1].get("codec")}), flush=True)
+                watch.pump(time.monotonic() + 2.0)
+    finally:
+        # A reset brings back the volume of a normal boot.
+        ups = watch.slc_ups
+        resets_before = len(watch.resets)
+        adb("shell", "am", "force-stop", SCO_APP)
+        adb("shell", "rm", "-f", SCO_DIR + "/" + RECORD_WAV)
+        watch.pulse_reset()
+        slc_after_reset = wait_slc(watch, ups, args.slc_timeout)
+        tone_end = board_tone(watch)
+    watch.close_port()
+    summary = watch.finish(args.n)
+    end = datetime.now()
+    telecom_after = telecom_state()
+    try:
+        phone.go_home()
+        after = phone.status()
+        bonds_after = phone.bond_list()
+    except phone.PhoneError:
+        after, bonds_after = None, None
+    removals = usb_removals(start, end)
+    standby = pc_standby_entries(start, end)
+    # Judged only now: the serial log must not wait for minutes of analysis, and the verdict needs the whole round.
+    try:
+        for trial in trials:
+            record_judge(trial, out, args)
+            print(json.dumps({"trial": trial["i"], "pass": trial["pass"],
+                              "failed": [k for k, v in trial["checks"].items() if not v]}), flush=True)
+    finally:
+        for wav_path in out.glob("trial-*/*/mic.wav"):
+            wav_path.unlink(missing_ok=True)
+    passed = sum(1 for t in trials if t["pass"])
+    checks = {
+        "setup": bool(setup) and all(setup.values()),
+        "trials_all_pass": passed == args.n and len(trials) == args.n,
+        "tone_off_at_end": tone_end == 0,
+        "slc_back_after_final_reset": slc_after_reset is not None,
+        "no_call_during_round": bool(telecom_after) and telecom_after["calls_now"] == 0
+                                and telecom_after["telephony_busy"] == 0
+                                and telecom_after["historical_lines"] == telecom_before["historical_lines"],
+        "other_bonds_unchanged": bonds_after is not None and phone.others(bonds_before) == phone.others(bonds_after),
+        "phone_hfp_connected_at_end": bool(after and after["hfp_connected"]),
+        "lyrat_resets_only_final": summary["board_resets"] == resets_before + 1 and resets_before == 0,
+        "panics_zero": summary["panics"] == 0,
+        "slc_drops_zero": summary["slc_drops"] == 0,
+        "port_drops_zero": summary["port_drops"] == 0,
+        "usb_removals_zero": removals == 0,
+    }
+    verdict = "INVALID_WINDOW" if standby != 0 else ("PASS" if all(checks.values()) else "FAIL")
+    result = {"stage": "record", "mic_wait": mic_wait, "mic_floor_limit": MIC_FLOOR_WARN, "label": args.label, "power": args.power, "verdict": verdict, "checks": checks,
+              "start": start.isoformat(timespec="seconds"), "end": end.isoformat(timespec="seconds"),
+              "seconds": round(time.monotonic() - t0, 1), "dir": str(out),
+              "planned": {"trials": args.n, "seconds": args.seconds, "max_loss_pct": args.max_loss,
+                          "max_duration_error_pct": args.max_duration_error, "min_snr_db": args.min_snr,
+                          "max_shift_pct": args.max_shift, "tones": AUDIO_TONES, "codec": args.codec,
+                          "slots": RECORD_SLOTS, "second_max_delay_s": RECORD_MAX_DELAY_S},
+              "not_checked": "Tones, SNR and frequency on mic.wav: no digital source reaches ASDOUT and no sound is played (R15). "
+                             "Liveness by room sound is not a measure of quality; the voice is for the owner to check.",
+              "trials_passed": passed, "setup": setup, "phone_wifi": wifi, "tone_end": tone_end,
+              "slc_after_final_reset_s": slc_after_reset, "telecom_before": telecom_before, "telecom_after": telecom_after,
+              "phone_before": before, "phone_after": after, "pc_standby_entries": standby, "usb_removals": removals,
+              "trials": trials, "serial": summary}
+    write_json(out / "round.json", result)
+    with (RUNS_ROOT / "rounds.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(redact(json.dumps({k: result[k] for k in ("stage", "label", "power", "verdict", "start", "seconds",
+                                                           "trials_passed", "usb_removals", "dir")}, ensure_ascii=False)) + "\n")
+    print(json.dumps({k: v for k, v in result.items() if k not in ("trials", "phone_before", "phone_after", "serial")},
+                     ensure_ascii=False, indent=2))
+    return {"PASS": 0, "FAIL": 1}.get(verdict, 2)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="stage", required=True)
@@ -2714,12 +3103,29 @@ def main():
     p.add_argument("--label", default="")
     p.add_argument("--port", default=DEFAULT_PORT)
     p.add_argument("--echo", action="store_true", help="print events live")
+    p = sub.add_parser("record", help="the recording of both sides through the S3-ETH board, with a second consumer of the stream")
+    p.add_argument("--power", required=True, help="what feeds the board, e.g. adapter or battery (R11)")
+    p.add_argument("--n", type=int, default=1, help="number of trials")
+    p.add_argument("--seconds", type=int, default=300, help="length of one recording")
+    p.add_argument("--codec", default="mSBC", choices=["mSBC", "CVSD"], help="the codec each trial must have")
+    p.add_argument("--max-loss", type=float, default=2.0, help="percent, S3 to PC by sequence and by frames")
+    p.add_argument("--max-duration-error", type=float, default=1.0, help="percent, WAV against the PC clock")
+    p.add_argument("--min-snr", type=float, default=20.0)
+    p.add_argument("--max-shift", type=float, default=1.0, help="percent")
+    p.add_argument("--max-impaired", type=float, default=30.0, help="reported only: the rule here is strict")
+    p.add_argument("--settle", type=float, default=1.0)
+    p.add_argument("--open-timeout", type=float, default=15.0)
+    p.add_argument("--close-timeout", type=float, default=10.0)
+    p.add_argument("--slc-timeout", type=float, default=30.0)
+    p.add_argument("--label", default="")
+    p.add_argument("--port", default=DEFAULT_PORT)
+    p.add_argument("--echo", action="store_true", help="print events live")
     args = ap.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     return {"link": stage_link, "sco": stage_sco, "power": stage_power, "audio": stage_audio, "tap": stage_tap,
-            "btloss": stage_btloss, "plc": stage_plc, "uart": stage_uart}[args.stage](args)
+            "btloss": stage_btloss, "plc": stage_plc, "uart": stage_uart, "record": stage_record}[args.stage](args)
 
 
 if __name__ == "__main__":
