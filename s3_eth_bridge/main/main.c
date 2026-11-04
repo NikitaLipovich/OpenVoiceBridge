@@ -1,13 +1,24 @@
-// ESP32-S3-ETH, stage 2: passive listener on the I2S bus of the LyraT, both lines sent to the PC by UDP.
+// ESP32-S3-ETH, stage 3: passive listener on the I2S bus of the LyraT, both lines sent to the PC by UDP, and the
+// commands of the PC relayed to the LyraT over a framed UART (docs/S3_UART.md).
 //
 // Every pin wired to the LyraT is an input here, so this firmware cannot drive the codec bus, and
-// pins_check() re-reads the hardware registers to prove it. The UART pins stay plain inputs until the
-// UART stage. Status goes to the USB console.
+// pins_check() re-reads the hardware registers to prove it. The one exception is GPIO1, the UART TX: it drives the line
+// only while the LyraT is proven alive by a valid frame, and goes back to an input when the frames stop. Status goes to
+// the USB console.
 //
 // No address or password is built in. The PC sends "TAP1 <call> <mic>" to UDP port 5006, by broadcast until
 // it knows this board, and repeats it. The streams then go to the sender's address, ports 5004 (call) and
 // 5005 (mic), until no request came for LEASE_MS or "TAP0" arrives. <call> and <mic> pick the slots: L, R or
 // LR. Each request is answered on its source port with one line of JSON counters.
+//
+// Control channel on the same port, answered on the source port of the request:
+//   UC <seq> <command>   relay one console command; the answer is "UR <seq> <status>\n<text>", the frame's own status
+//                        or 3 when the TX is off. The PC repeats on a timeout with the same seq, the LyraT then answers
+//                        from its copy without running the command again.
+//   UQ                   JSON counters of the UART, without starting the streams
+//   UT 0|1|A             TX off, on, or following the LyraT (default)
+//   UB <baud>            baud rate of this end
+//   UW <hex>             raw bytes onto the line, for tests of the LyraT's parser; refused when the TX is off
 //
 // Stream packet, little endian, PCM 16 bit after the header:
 //   0  'S' '3'   2  version   3  stream (0 call, 1 mic)   4  u32 seq (per stream, since boot)
@@ -30,6 +41,8 @@
 #include "driver/gpio.h"
 #include "driver/i2s_std.h"
 #include "driver/spi_master.h"
+#include "driver/uart.h"
+#include "ctl_frame.h"
 #include "esp_random.h"
 #include "esp_check.h"
 #include "esp_eth.h"
@@ -38,6 +51,7 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
 #include "soc/gpio_periph.h"
@@ -50,8 +64,8 @@ static const char *TAG = "s3eth";
 #define PIN_I2S_WS      GPIO_NUM_16
 #define PIN_I2S_DSDIN   GPIO_NUM_17
 #define PIN_I2S_ASDOUT  GPIO_NUM_18
-#define PIN_UART_TX     GPIO_NUM_1     // reserved, input until the UART stage
-#define PIN_UART_RX     GPIO_NUM_2     // reserved, input until the UART stage
+#define PIN_UART_TX     GPIO_NUM_1     // an input unless the UART task made it an output
+#define PIN_UART_RX     GPIO_NUM_2     // always an input
 
 #define PIN_ETH_MISO    GPIO_NUM_12
 #define PIN_ETH_MOSI    GPIO_NUM_11
@@ -91,6 +105,18 @@ typedef struct {
     volatile int peak_r;
 } listener_t;
 
+#define CTL_UART        UART_NUM_1
+#define CTL_RX_RING     4096
+#define CTL_TX_RING     2048
+#define CTL_TX_RELEASE_MS 5000         // no valid frame for this long: the LyraT may be off, stop driving its pin
+#define CTL_ST_NO_TX    3
+#define TX_MODE_OFF     0
+#define TX_MODE_ON      1
+#define TX_MODE_AUTO    2
+#ifndef CTL_TX_MODE_BOOT
+#define CTL_TX_MODE_BOOT TX_MODE_AUTO
+#endif
+
 static listener_t s_call = {.name = "dsdin", .stream = 0, .port = PORT_CALL, .slots = SLOT_LR};
 static listener_t s_mic = {.name = "asdout", .stream = 1, .port = PORT_MIC, .slots = SLOT_LR};
 
@@ -102,6 +128,21 @@ static volatile bool s_pins_ok;
 static volatile bool s_link_up;
 static volatile bool s_eth_ok;
 static char s_ip[16] = "-";
+
+static SemaphoreHandle_t s_tx_lock;    // the state of the TX pin and pins_check() must see each other whole
+static volatile int s_tx_mode = CTL_TX_MODE_BOOT;
+static volatile bool s_tx_on;
+static volatile int s_ctl_baud = CTL_BAUD_DEFAULT;
+static ctl_parser_t s_ctl_parser;
+static int s_req_sock = -1;
+static SemaphoreHandle_t s_peer_lock;
+static struct sockaddr_in s_ctl_peer;  // who sent the last command
+static volatile bool s_have_peer;
+static volatile int64_t s_last_frame_us;
+static volatile uint32_t s_ctl_rx_bytes, s_ctl_replies, s_ctl_hb, s_ctl_cmds_sent, s_ctl_refused,
+    s_ctl_tx_edges;
+static ctl_hb_t s_last_hb;
+static volatile bool s_have_hb;
 
 static void pins_to_safe_inputs(void)
 {
@@ -122,7 +163,10 @@ static void pins_to_safe_inputs(void)
 static bool pins_check(void)
 {
     static const uint8_t pins[] = {PIN_I2S_BCK, PIN_I2S_WS, PIN_I2S_DSDIN, PIN_I2S_ASDOUT, PIN_UART_TX, PIN_UART_RX};
+    xSemaphoreTake(s_tx_lock, portMAX_DELAY);
     uint32_t enabled = REG_READ(GPIO_ENABLE_REG);
+    if (s_tx_on) enabled &= ~(1UL << PIN_UART_TX);
+    xSemaphoreGive(s_tx_lock);
     bool ok = true;
     for (size_t i = 0; i < sizeof(pins); i++) {
         uint32_t mux = REG_READ(GPIO_PIN_MUX_REG[pins[i]]);
@@ -230,6 +274,166 @@ static void listener_task(void *arg)
     }
 }
 
+static void ctl_tx_set(bool on)
+{
+    if (on == s_tx_on) return;
+    xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+    if (on) {
+        uart_flush(CTL_UART);
+        uart_set_pin(CTL_UART, PIN_UART_TX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+        s_tx_on = true;
+    } else {
+        uart_wait_tx_done(CTL_UART, pdMS_TO_TICKS(50));
+        gpio_set_direction(PIN_UART_TX, GPIO_MODE_INPUT);
+        s_tx_on = false;
+    }
+    s_ctl_tx_edges++;
+    xSemaphoreGive(s_tx_lock);
+    ESP_LOGI(TAG, "uart tx %s", on ? "on" : "off");
+}
+
+static void ctl_reply_to_pc(const ctl_parser_t *p)
+{
+    static char reply[32 + CTL_MAX_PAYLOAD];
+    size_t len = ctl_frame_len(p);
+    if (len == 0 || s_req_sock < 0 || !s_have_peer) return;
+    const uint8_t *payload = ctl_frame_payload(p);
+    int head = snprintf(reply, sizeof(reply), "UR %u %u\n", ctl_frame_seq(p), payload[0]);
+    memcpy(reply + head, payload + 1, len - 1);
+    xSemaphoreTake(s_peer_lock, portMAX_DELAY);
+    struct sockaddr_in to = s_ctl_peer;
+    xSemaphoreGive(s_peer_lock);
+    sendto(s_req_sock, reply, head + len - 1, MSG_DONTWAIT, (struct sockaddr *)&to, sizeof(to));
+    s_ctl_replies++;
+}
+
+static void ctl_on_frame(const ctl_parser_t *p)
+{
+    s_last_frame_us = esp_timer_get_time();
+    uint8_t type = ctl_frame_type(p);
+    if (type == CTL_T_REPLY) {
+        ctl_reply_to_pc(p);
+    } else if (type == CTL_T_HB) {
+        s_ctl_hb++;
+        if (ctl_frame_len(p) == sizeof(ctl_hb_t)) {
+            memcpy(&s_last_hb, ctl_frame_payload(p), sizeof(s_last_hb));
+            s_have_hb = true;
+        }
+        if (s_tx_on) {
+            uint8_t frame[CTL_HEADER_BYTES + CTL_CRC_BYTES];
+            uart_write_bytes(CTL_UART, frame, ctl_frame_build(frame, CTL_T_HB_ACK, ctl_frame_seq(p), NULL, 0));
+        }
+    }
+}
+
+// Whatever comes in, the worst this task does is count it. The LyraT prints garbage on this line at its start.
+static void ctl_uart_task(void *arg)
+{
+    static uint8_t chunk[256];
+    for (;;) {
+        int got = uart_read_bytes(CTL_UART, chunk, sizeof(chunk), 1);
+        if (got > 0) {
+            s_ctl_rx_bytes += (uint32_t)got;
+            uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+            for (int i = 0; i < got; i++) {
+                if (ctl_parser_feed(&s_ctl_parser, chunk[i], now)) ctl_on_frame(&s_ctl_parser);
+            }
+        }
+        int mode = s_tx_mode;
+        bool alive = s_last_frame_us && esp_timer_get_time() - s_last_frame_us < CTL_TX_RELEASE_MS * 1000LL;
+        ctl_tx_set(mode == TX_MODE_ON || (mode == TX_MODE_AUTO && alive));
+    }
+}
+
+static esp_err_t ctl_uart_init(void)
+{
+    uart_config_t cfg = {
+        .baud_rate = CTL_BAUD_DEFAULT,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    ESP_RETURN_ON_ERROR(uart_driver_install(CTL_UART, CTL_RX_RING, CTL_TX_RING, 0, NULL, 0), TAG, "uart driver");
+    ESP_RETURN_ON_ERROR(uart_param_config(CTL_UART, &cfg), TAG, "uart config");
+    // RX only for now. An unset TX stays away from the pin.
+    ESP_RETURN_ON_ERROR(uart_set_pin(CTL_UART, UART_PIN_NO_CHANGE, PIN_UART_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE),
+                        TAG, "uart pins");
+    return ESP_OK;
+}
+
+static int hex_value(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// Handles the control words of the request port; false when the text is not one of them.
+static bool ctl_request(char *text, int n, const struct sockaddr_in *from, socklen_t from_len, int sock)
+{
+    static char reply[420];
+    static uint8_t frame[CTL_MAX_FRAME];
+    int len = -1;
+    if (strncmp(text, "UC ", 3) == 0) {
+        char *end = NULL;
+        unsigned long seq = strtoul(text + 3, &end, 10);
+        if (end == text + 3 || *end != ' ' || seq > 0xFFFF) {
+            len = snprintf(reply, sizeof(reply), "UR 0 %d\nbad request", CTL_ST_BAD);
+        } else if (!s_tx_on) {
+            s_ctl_refused++;
+            len = snprintf(reply, sizeof(reply), "UR %lu %d\nno_tx", seq, CTL_ST_NO_TX);
+        } else {
+            size_t size = strlen(end + 1);
+            if (size > CTL_MAX_PAYLOAD) size = CTL_MAX_PAYLOAD;
+            xSemaphoreTake(s_peer_lock, portMAX_DELAY);
+            s_ctl_peer = *from;
+            xSemaphoreGive(s_peer_lock);
+            s_have_peer = true;
+            uart_write_bytes(CTL_UART, frame, ctl_frame_build(frame, CTL_T_CMD, (uint16_t)seq, end + 1, size));
+            s_ctl_cmds_sent++;
+            return true;        // the answer comes with the LyraT's reply
+        }
+    } else if (strncmp(text, "UW ", 3) == 0) {
+        int bytes = 0;
+        for (const char *h = text + 3; h + 1 < text + n && bytes < (int)sizeof(frame); h += 2) {
+            int a = hex_value(h[0]), b = hex_value(h[1]);
+            if (a < 0 || b < 0) break;
+            frame[bytes++] = (uint8_t)(a * 16 + b);
+        }
+        if (s_tx_on) uart_write_bytes(CTL_UART, frame, bytes);
+        else bytes = -1;
+        len = snprintf(reply, sizeof(reply), "UW %d", bytes);
+    } else if (strncmp(text, "UT ", 3) == 0) {
+        if (text[3] == '0') s_tx_mode = TX_MODE_OFF;
+        else if (text[3] == '1') s_tx_mode = TX_MODE_ON;
+        else if (text[3] == 'A') s_tx_mode = TX_MODE_AUTO;
+        len = snprintf(reply, sizeof(reply), "UT %d", s_tx_mode);
+    } else if (strncmp(text, "UB ", 3) == 0) {
+        int baud = atoi(text + 3);
+        if (baud >= 1200 && baud <= 921600 && uart_set_baudrate(CTL_UART, (uint32_t)baud) == ESP_OK) s_ctl_baud = baud;
+        len = snprintf(reply, sizeof(reply), "UB %d", s_ctl_baud);
+    } else if (strcmp(text, "UQ") == 0) {
+        int64_t now = esp_timer_get_time();
+        len = snprintf(reply, sizeof(reply),
+            "{\"fw\":\"s3tap\",\"boot\":%u,\"up_ms\":%lld,\"pins_ok\":%d,\"tx_mode\":%d,\"tx_on\":%d,\"tx_edges\":%" PRIu32
+            ",\"baud\":%d,\"rx_level\":%d,\"tx_level\":%d,\"rx_bytes\":%" PRIu32 ",\"frames\":%" PRIu32 ",\"bad_hdr\":%" PRIu32
+            ",\"bad_crc\":%" PRIu32 ",\"trunc\":%" PRIu32 ",\"noise\":%" PRIu32 ",\"replies\":%" PRIu32 ",\"sent\":%" PRIu32
+            ",\"refused\":%" PRIu32 ",\"hb\":%" PRIu32 ",\"last_frame_ms\":%lld,\"lyrat_up_s\":%" PRId64 ",\"lyrat_flags\":%d}",
+            s_boot_id, now / 1000, s_pins_ok, s_tx_mode, s_tx_on, s_ctl_tx_edges, s_ctl_baud, gpio_get_level(PIN_UART_RX),
+            gpio_get_level(PIN_UART_TX), s_ctl_rx_bytes, s_ctl_parser.frames, s_ctl_parser.bad_header, s_ctl_parser.bad_crc,
+            s_ctl_parser.truncated, s_ctl_parser.noise, s_ctl_replies, s_ctl_cmds_sent, s_ctl_refused, s_ctl_hb,
+            s_last_frame_us ? (now - s_last_frame_us) / 1000 : -1LL, s_have_hb ? (int64_t)s_last_hb.up_s : -1LL,
+            s_have_hb ? s_last_hb.flags : -1);
+    } else {
+        return false;
+    }
+    if (len > 0) sendto(sock, reply, len, MSG_DONTWAIT, (const struct sockaddr *)from, from_len);
+    return true;
+}
+
 static bool parse_slots(const char *text, slot_sel_t *out)
 {
     if (strcmp(text, "L") == 0) *out = SLOT_L;
@@ -246,7 +450,8 @@ static void request_task(void *arg)
     struct sockaddr_in me = {.sin_family = AF_INET, .sin_port = htons(PORT_REQUEST), .sin_addr.s_addr = htonl(INADDR_ANY)};
     int bound = bind(sock, (struct sockaddr *)&me, sizeof(me));
     configASSERT(bound == 0);
-    char text[64];
+    s_req_sock = sock;
+    static char text[1472];
     char reply[420];
     for (;;) {
         struct sockaddr_in from;
@@ -254,6 +459,7 @@ static void request_task(void *arg)
         int n = recvfrom(sock, text, sizeof(text) - 1, 0, (struct sockaddr *)&from, &from_len);
         if (n <= 0) continue;
         text[n] = 0;
+        if (ctl_request(text, n, &from, from_len, sock)) continue;
         char word[8] = {0}, call[4] = {0}, mic[4] = {0};
         int fields = sscanf(text, "%7s %3s %3s", word, call, mic);
         bool ok = false;
@@ -365,6 +571,9 @@ static void report(listener_t *l, uint32_t dt_ms)
 
 void app_main(void)
 {
+    s_tx_lock = xSemaphoreCreateMutex();
+    s_peer_lock = xSemaphoreCreateMutex();
+    configASSERT(s_tx_lock && s_peer_lock);
     pins_to_safe_inputs();
     s_boot_id = (uint16_t)esp_random();
 
@@ -377,11 +586,14 @@ void app_main(void)
     s_eth_ok = (e == ESP_OK);
     if (!s_eth_ok) ESP_LOGE(TAG, "ethernet init failed: %s", esp_err_to_name(e));
 
+    esp_err_t u = ctl_uart_init();
+    if (u != ESP_OK) ESP_LOGE(TAG, "uart init failed: %s", esp_err_to_name(u));
     s_pins_ok = pins_check();
     if (s_eth_ok) xTaskCreatePinnedToCore(request_task, "tap_req", 4096, NULL, 5, NULL, 0);
+    if (u == ESP_OK) xTaskCreatePinnedToCore(ctl_uart_task, "ctl_uart", 4096, NULL, 5, NULL, 0);
 
-    printf("s3eth stage2 i2s0=%s i2s1=%s eth=%s pins_ok=%d\n", esp_err_to_name(a), esp_err_to_name(b), esp_err_to_name(e),
-           s_pins_ok);
+    printf("s3eth stage3 i2s0=%s i2s1=%s eth=%s uart=%s pins_ok=%d\n", esp_err_to_name(a), esp_err_to_name(b),
+           esp_err_to_name(e), esp_err_to_name(u), s_pins_ok);
 
     int64_t last = esp_timer_get_time();
     for (;;) {
@@ -396,8 +608,10 @@ void app_main(void)
         s_pins_ok = pins_check();
         bool streaming = s_dest_ip && now < s_lease_until_us;
         printf(" timeouts=%" PRIu32 "/%" PRIu32 " ovf=%" PRIu32 "/%" PRIu32 " send_fail=%" PRIu32 "/%" PRIu32
-               " sent=%" PRIu32 "/%" PRIu32 " streaming=%d pins_ok=%d\n",
+               " sent=%" PRIu32 "/%" PRIu32 " streaming=%d pins_ok=%d uart tx=%d rx=%" PRIu32 " frames=%" PRIu32
+               " bad=%" PRIu32 "/%" PRIu32 "\n",
                s_call.timeouts, s_mic.timeouts, s_call.overflows, s_mic.overflows, s_call.send_fail, s_mic.send_fail,
-               s_call.sent, s_mic.sent, streaming, s_pins_ok);
+               s_call.sent, s_mic.sent, streaming, s_pins_ok, s_tx_on, s_ctl_rx_bytes, s_ctl_parser.frames,
+               s_ctl_parser.bad_header, s_ctl_parser.bad_crc);
     }
 }

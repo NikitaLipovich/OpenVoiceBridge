@@ -8,6 +8,7 @@
   round.py tap   --power SOURCE [--n 3] [--long 300] [--s3-resets 3] [--label NAME]
   round.py btloss --power SOURCE [--seconds 1800] [--ab 3] [--phone-wifi asis|on|off] [--label NAME]
   round.py plc   --power SOURCE --codec mSBC|CVSD [--n 3] [--period 30] [--keep-wav] [--label NAME]
+  round.py uart  --power SOURCE [--commands 1000] [--lyrat-resets 3] [--s3-resets 3] [--line-low 8] [--label NAME]
 
 power: watches the board, the phone ACL history and Windows USB removal events.
 Writes <runs>/power/<stamp>-<label>/round.json and appends one line to <runs>/rounds.jsonl.
@@ -68,10 +69,19 @@ frames with a marked loss on a plan and measures the concealment against the tru
 the plan with and without concealment. PASS only if the counters agree with the plan, the run without concealment is worse
 against the reference, replaced frames are digital silence on the bus only without concealment, true silence stays
 silent, a long loss fades out in the time the firmware promises, and the concealment beats a plain repeat of the last block.
+
+uart checks the control channel PC, S3, UART, LyraT (s3_uart.py, docs/S3_UART.md). Commands of all kinds, each reply checked
+against the state the earlier ones must have caused, and the LyraT's console, which is not part of the channel, confirms the
+state and that each command ran once. Then the worst the line can carry, sent raw by the S3: bad CRC, bad header, a length
+too big, frames that stop, noise, a repeat. A good frame by the same route is the control that must act. Then the LyraT
+restarts, whose boot garbage reaches the S3's RX, and with SCO open the S3 restarts and its TX goes off so that the line is
+held low; the sound up to the phone is judged by the strict rule during those, and the LyraT must see no reset, no SLC or SCO
+drop. audio --uart-load HZ runs the audio stage with commands going through the channel at the same time.
 """
 import argparse
 import json
 import math
+import random
 import re
 import subprocess
 import sys
@@ -89,6 +99,7 @@ from benchlib import DEFAULT_PORT, RUNS_ROOT, keep_awake, powershell, redact, ru
 from serial_watch import SerialWatch  # noqa: E402
 from udp_record import TapRecorder  # noqa: E402
 import s3  # noqa: E402
+import s3_uart  # noqa: E402
 import tap_check  # noqa: E402
 import tone_blocks  # noqa: E402
 import voice_check  # noqa: E402
@@ -1003,6 +1014,11 @@ def stage_audio(args):
     wait_app(watch, tag + "-start", lambda s: True, 10.0)
     adb("push", str(wav), SCO_DIR + "/" + AUDIO_WAV, timeout=30.0)
 
+    # The S3 needs a moment after the reset above to see the LyraT again and let its TX go.
+    uart_load = UartLoad(args.uart_load) if args.uart_load else None
+    if uart_load:
+        watch.pump(time.monotonic() + 3.0)
+        uart_load.start()
     trials = []
     for i in range(1, args.n + 1):
         trial = audio_trial(watch, i, args, out, tag)
@@ -1016,6 +1032,7 @@ def stage_audio(args):
         if i < args.n:
             watch.pump(time.monotonic() + args.gap)
 
+    load_result = uart_load.result() if uart_load else None
     board_cmd(watch, "vol 100", "volume = 100")     # what the firmware sets at boot
     tone_end = board_tone(watch)
     adb("shell", "am", "force-stop", SCO_APP)
@@ -1053,6 +1070,8 @@ def stage_audio(args):
         "port_drops_zero": summary["port_drops"] == 0,
         "usb_removals_zero": removals == 0,
     }
+    if load_result:
+        checks["uart_load_all_answered"] = load_result["sent"] > 0 and load_result["failed_after_retry"] == 0
     verdict = "INVALID_WINDOW" if standby != 0 else ("PASS" if all(checks.values()) else "FAIL")
     result = {
         "stage": "audio", "label": args.label, "power": args.power, "verdict": verdict, "checks": checks,
@@ -1061,7 +1080,7 @@ def stage_audio(args):
         "planned": {"trials": args.n, "codec": args.codec, "min_snr_db": args.min_snr, "max_shift_pct": args.max_shift,
                     "tones": AUDIO_TONES, "criterion_up": args.criterion_up, "criterion_down": args.criterion_down,
                     "max_impaired_pct": args.max_impaired, "source": args.source},
-        "trials_passed": passed, "boot": boot, "tone_end": tone_end, "tap_losses": tap_losses(trials),
+        "uart_load": load_result, "trials_passed": passed, "boot": boot, "tone_end": tone_end, "tap_losses": tap_losses(trials),
         "rx_none_pct_by_trial": [(t.get("sco_packets") or {}).get("rx_total") and round(
             100.0 * t["sco_packets"]["rx_none"] / t["sco_packets"]["rx_total"], 3) for t in trials],
         "worst": {"down": audio_worst(trials, "down", "down"), "up": audio_worst(trials, "up", "up"),
@@ -2086,6 +2105,491 @@ def stage_plc(args):
     return {"PASS": 0, "FAIL": 1}.get(verdict, 2)
 
 
+UART_RECORD_S = 12
+UART_RESET_AT_S = 3.0           # into the recording, so the sound is measured before, during and after
+UART_BACK_S = 40.0
+UART_STAT_TAIL = ("bad_hdr", "bad_crc", "trunc", "noise")
+UART_BURST_BYTES = 256
+
+
+def uart_delta(before, after, keys=s3_uart.USTAT_KEYS):
+    return {k: after[k] - before[k] for k in keys if k not in ("baud", "rx_level")} if before and after else None
+
+
+def uart_wait_command(channel, text, timeout):
+    """Seconds until the command is answered; a board in its restart answers nothing or says its TX is off."""
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        got = channel.command(text, timeout=0.3, retries=1)
+        if got["status"] == s3_uart.ST_OK:
+            return round(time.monotonic() - t0, 2), got
+        if channel.board is None or got["status"] is None:
+            channel.find(2.0)
+        time.sleep(0.2)
+    return None, None
+
+
+def uart_check_status(text, want):
+    return ("tone=%d" % want["tone"] in text and "plc=%d" % want["plc"] in text and "hpf     = %d" % want["hpf"] in text
+            and "SLC     = up" in text and "peers=" in text and not re.search(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", text))
+
+
+def uart_percentile(values, fraction):
+    return sorted(values)[min(len(values) - 1, int(len(values) * fraction))] if values else None
+
+
+def uart_commands(watch, channel, n):
+    """n commands of all kinds, each reply checked against the state the earlier replies must have caused."""
+    first = channel.command("status")
+    hpf = re.search(r"hpf     = (\d)", first["text"] or "")
+    if not hpf:
+        return {"error": "no status at the start", "first": first}
+    want = {"tone": 0, "plc": 1, "hpf": int(hpf.group(1))}
+    start_hpf = want["hpf"]
+    cycle = ("status", "tone 1", "status", "tone 0", "plc 0", "status", "plc 1", "hpf", "status", "nosuch", "ustat",
+             "tone 2", "status", "tone 0", "pkt")
+    usable = n - (n % 2)    # hpf returns to where it was only after an even number of cycles at most; repaired below
+    witness_before = s3_uart.console_ustat(watch)
+    s3_before = channel.query()
+    retries_before, attempts_before = channel.retries, channel.attempts
+    wrong, failed, millis, histogram, witness = [], 0, [], {}, []
+    for i in range(usable):
+        text = cycle[i % len(cycle)]
+        got = channel.command(text)
+        histogram[got["attempts"]] = histogram.get(got["attempts"], 0) + 1
+        if got["status"] is None:
+            failed += 1
+            continue
+        millis.append(got["ms"])
+        reply = got["text"]
+        if text.startswith("tone "):
+            want["tone"] = int(text[5:])
+            ok = got["status"] == s3_uart.ST_OK and "tone = %d" % want["tone"] in reply
+        elif text.startswith("plc "):
+            want["plc"] = int(text[4:])
+            ok = got["status"] == s3_uart.ST_OK and "plc = %d" % want["plc"] in reply
+        elif text == "hpf":
+            want["hpf"] = 1 - want["hpf"]
+            ok = got["status"] == s3_uart.ST_OK and "hpf = %d" % want["hpf"] in reply
+        elif text == "status":
+            ok = got["status"] == s3_uart.ST_OK and uart_check_status(reply, want)
+        elif text == "nosuch":
+            ok = got["status"] == s3_uart.ST_UNKNOWN and "Unknown" in reply
+        elif text == "ustat":
+            ok = got["status"] == s3_uart.ST_OK and s3_uart.parse_ustat(reply) is not None
+        else:
+            ok = got["status"] == s3_uart.ST_OK
+        if not ok:
+            wrong.append({"i": i, "cmd": text, "status": got["status"], "reply": redact(reply)[:160]})
+        if i % 200 == 199:
+            # The board's own console has the last word on the state, not the channel being tested.
+            seen = board_tone(watch)
+            witness.append({"i": i, "tone_console": seen, "tone_channel": want["tone"]})
+    if want["hpf"] != start_hpf:
+        channel.command("hpf")
+        want["hpf"] = start_hpf
+    if want["tone"]:
+        channel.command("tone 0")
+    if want["plc"] != 1:
+        channel.command("plc 1")
+    witness_after = s3_uart.console_ustat(watch)
+    s3_after = channel.query()
+    delta = uart_delta(witness_before, witness_after)
+    return {"planned": usable, "failed_after_retry": failed, "wrong_replies": len(wrong), "wrong": wrong[:10],
+            "attempts_histogram": histogram, "retries": channel.retries - retries_before,
+            "retry_pct": round(100.0 * (channel.retries - retries_before) / max(1, channel.attempts - attempts_before), 3),
+            "ms": {"p50": uart_percentile(millis, 0.5), "p95": uart_percentile(millis, 0.95),
+                   "max": max(millis) if millis else None},
+            "witness": witness, "witness_ok": all(w["tone_console"] == w["tone_channel"] for w in witness),
+            "lyrat": delta, "lyrat_cmds_extra": (delta["cmds"] - usable) if delta else None,
+            "s3": {k: s3_after[k] - s3_before[k] for k in UART_STAT_TAIL + ("frames", "sent", "replies")}
+            if s3_before and s3_after else None}
+
+
+def uart_raw_case(watch, channel, name, data, expect, then=None, settle=0.15):
+    """Raw bytes onto the line toward the LyraT. expect: the change of its counters that must be seen, others stay at 0."""
+    before = s3_uart.console_ustat(watch)
+    took = channel.raw(data)
+    time.sleep(settle)
+    if then:
+        then()
+    after = s3_uart.console_ustat(watch)
+    delta = uart_delta(before, after)
+    case = {"name": name, "took": took, "delta": delta, "expect": expect}
+    # A frame that stops may end by the gap, or swallow the next heartbeat ack and end by a check: either way it is gone.
+    if delta:
+        delta["dropped"] = delta["trunc"] + delta["bad_crc"] + delta["bad_hdr"]
+    case["pass"] = bool(delta) and took == len(data) and all(
+        (delta[k] >= v[0] if isinstance(v, tuple) else delta[k] == v) for k, v in expect.items())
+    return case
+
+
+def uart_parser(watch, channel):
+    """What the line can carry at worst. Each case has a control: a good frame by the same route must act."""
+    rng = random.Random()
+    cases = []
+    tone_start = board_tone(watch)
+    seq = lambda: rng.randrange(1, 60000)  # noqa: E731
+    command = s3_uart.frame(s3_uart.T_CMD, seq(), b"tone 1", flip_crc=True)
+    cases.append(uart_raw_case(watch, channel, "bad_crc", command, {"bad_crc": 1, "cmds": 0, "replies": 0}))
+    tone_after_bad_crc = board_tone(watch)
+    cases.append(uart_raw_case(watch, channel, "good_frame_control", s3_uart.frame(s3_uart.T_CMD, seq(), b"tone 1"),
+                               {"cmds": 1, "replies": 1, "bad_crc": 0}))
+    tone_after_good = board_tone(watch)
+    channel.command("tone 0")
+    cases.append(uart_raw_case(watch, channel, "bad_header", s3_uart.frame(s3_uart.T_CMD, seq(), b"tone 1", flip_header=True),
+                               {"bad_hdr": 1, "cmds": 0}))
+    head = bytes([s3_uart.T_CMD, 1, 0, 0xFF, 0x7F])
+    oversize = bytes([0xA5, 0x5A]) + head + bytes([head[0] ^ head[1] ^ head[2] ^ head[3] ^ head[4]])
+    cases.append(uart_raw_case(watch, channel, "length_too_big", oversize, {"bad_hdr": 1, "cmds": 0}))
+    # A frame that stops: the next good command must still get through, at worst with a repeat.
+    full = s3_uart.frame(s3_uart.T_CMD, seq(), b"status")
+    cases.append(uart_raw_case(watch, channel, "truncated", full[:len(full) // 2], {"dropped": (1,), "cmds": 1},
+                               then=lambda: (time.sleep(0.25), channel.command("pkt"))))
+    head = bytes([s3_uart.T_CMD, 2, 0, 0x00, 0x04])
+    longer = bytes([0xA5, 0x5A]) + head + bytes([head[0] ^ head[1] ^ head[2] ^ head[3] ^ head[4]])
+    cases.append(uart_raw_case(watch, channel, "announced_1024_nothing_came", longer, {"dropped": (1,), "cmds": 1},
+                               then=lambda: (time.sleep(0.25), channel.command("pkt"))))
+    cases.append(uart_raw_case(watch, channel, "wrong_type", s3_uart.frame(s3_uart.T_REPLY, seq(), b"x"),
+                               {"bad_type": 1, "cmds": 0}))
+    cases.append(uart_raw_case(watch, channel, "not_text", s3_uart.frame(s3_uart.T_CMD, seq(), bytes([1, 2, 200])),
+                               {"cmds": 0, "replies": 1}))
+    # The same seq twice must run once: without this a repeat after a lost reply would flip a toggle back.
+    again = s3_uart.frame(s3_uart.T_CMD, seq(), b"hpf")
+    cases.append(uart_raw_case(watch, channel, "repeat_runs_once", again + again, {"cmds": 1, "dups": 1}))
+    hpf_after_repeat = channel.command("status")
+    channel.command("hpf")
+    for burst in range(5):
+        noise = bytearray(rng.randrange(256) for _ in range(UART_BURST_BYTES))
+        for at in range(0, UART_BURST_BYTES - 2, 37):    # many false starts of a frame
+            noise[at:at + 2] = b"\xa5\x5a"
+        case = uart_raw_case(watch, channel, "noise_%d" % burst, bytes(noise), {"noise": (1,), "cmds": 1},
+                             then=lambda: (time.sleep(0.25), channel.command("pkt")))
+        cases.append(case)
+    after_noise = channel.command("status")
+    end_tone = board_tone(watch)
+    # The other direction, as at the start of the LyraT: noise toward the S3, which must count it and stay up.
+    s3_before = channel.query()
+    garbage_sent = board_cmd(watch, "ugarb %d" % (UART_BURST_BYTES * 4), "ugarb = %d" % (UART_BURST_BYTES * 4))
+    watch.pump(time.monotonic() + 0.5)
+    after_garbage = channel.command("status")
+    s3_after = channel.query()
+    s3_case = {"sent": garbage_sent, "same_boot": bool(s3_before and s3_after and s3_before["boot"] == s3_after["boot"]),
+               "delta": {k: s3_after[k] - s3_before[k] for k in UART_STAT_TAIL + ("rx_bytes", "frames")} if s3_before and s3_after else None,
+               "answered": after_garbage["status"] == s3_uart.ST_OK}
+    s3_case["pass"] = bool(garbage_sent and s3_case["same_boot"] and s3_case["answered"] and s3_case["delta"]
+                           and s3_case["delta"]["noise"] > 0)
+    return {"cases": cases, "s3_noise": s3_case, "tone_start": tone_start, "tone_after_bad_crc": tone_after_bad_crc,
+            "tone_after_good": tone_after_good, "tone_end": end_tone, "hpf_reply_ok": hpf_after_repeat["status"] == 0,
+            "alive_after_noise": after_noise["status"] == s3_uart.ST_OK,
+            "pass": all(c["pass"] for c in cases) and tone_start == 0 and tone_after_bad_crc == 0
+            and tone_after_good == 1 and end_tone == 0 and after_noise["status"] == s3_uart.ST_OK and s3_case["pass"]}
+
+
+def uart_lyrat_reset(watch, channel, index, args):
+    """LyraT restarts: its boot garbage reaches the S3's RX. The S3 must stay up and the channel must come back alone."""
+    trial = {"i": index}
+    before = channel.query()
+    resets = len(watch.resets)
+    ups = watch.slc_ups
+    watch.pulse_reset()
+    slc = wait_slc(watch, ups, args.slc_timeout)
+    back, reply = uart_wait_command(channel, "status", UART_BACK_S)
+    after = channel.query()
+    trial.update({"slc_s": slc, "command_back_s": back, "s3_boot_same": bool(before and after and before["boot"] == after["boot"]),
+                  "s3_garbage": {k: after[k] - before[k] for k in UART_STAT_TAIL} if before and after else None,
+                  "pins_ok": after and after["pins_ok"], "lyrat_up_s": after and after["lyrat_up_s"],
+                  "lyrat_resets": len(watch.resets) - resets})
+    trial["pass"] = bool(slc is not None and back is not None and trial["s3_boot_same"] and trial["pins_ok"] == 1
+                         and trial["lyrat_resets"] == 1 and trial["lyrat_up_s"] is not None
+                         and "tone=0" in (reply or {}).get("text", ""))
+    return trial
+
+
+def uart_up_record(watch, args, tag, name, seconds, out, during=None):
+    """The board's tone to the phone: a measure of the sound that does not depend on the S3 at all."""
+    out.mkdir(parents=True, exist_ok=True)
+    wav_name = "%s-%s.wav" % (tag, name)
+    result = {"errors": []}
+    before = sco_packets(watch)
+    if not set_tone(watch, 1):
+        result["errors"].append("tone 1 not confirmed")
+    record_id = "%s-%s-rec" % (tag, name)
+    app_command("record", record_id, "--ei", "seconds", str(seconds), "--es", "out", wav_name, "--es", "source", args.source)
+    if during:
+        during(result)
+    took, status = wait_app(watch, record_id, lambda s: (s.get("record") or {}).get("id") == record_id
+                            and (s.get("record") or {}).get("state") != "recording", seconds + 25.0)
+    record = (status or {}).get("record") or {}
+    if took is None or record.get("state") != "done":
+        result["errors"].append("record did not finish: %s" % (status and status.get("error")))
+    if not set_tone(watch, 0):
+        result["errors"].append("tone 0 not confirmed")
+    adb("pull", SCO_DIR + "/" + wav_name, str(out / "phone.wav"), timeout=30.0)
+    adb("shell", "rm", "-f", SCO_DIR + "/" + wav_name)
+    result["sound"] = judge_wav(out / "phone.wav", args, "strict")
+    result["sco_delta"] = packet_delta(before, sco_packets(watch))
+    return result
+
+
+def uart_sound_brief(sound):
+    return {str(k): {a: v.get(a) for a in ("pass", "snr_db", "shift_pct")} for k, v in (sound.get("tones") or {}).items()}
+
+
+def uart_sco_trial(watch, channel, args, out, tag, name, action):
+    """SCO open and the sound measured while the action runs. The LyraT must not notice: no reset, no SLC or SCO drop."""
+    trial = {"name": name}
+    resets, slc_drops, t_start = len(watch.resets), watch.slc_drops, watch.now()
+    checks = {"opened": channel_open(watch, trial, "%s-%s-open" % (tag, name), args.open_timeout),
+              "codec_expected": trial.get("codec") == args.codec}
+    if checks["opened"]:
+        watch.pump(time.monotonic() + args.settle)
+        before = s3_uart.console_ustat(watch)
+        record = uart_up_record(watch, args, tag, name, UART_RECORD_S, out / name, lambda r: action(r, trial, checks))
+        after = s3_uart.console_ustat(watch)
+        trial["lyrat_uart"] = uart_delta(before, after)
+        trial["sound"] = uart_sound_brief(record["sound"])
+        trial["sco_delta"] = record["sco_delta"]
+        trial["sound_errors"] = record["errors"]
+        checks["sound_strict"] = bool(record["sound"].get("pass")) and not record["errors"]
+        # Line low must cost a break or a few bytes, not a storm of interrupts on the audio core.
+        rate = trial["lyrat_uart"]["rx_bytes"] / max(1.0, UART_RECORD_S) if trial["lyrat_uart"] else None
+        trial["rx_bytes_per_s"] = round(rate, 1) if rate is not None else None
+        checks["no_rx_storm"] = rate is not None and rate <= args.max_rx_rate
+    closed, _ = channel_close(watch, trial, "%s-%s-close" % (tag, name), args.close_timeout)
+    checks["closed"] = closed
+    trial["sco_closed_lines_during"] = sum(1 for line in lines_since(watch, t_start) if SCO_CLOSED_LINE in line) - 1
+    checks["sco_stayed_open"] = trial["sco_closed_lines_during"] == 0
+    trial["lyrat_resets"] = len(watch.resets) - resets
+    trial["slc_drops"] = watch.slc_drops - slc_drops
+    checks["lyrat_resets_zero"] = trial["lyrat_resets"] == 0
+    checks["slc_drops_zero"] = trial["slc_drops"] == 0
+    trial["checks"] = checks
+    trial["pass"] = all(checks.values())
+    return trial
+
+
+def uart_s3_restart_action(watch, channel, out):
+    """Restart the S3 in the middle of a recording; the channel must come back with nothing asked of it."""
+    def run(result, trial, checks):
+        before = channel.query()
+        w = s3.watch(out / "s3-console")
+        w.pump(time.monotonic() + 3, until=lambda: w.sp is not None)
+        watch.pump(time.monotonic() + UART_RESET_AT_S)
+        t0 = time.monotonic()
+        s3.restart(w)
+        w.pump(time.monotonic() + 0.3)
+        watch.pump(time.monotonic() + 0.5)
+        w.close_port()
+        s3_serial = w.finish(0)
+        channel.board = None
+        back = None
+        while time.monotonic() - t0 < UART_BACK_S:
+            watch.pump(time.monotonic() + 0.3)
+            if channel.find(0.6) and channel.query() and channel.query()["boot"] != (before or {}).get("boot"):
+                got = channel.command("status", timeout=0.3, retries=1)
+                if got["status"] == s3_uart.ST_OK:
+                    back = round(time.monotonic() - t0, 2)
+                    break
+        after = channel.query()
+        trial.update({"s3_back_s": back, "s3_boot_changed": bool(before and after and before["boot"] != after["boot"]),
+                      "s3_pins_ok": after and after["pins_ok"], "s3_tx_on_after": after and after["tx_on"],
+                      "s3_console_resets": s3_serial["board_resets"]})
+        checks["s3_restarted"] = trial["s3_boot_changed"]
+        checks["channel_back_alone"] = back is not None
+        checks["s3_pins_ok"] = trial["s3_pins_ok"] == 1
+    return run
+
+
+def uart_line_low_action(watch, channel, args):
+    """The S3 stops driving its TX and the LyraT's pull-down holds the line low, as with a dead S3, for the whole recording."""
+    def run(result, trial, checks):
+        channel.set_tx(0)
+        time.sleep(0.1)
+        state = channel.query()
+        refused = channel.command("tone 1", timeout=0.3, retries=1)
+        witness = s3_uart.console_ustat(watch)
+        trial.update({"s3_tx_on": state and state["tx_on"], "refused_status": refused["status"],
+                      "lyrat_rx_level_low": witness and witness["rx_level"]})
+        checks["tx_really_off"] = trial["s3_tx_on"] == 0
+        # The control: with the TX off the command cannot arrive, so the channel is really this wire.
+        checks["command_refused_with_tx_off"] = refused["status"] == s3_uart.ST_NO_TX
+        checks["lyrat_rx_held_low"] = trial["lyrat_rx_level_low"] == 0
+        watch.pump(time.monotonic() + args.line_low)
+        answered = s3_uart.console_ustat(watch)
+        checks["console_alive_with_line_low"] = answered is not None
+        channel.set_tx("A")
+        back, _ = uart_wait_command(channel, "status", 10.0)
+        trial["command_back_s"] = back
+        checks["channel_back"] = back is not None
+    return run
+
+
+def uart_no_data(args, out, error):
+    result = {"stage": "uart", "label": args.label, "power": args.power, "verdict": "NO_DATA", "error": redact(error), "dir": str(out)}
+    write_json(out / "round.json", result)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 2
+
+
+def stage_uart(args):
+    keep_awake()
+    out = run_dir("uart", args.label)
+    start = datetime.now()
+    t0 = time.monotonic()
+    if SCO_APP not in adb("shell", "pm", "path", SCO_APP):
+        return uart_no_data(args, out, "probe app is not installed, run android/build_apk.py --install")
+    try:
+        before = phone.status()
+        bonds_before = phone.bond_list()
+    except phone.PhoneError as e:
+        return uart_no_data(args, out, str(e))
+    if before["keyguard"]:
+        return uart_no_data(args, out, "phone keyguard is showing")
+    telecom_before = telecom_state()
+    if telecom_before is None or telecom_before["calls_now"] or telecom_before["telephony_busy"]:
+        return uart_no_data(args, out, "a call is in progress or telecom is unreadable: %s" % telecom_before)
+    channel = s3_uart.Channel()
+    if not channel.find():
+        return uart_no_data(args, out, "S3 not found")
+    watch = SerialWatch(args.port, out, False, echo=args.echo)
+    watch.pump(time.monotonic() + 15, until=lambda: watch.sp is not None)
+    if watch.sp is None:
+        watch.finish(0)
+        return uart_no_data(args, out, "port not opened")
+    app_ready()
+
+    s3_start = channel.query()
+    setup = {"s3_tx_auto": s3_start and s3_start["tx_mode"] == 2}
+    back, _ = uart_wait_command(channel, "status", 15.0)
+    setup["channel_up"] = back is not None
+    commands, parser, lyrat_resets, s3_restarts, line_low = None, None, [], [], None
+    tone_end = None
+    try:
+        if all(setup.values()):
+            commands = uart_commands(watch, channel, args.commands)
+            print(json.dumps({"commands": {k: v for k, v in commands.items() if k != "witness"}}), flush=True)
+            parser = uart_parser(watch, channel)
+            print(json.dumps({"parser": [{c["name"]: c["pass"]} for c in parser["cases"]], "pass": parser["pass"]}), flush=True)
+            for i in range(1, args.lyrat_resets + 1):
+                lyrat_resets.append(uart_lyrat_reset(watch, channel, i, args))
+                print(json.dumps({"lyrat_reset": lyrat_resets[-1]}), flush=True)
+            # Volume last: a restart of the LyraT brings it back. Nothing of the phone may reach the room (R15).
+            setup["vol_0"] = board_cmd(watch, "vol 0", "volume = 0")
+            tag = datetime.now().strftime("%H%M%S")
+            app_command("status", tag + "-start")
+            wait_app(watch, tag + "-start", lambda s: True, 10.0)
+            for i in range(1, args.s3_resets + 1):
+                name = "s3r%d" % i
+                action = uart_s3_restart_action(watch, channel, out / name)
+                s3_restarts.append(uart_sco_trial(watch, channel, args, out, tag, name, action))
+                print(json.dumps({"s3_restart": s3_restarts[-1]}), flush=True)
+                watch.pump(time.monotonic() + 2.0)
+            line_low = uart_sco_trial(watch, channel, args, out, tag, "linelow", uart_line_low_action(watch, channel, args))
+            print(json.dumps({"line_low": line_low}), flush=True)
+    finally:
+        channel.set_tx("A")
+        adb("shell", "am", "force-stop", SCO_APP)
+        tone_end = board_tone(watch)
+        board_cmd(watch, "vol 100", "volume = 100")    # what the firmware sets at boot
+    final_back, _ = uart_wait_command(channel, "status", 10.0)
+    witness_end = s3_uart.console_ustat(watch)
+    s3_end = channel.query()
+    channel.close()
+    watch.close_port()
+    summary = watch.finish(args.commands)
+    end = datetime.now()
+    telecom_after = telecom_state()
+    try:
+        phone.go_home()
+        after = phone.status()
+        bonds_after = phone.bond_list()
+    except phone.PhoneError:
+        after, bonds_after = None, None
+    removals = usb_removals(start, end)
+    standby = pc_standby_entries(start, end)
+    c = commands or {}
+    checks = {
+        "setup": all(setup.values()),
+        "commands_all_run": c.get("planned") == args.commands - (args.commands % 2),
+        "failed_after_retry_zero": c.get("failed_after_retry") == 0,
+        "wrong_replies_zero": c.get("wrong_replies") == 0,
+        "retries_within_limit": c.get("retry_pct") is not None and c["retry_pct"] <= args.max_retry_pct,
+        # The console of the LyraT is not part of the channel: each command ran once, at the state the channel reported.
+        "witness_console_state": bool(c.get("witness")) and c.get("witness_ok") is True,
+        "witness_each_ran_once": bool(c.get("lyrat")) and 0 <= c["lyrat_cmds_extra"] <= 3,
+        "parser_all_cases": bool(parser and parser["pass"]),
+        "lyrat_resets_all_pass": len(lyrat_resets) == args.lyrat_resets and all(t["pass"] for t in lyrat_resets),
+        "s3_restarts_all_pass": len(s3_restarts) == args.s3_resets and all(t["pass"] for t in s3_restarts),
+        "line_low_pass": bool(line_low and line_low["pass"]),
+        "channel_back_at_end": final_back is not None,
+        "s3_pins_ok_at_end": bool(s3_end and s3_end["pins_ok"] == 1),
+        "tone_off_at_end": tone_end == 0,
+        "no_call_during_round": bool(telecom_after) and telecom_after["calls_now"] == 0
+                                and telecom_after["telephony_busy"] == 0
+                                and telecom_after["historical_lines"] == telecom_before["historical_lines"],
+        "other_bonds_unchanged": bonds_after is not None and phone.others(bonds_before) == phone.others(bonds_after),
+        "phone_hfp_connected_at_end": bool(after and after["hfp_connected"]),
+        "lyrat_resets_only_planned": summary["board_resets"] == args.lyrat_resets,
+        "panics_zero": summary["panics"] == 0,
+        "port_drops_zero": summary["port_drops"] == 0,
+        "usb_removals_zero": removals == 0,
+    }
+    verdict = "INVALID_WINDOW" if standby != 0 else ("PASS" if all(checks.values()) else "FAIL")
+    result = {"stage": "uart", "label": args.label, "power": args.power, "verdict": verdict, "checks": checks,
+              "start": start.isoformat(timespec="seconds"), "end": end.isoformat(timespec="seconds"),
+              "seconds": round(time.monotonic() - t0, 1), "dir": str(out),
+              "planned": {"commands": args.commands, "lyrat_resets": args.lyrat_resets, "s3_resets": args.s3_resets,
+                          "line_low_s": args.line_low, "max_retry_pct": args.max_retry_pct, "min_snr_db": args.min_snr,
+                          "max_rx_bytes_per_s": args.max_rx_rate, "codec": args.codec},
+              "not_checked": "A real power loss of the S3 is not tried: the wiring forbids it while the LyraT is on. "
+                             "A restart and a line held low are what is measured.",
+              "setup": setup, "commands": commands, "parser": parser, "lyrat_resets": lyrat_resets, "s3_restarts": s3_restarts,
+              "line_low": line_low, "tone_end": tone_end, "s3_end": s3_end, "lyrat_uart_end": witness_end,
+              "telecom_before": telecom_before, "telecom_after": telecom_after, "phone_before": before, "phone_after": after,
+              "pc_standby_entries": standby, "usb_removals": removals, "serial": summary}
+    write_json(out / "round.json", result)
+    with (RUNS_ROOT / "rounds.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(redact(json.dumps({"stage": "uart", "label": args.label, "power": args.power, "verdict": verdict,
+                                    "start": result["start"], "seconds": result["seconds"],
+                                    "commands": c.get("planned"), "failed_after_retry": c.get("failed_after_retry"),
+                                    "retry_pct": c.get("retry_pct"), "usb_removals": removals, "dir": str(out)},
+                                   ensure_ascii=False)) + "\n")
+    print(json.dumps({k: v for k, v in result.items() if k not in ("phone_before", "phone_after", "commands", "parser",
+                                                                   "s3_restarts", "line_low", "lyrat_resets")},
+                     ensure_ascii=False, indent=2))
+    return {"PASS": 0, "FAIL": 1}.get(verdict, 2)
+
+
+class UartLoad(threading.Thread):
+    """Commands through the S3 during another stage, to see whether the UART task reaches the sound."""
+
+    def __init__(self, rate):
+        super().__init__(daemon=True)
+        self.rate = rate
+        self.halt = threading.Event()
+        self.sent = self.failed = self.retries = self.not_on = 0
+
+    def run(self):
+        channel = s3_uart.Channel()
+        channel.find()
+        while not self.halt.wait(1.0 / self.rate):
+            got = channel.command("status", timeout=0.25, retries=4)
+            self.sent += 1
+            self.retries += got["attempts"] - 1
+            if got["status"] is None:
+                self.failed += 1
+            elif got["status"] != s3_uart.ST_OK:
+                self.not_on += 1
+        channel.close()
+
+    def result(self):
+        self.halt.set()
+        self.join(5.0)
+        return {"rate_hz": self.rate, "sent": self.sent, "failed_after_retry": self.failed, "retries": self.retries,
+                "other_status": self.not_on}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="stage", required=True)
@@ -2139,6 +2643,7 @@ def main():
     p.add_argument("--label", default="")
     p.add_argument("--port", default=DEFAULT_PORT)
     p.add_argument("--echo", action="store_true", help="print events live")
+    p.add_argument("--uart-load", type=float, default=0.0, help="commands per second through the S3 during the trials")
     p = sub.add_parser("tap", help="content of both I2S lines captured by the S3-ETH board, no sound on the PC")
     p.add_argument("--power", required=True, help="what feeds the board, e.g. adapter or battery (R11)")
     p.add_argument("--n", type=int, default=3, help="number of trials")
@@ -2189,12 +2694,32 @@ def main():
     p.add_argument("--label", default="")
     p.add_argument("--port", default=DEFAULT_PORT)
     p.add_argument("--echo", action="store_true", help="print events live")
+    p = sub.add_parser("uart", help="commands through the S3 and the UART, a bad line, restarts of both boards")
+    p.add_argument("--power", required=True, help="what feeds the board, e.g. adapter or battery (R11)")
+    p.add_argument("--codec", default="mSBC", choices=["mSBC", "CVSD"], help="the codec of the SCO phases")
+    p.add_argument("--commands", type=int, default=1000)
+    p.add_argument("--lyrat-resets", type=int, default=3)
+    p.add_argument("--s3-resets", type=int, default=3)
+    p.add_argument("--line-low", type=float, default=8.0, help="seconds of the line low within the recording")
+    p.add_argument("--max-retry-pct", type=float, default=1.0, help="share of the sends that were repeats")
+    p.add_argument("--max-rx-rate", type=float, default=200.0, help="bytes per second the LyraT may read during SCO")
+    p.add_argument("--min-snr", type=float, default=20.0)
+    p.add_argument("--max-shift", type=float, default=1.0, help="percent")
+    p.add_argument("--max-impaired", type=float, default=30.0)
+    p.add_argument("--source", default="raw", choices=["vc", "mic", "recog", "raw"])
+    p.add_argument("--settle", type=float, default=1.0)
+    p.add_argument("--open-timeout", type=float, default=15.0)
+    p.add_argument("--close-timeout", type=float, default=10.0)
+    p.add_argument("--slc-timeout", type=float, default=30.0)
+    p.add_argument("--label", default="")
+    p.add_argument("--port", default=DEFAULT_PORT)
+    p.add_argument("--echo", action="store_true", help="print events live")
     args = ap.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     return {"link": stage_link, "sco": stage_sco, "power": stage_power, "audio": stage_audio, "tap": stage_tap,
-            "btloss": stage_btloss, "plc": stage_plc}[args.stage](args)
+            "btloss": stage_btloss, "plc": stage_plc, "uart": stage_uart}[args.stage](args)
 
 
 if __name__ == "__main__":

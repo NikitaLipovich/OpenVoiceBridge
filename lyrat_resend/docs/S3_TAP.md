@@ -19,7 +19,7 @@ depend on it: every S3 pin wired to the LyraT is an input, and a restart of the 
 
 Rules of this wiring, there are no series resistors on the lines:
 
-- GPIO15-18, GPIO2 and GPIO1 are bare inputs without pulls. GPIO1 may become an output only in the UART stage.
+- GPIO15-18 and GPIO2 are bare inputs without pulls. GPIO1 too, except while the LyraT is proven alive, see `S3_UART.md`.
   The firmware reads this back from the registers (`pins_ok`) at boot and every 2 s.
 - The S3 must not be powered off while the LyraT is on. A restart is fine.
 - For a permanent build add 100 to 220 ohm in each signal line.

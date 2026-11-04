@@ -12,6 +12,7 @@
  *   5. AEC              — acoustic echo cancellation
  *   6. Soft limiter     — anti-clip on call audio path
  *
+ * Commands also come from the ESP32-S3-ETH over a framed UART, docs/S3_UART.md.
  * UART console (type in idf.py monitor):
  *   help, status, hpf 0/1, notch 0/1, wiener 0/1, gate 0/1,
  *   aec 0/1, limiter 0/1, mic_gain N, call_gain N
@@ -27,11 +28,14 @@
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <math.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/ringbuf.h"
+#include "freertos/semphr.h"
+#include "freertos/queue.h"
 #include "freertos/event_groups.h"
 
 #include "nvs_flash.h"
@@ -40,6 +44,7 @@
 #include "esp_err.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_random.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_bt_device.h"
@@ -52,6 +57,7 @@
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
+#include "ctl_frame.h"
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 
@@ -1471,55 +1477,103 @@ static esp_err_t bt_init(void)
 
 static const char *reset_reason_name(esp_reset_reason_t r);
 
+// Output of the console commands: the console itself, or, for a command from the control UART, the buffer of its
+// reply. Commands run one at a time under s_cmd_mutex, so a command from the S3 never prints on the bench's console.
+#define CMD_CAP_BYTES  CTL_MAX_PAYLOAD
+static char s_cmd_cap_buf[CMD_CAP_BYTES];
+static char *s_cmd_cap;
+static size_t s_cmd_cap_len;
+static bool s_cmd_cap_cut;
+static bool s_cmd_unknown;
+static SemaphoreHandle_t s_cmd_mutex;
+
+static void cmd_cap_add(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void cmd_cap_add(const char *fmt, ...)
+{
+    size_t room = CMD_CAP_BYTES - s_cmd_cap_len;
+    if (room < 2) {
+        s_cmd_cap_cut = true;
+        return;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(s_cmd_cap + s_cmd_cap_len, room - 1, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    if ((size_t)n >= room - 1) {
+        s_cmd_cap_cut = true;
+        n = (int)(room - 2);
+    }
+    s_cmd_cap_len += (size_t)n;
+    s_cmd_cap[s_cmd_cap_len++] = '\n';
+}
+
+#define CMD_OUT(fmt, ...) do { \
+        if (s_cmd_cap) cmd_cap_add(fmt, ##__VA_ARGS__); \
+        else ESP_LOGI(TAG_CMD, fmt, ##__VA_ARGS__); \
+    } while (0)
+
+static void ctl_uart_print_stats(void);
+static int ctl_uart_set_baud(int baud);
+static int ctl_uart_garbage(int bytes);
+
 static void print_status(void)
 {
-    ESP_LOGI(TAG_CMD, "=== DSP Pipeline Status ===");
-    ESP_LOGI(TAG_CMD, "  hpf     = %d", s_dsp.hpf_on);
-    ESP_LOGI(TAG_CMD, "  notch   = %d", s_dsp.notch_on);
-    ESP_LOGI(TAG_CMD, "  wiener  = %d", s_dsp.wiener_on);
-    ESP_LOGI(TAG_CMD, "  gate    = %d", s_dsp.gate_on);
-    ESP_LOGI(TAG_CMD, "  aec     = %d", s_dsp.aec_on);
-    ESP_LOGI(TAG_CMD, "  limiter = %d", s_dsp.limiter_on);
-    ESP_LOGI(TAG_CMD, "  mic_gain  = %d", s_dsp.mic_gain);
-    ESP_LOGI(TAG_CMD, "  call_gain = %d", s_dsp.call_gain);
-    ESP_LOGI(TAG_CMD, "  tone=%d", s_tone_on);
+    CMD_OUT("=== DSP Pipeline Status ===");
+    CMD_OUT("  hpf     = %d", s_dsp.hpf_on);
+    CMD_OUT("  notch   = %d", s_dsp.notch_on);
+    CMD_OUT("  wiener  = %d", s_dsp.wiener_on);
+    CMD_OUT("  gate    = %d", s_dsp.gate_on);
+    CMD_OUT("  aec     = %d", s_dsp.aec_on);
+    CMD_OUT("  limiter = %d", s_dsp.limiter_on);
+    CMD_OUT("  mic_gain  = %d", s_dsp.mic_gain);
+    CMD_OUT("  call_gain = %d", s_dsp.call_gain);
+    CMD_OUT("  tone=%d", s_tone_on);
     // A reset can take the USB bridge away, and then the BOOT line is never seen.
-    ESP_LOGI(TAG_CMD, "  boot_reason=%s", reset_reason_name(esp_reset_reason()));
-    ESP_LOGI(TAG_CMD, "  SCO     = %s bt_rate=%d", s_sco_active ? "active" : "idle", s_bt_8k ? 8000 : 16000);
-    ESP_LOGI(TAG_CMD, "  SLC     = %s", s_slc_up ? "up" : "down");
-    ESP_LOGI(TAG_CMD, "  scan_during_sco=%d", s_scan_during_sco);
-    ESP_LOGI(TAG_CMD, "  plc=%d", s_plc_on);
-    ESP_LOGI(TAG_CMD, "  bonds=%d", esp_bt_gap_get_bond_device_num());
-    for (uint8_t i = 0; i < s_peer_cnt; i++)
-        ESP_LOGI(TAG_CMD, "  peer[%u] = %02x:%02x:%02x:%02x:%02x:%02x", i,
-                 s_peers[i][0], s_peers[i][1], s_peers[i][2],
-                 s_peers[i][3], s_peers[i][4], s_peers[i][5]);
-    ESP_LOGI(TAG_CMD, "  heap    = %"PRIu32, esp_get_free_heap_size());
+    CMD_OUT("  boot_reason=%s", reset_reason_name(esp_reset_reason()));
+    CMD_OUT("  SCO     = %s bt_rate=%d", s_sco_active ? "active" : "idle", s_bt_8k ? 8000 : 16000);
+    CMD_OUT("  SLC     = %s", s_slc_up ? "up" : "down");
+    CMD_OUT("  scan_during_sco=%d", s_scan_during_sco);
+    CMD_OUT("  plc=%d", s_plc_on);
+    CMD_OUT("  bonds=%d", esp_bt_gap_get_bond_device_num());
+    // Addresses stay on the local console: a reply on the control channel leaves the board over the network.
+    if (s_cmd_cap) {
+        CMD_OUT("  peers=%u", s_peer_cnt);
+    } else {
+        for (uint8_t i = 0; i < s_peer_cnt; i++)
+            CMD_OUT("  peer[%u] = %02x:%02x:%02x:%02x:%02x:%02x", i,
+                     s_peers[i][0], s_peers[i][1], s_peers[i][2],
+                     s_peers[i][3], s_peers[i][4], s_peers[i][5]);
+    }
+    CMD_OUT("  heap    = %"PRIu32, esp_get_free_heap_size());
 }
 
 static void print_help(void)
 {
-    ESP_LOGI(TAG_CMD, "=== MIC Pipeline (toggle, or 0/1) ===");
-    ESP_LOGI(TAG_CMD, "  Step 0: hw N   — ES8388 analog gain (0-40 dB)");
-    ESP_LOGI(TAG_CMD, "  Step 1: hpf    — HPF 80Hz");
-    ESP_LOGI(TAG_CMD, "  Step 2: mg N   — SW gain (1-8)");
-    ESP_LOGI(TAG_CMD, "  Step 3: notch  — Notch 50/150/250Hz");
-    ESP_LOGI(TAG_CMD, "  Step 4: w      — Wiener NS");
-    ESP_LOGI(TAG_CMD, "  Step 5: g      — Noise gate");
-    ESP_LOGI(TAG_CMD, "  Step 6: aec    — Echo cancel");
-    ESP_LOGI(TAG_CMD, "  Step 7: sns    — Spectral NS (FFT)");
-    ESP_LOGI(TAG_CMD, "=== Other ===");
-    ESP_LOGI(TAG_CMD, "  lim    — Soft limiter (call)");
-    ESP_LOGI(TAG_CMD, "  cg N   — Call gain (1-8)");
-    ESP_LOGI(TAG_CMD, "  vol N  — ES8388 output vol (0-100)");
-    ESP_LOGI(TAG_CMD, "  tone 1|2|0 — 400/1000/1800 Hz, 1 s each (2: only 1800 Hz), instead of the mic");
-    ESP_LOGI(TAG_CMD, "  scan 0|1 — keep page and inquiry scans on during SCO, default 0");
-    ESP_LOGI(TAG_CMD, "  plc 0|1  — conceal lost and broken frames, default 1");
-    ESP_LOGI(TAG_CMD, "  log 0|1  — periodic audio lines on the console");
-    ESP_LOGI(TAG_CMD, "  pkt    — SCO packet counters of the open link");
-    ESP_LOGI(TAG_CMD, "  all    — ALL DSP on/off");
-    ESP_LOGI(TAG_CMD, "  s      — Status");
-    ESP_LOGI(TAG_CMD, "  h|?    — This help");
+    CMD_OUT("=== MIC Pipeline (toggle, or 0/1) ===");
+    CMD_OUT("  Step 0: hw N   — ES8388 analog gain (0-40 dB)");
+    CMD_OUT("  Step 1: hpf    — HPF 80Hz");
+    CMD_OUT("  Step 2: mg N   — SW gain (1-8)");
+    CMD_OUT("  Step 3: notch  — Notch 50/150/250Hz");
+    CMD_OUT("  Step 4: w      — Wiener NS");
+    CMD_OUT("  Step 5: g      — Noise gate");
+    CMD_OUT("  Step 6: aec    — Echo cancel");
+    CMD_OUT("  Step 7: sns    — Spectral NS (FFT)");
+    CMD_OUT("=== Other ===");
+    CMD_OUT("  lim    — Soft limiter (call)");
+    CMD_OUT("  cg N   — Call gain (1-8)");
+    CMD_OUT("  vol N  — ES8388 output vol (0-100)");
+    CMD_OUT("  tone 1|2|0 — 400/1000/1800 Hz, 1 s each (2: only 1800 Hz), instead of the mic");
+    CMD_OUT("  scan 0|1 — keep page and inquiry scans on during SCO, default 0");
+    CMD_OUT("  plc 0|1  — conceal lost and broken frames, default 1");
+    CMD_OUT("  log 0|1  — periodic audio lines on the console");
+    CMD_OUT("  pkt    — SCO packet counters of the open link");
+    CMD_OUT("  ustat  — counters of the control UART to the S3");
+    CMD_OUT("  ubaud N — baud rate of that UART, for the line check");
+    CMD_OUT("  ugarb N — N bytes of noise onto that UART, for the test of the S3's parser");
+    CMD_OUT("  all    — ALL DSP on/off");
+    CMD_OUT("  s      — Status");
+    CMD_OUT("  h|?    — This help");
 }
 
 // Toggle helper: no value = flip, 0 = off, 1 = on
@@ -1550,15 +1604,15 @@ static void process_cmd(char *line)
     } else if (strcmp(cmd, "status") == 0 || strcmp(cmd, "s") == 0) {
         print_status();
     } else if (strcmp(cmd, "hpf") == 0) {
-        ESP_LOGI(TAG_CMD, "hpf = %d", toggle(&s_dsp.hpf_on, val));
+        CMD_OUT("hpf = %d", toggle(&s_dsp.hpf_on, val));
     } else if (strcmp(cmd, "notch") == 0) {
-        ESP_LOGI(TAG_CMD, "notch = %d", toggle(&s_dsp.notch_on, val));
+        CMD_OUT("notch = %d", toggle(&s_dsp.notch_on, val));
     } else if (strcmp(cmd, "wiener") == 0 || strcmp(cmd, "w") == 0) {
-        ESP_LOGI(TAG_CMD, "wiener = %d", toggle(&s_dsp.wiener_on, val));
+        CMD_OUT("wiener = %d", toggle(&s_dsp.wiener_on, val));
     } else if (strcmp(cmd, "gate") == 0 || strcmp(cmd, "g") == 0) {
-        ESP_LOGI(TAG_CMD, "gate = %d", toggle(&s_dsp.gate_on, val));
+        CMD_OUT("gate = %d", toggle(&s_dsp.gate_on, val));
     } else if (strcmp(cmd, "aec") == 0) {
-        ESP_LOGI(TAG_CMD, "aec = %d", toggle(&s_dsp.aec_on, val));
+        CMD_OUT("aec = %d", toggle(&s_dsp.aec_on, val));
     } else if (strcmp(cmd, "sns") == 0) {
         // sns 0=off, 1=FFT-IFFT, 2=mask-log, 3=soft-mask, 4=hard-mask
         // sns without arg = cycle 0→1→2→3→4→0
@@ -1572,16 +1626,16 @@ static void process_cmd(char *line)
         }
         static const char *mn[] = {"OFF","FFT-IFFT","mask-LOG","soft-MASK","hard-MASK"};
         int m = spectral_ns_get_mode();
-        ESP_LOGI(TAG_CMD, "sns=%d (%s) cal=%d", m,
+        CMD_OUT("sns=%d (%s) cal=%d", m,
                  (m >= 0 && m <= 4) ? mn[m] : "?", spectral_ns_is_calibrated());
     } else if (strcmp(cmd, "snsg") == 0) {
         // snsg N — set floor gain in percent (1-100, default 2 = 0.02)
         if (val >= 1 && val <= 100) {
             spectral_ns_set_floor_gain((float)val / 100.0f);
         }
-        ESP_LOGI(TAG_CMD, "sns floor gain — use 'snsg N' where N=1..100 (percent)");
+        CMD_OUT("sns floor gain — use 'snsg N' where N=1..100 (percent)");
     } else if (strcmp(cmd, "limiter") == 0 || strcmp(cmd, "lim") == 0) {
-        ESP_LOGI(TAG_CMD, "limiter = %d", toggle(&s_dsp.limiter_on, val));
+        CMD_OUT("limiter = %d", toggle(&s_dsp.limiter_on, val));
     } else if (strcmp(cmd, "pkt") == 0) {
         if (s_sco_active) esp_hf_client_pkt_stat_nums_get(s_sco_handle);
     } else if (strcmp(cmd, "tone") == 0) {
@@ -1590,14 +1644,14 @@ static void process_cmd(char *line)
         } else {
             toggle(&s_tone_on, val);
         }
-        ESP_LOGI(TAG_CMD, "tone = %d", s_tone_on);
+        CMD_OUT("tone = %d", s_tone_on);
     } else if (strcmp(cmd, "scan") == 0) {
         toggle(&s_scan_during_sco, val);
         scan_mode_apply();
-        ESP_LOGI(TAG_CMD, "scan during SCO = %d", s_scan_during_sco);
+        CMD_OUT("scan during SCO = %d", s_scan_during_sco);
     } else if (strcmp(cmd, "plc") == 0) {
         toggle(&s_plc_on, val);
-        ESP_LOGI(TAG_CMD, "plc = %d", s_plc_on);
+        CMD_OUT("plc = %d", s_plc_on);
 #ifdef BENCH_FRAME_DROP
     } else if (strcmp(cmd, "fdrop") == 0) {
         int burst = 1, zeros_mode = 0;
@@ -1607,26 +1661,26 @@ static void process_cmd(char *line)
         s_fd_burst  = burst > 0 ? (uint32_t)burst : 1;
         s_fd_injected = 0;
         s_fd_sig = s_fd_err = s_fd_err_repeat = s_fd_err_next = 0;
-        ESP_LOGI(TAG_CMD, "fdrop = %"PRIu32" burst = %"PRIu32, s_fd_period, s_fd_burst);
+        CMD_OUT("fdrop = %"PRIu32" burst = %"PRIu32, s_fd_period, s_fd_burst);
     } else if (strcmp(cmd, "fdstat") == 0) {
-        ESP_LOGI(TAG_CMD, "fdstat injected=%"PRIu32" concealed=%"PRIu32" bad=%"PRIu32" plc=%d sig=%"PRIu64" err=%"PRIu64
+        CMD_OUT("fdstat injected=%"PRIu32" concealed=%"PRIu32" bad=%"PRIu32" plc=%d sig=%"PRIu64" err=%"PRIu64
                  " err_repeat=%"PRIu64" err_next=%"PRIu64,
                  s_fd_injected, s_rx_concealed, s_rx_bad, s_plc_on, s_fd_sig, s_fd_err, s_fd_err_repeat, s_fd_err_next);
 #endif
     } else if (strcmp(cmd, "log") == 0) {
         // log 0 silences the periodic audio lines, for a comparison of what the console costs
         esp_log_level_set(TAG_AUDIO, val == 0 ? ESP_LOG_NONE : ESP_LOG_INFO);
-        ESP_LOGI(TAG_CMD, "audio log = %d", val != 0);
+        CMD_OUT("audio log = %d", val != 0);
     } else if (strcmp(cmd, "mic_gain") == 0 || strcmp(cmd, "mg") == 0) {
         if (val >= 1 && val <= 8) {
             s_dsp.mic_gain = val;
         }
-        ESP_LOGI(TAG_CMD, "mic_gain = %d", s_dsp.mic_gain);
+        CMD_OUT("mic_gain = %d", s_dsp.mic_gain);
     } else if (strcmp(cmd, "call_gain") == 0 || strcmp(cmd, "cg") == 0) {
         if (val >= 1 && val <= 8) {
             s_dsp.call_gain = val;
         }
-        ESP_LOGI(TAG_CMD, "call_gain = %d", s_dsp.call_gain);
+        CMD_OUT("call_gain = %d", s_dsp.call_gain);
     } else if (strcmp(cmd, "all") == 0) {
         // no val → toggle all based on majority: if most are on → turn off, else on
         int v;
@@ -1639,21 +1693,29 @@ static void process_cmd(char *line)
         }
         s_dsp.hpf_on = v; s_dsp.notch_on = v; s_dsp.wiener_on = v;
         s_dsp.gate_on = v; s_dsp.aec_on = v; s_dsp.limiter_on = v;
-        ESP_LOGI(TAG_CMD, "ALL DSP = %d", v);
+        CMD_OUT("ALL DSP = %d", v);
     } else if (strcmp(cmd, "hw") == 0) {
         // hw N — set ES8388 analog input gain (0-40 dB)
         if (val >= 0 && val <= 40 && s_codec_dev) {
             esp_codec_dev_set_in_gain(s_codec_dev, (float)val);
         }
-        ESP_LOGI(TAG_CMD, "hw_gain = %d dB", val >= 0 ? val : -1);
+        CMD_OUT("hw_gain = %d dB", val >= 0 ? val : -1);
     } else if (strcmp(cmd, "vol") == 0) {
         // vol N — set ES8388 output volume (0-100)
         if (val >= 0 && val <= 100 && s_codec_dev) {
             esp_codec_dev_set_out_vol(s_codec_dev, val);
         }
-        ESP_LOGI(TAG_CMD, "volume = %d", val >= 0 ? val : -1);
+        CMD_OUT("volume = %d", val >= 0 ? val : -1);
+    } else if (strcmp(cmd, "ustat") == 0) {
+        ctl_uart_print_stats();
+    } else if (strcmp(cmd, "ubaud") == 0) {
+        CMD_OUT("ubaud = %d", ctl_uart_set_baud(val));
+    } else if (strcmp(cmd, "ugarb") == 0) {
+        CMD_OUT("ugarb = %d", ctl_uart_garbage(val));
     } else {
-        ESP_LOGW(TAG_CMD, "Unknown: '%s' (type 'help')", line);
+        s_cmd_unknown = true;
+        if (s_cmd_cap) CMD_OUT("Unknown: '%s'", line);
+        else ESP_LOGW(TAG_CMD, "Unknown: '%s' (type 'help')", line);
     }
 }
 
@@ -1683,11 +1745,198 @@ static void console_task(void *arg)
         if (ch == '\n' || ch == '\r') {
             if (pos > 0) {
                 line[pos] = '\0';
+                xSemaphoreTake(s_cmd_mutex, portMAX_DELAY);
                 process_cmd(line);
+                xSemaphoreGive(s_cmd_mutex);
                 pos = 0;
             }
         } else if (pos < CMD_LINE_MAX - 1) {
             line[pos++] = (char)ch;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Control UART to the ESP32-S3-ETH, docs/S3_UART.md
+// ---------------------------------------------------------------------------
+
+// Nothing here may reach the sound or the link when the other end is gone: the task sits below the audio tasks, it never
+// waits for the S3, and whatever the line carries ends in the counters. With the S3 restarting its TX pin is an input,
+// the pull-down of this board then holds our RX low, which reads as one long break.
+#define CTL_UART          UART_NUM_1
+#define CTL_PIN_TX        GPIO_NUM_14
+#define CTL_PIN_RX        GPIO_NUM_13
+#define CTL_RX_RING       2048
+#define CTL_EVENTS        16
+#define CTL_POLL_MS       100
+#define CTL_HB_MS         1000
+
+static ctl_parser_t s_ctl_parser;
+static uint8_t s_ctl_tx[CTL_MAX_FRAME];     // holds the last reply: a repeated seq is answered from here
+static size_t s_ctl_tx_reply_len;
+static uint16_t s_ctl_last_seq;
+static bool s_ctl_have_seq;
+static volatile int s_ctl_baud = CTL_BAUD_DEFAULT;
+static volatile uint32_t s_ctl_rx_bytes, s_ctl_breaks, s_ctl_frame_err, s_ctl_fifo_ovf, s_ctl_cmds, s_ctl_dups,
+    s_ctl_replies, s_ctl_hb, s_ctl_hb_acks, s_ctl_bad_type, s_ctl_tx_fail;
+
+static void ctl_uart_print_stats(void)
+{
+    ctl_parser_t *p = &s_ctl_parser;
+    CMD_OUT("ustat baud=%d rx_level=%d rx_bytes=%" PRIu32 " frames=%" PRIu32 " bad_hdr=%" PRIu32 " bad_crc=%" PRIu32
+            " trunc=%" PRIu32 " noise=%" PRIu32 " brk=%" PRIu32 " frm=%" PRIu32 " ovf=%" PRIu32 " cmds=%" PRIu32
+            " dups=%" PRIu32 " replies=%" PRIu32 " hb=%" PRIu32 " acks=%" PRIu32 " bad_type=%" PRIu32 " tx_fail=%" PRIu32,
+            s_ctl_baud, gpio_get_level(CTL_PIN_RX), s_ctl_rx_bytes, p->frames, p->bad_header, p->bad_crc, p->truncated,
+            p->noise, s_ctl_breaks, s_ctl_frame_err, s_ctl_fifo_ovf, s_ctl_cmds, s_ctl_dups, s_ctl_replies, s_ctl_hb,
+            s_ctl_hb_acks, s_ctl_bad_type, s_ctl_tx_fail);
+}
+
+static int ctl_uart_set_baud(int baud)
+{
+    if (baud >= 1200 && baud <= 921600 && uart_set_baudrate(CTL_UART, (uint32_t)baud) == ESP_OK) s_ctl_baud = baud;
+    return s_ctl_baud;
+}
+
+// Noise with many false starts of a frame, what the line may carry when this board is not itself.
+static int ctl_uart_garbage(int bytes)
+{
+    uint8_t chunk[64];
+    int left = bytes > 0 ? bytes : 0;
+    while (left > 0) {
+        esp_fill_random(chunk, sizeof(chunk));
+        chunk[10] = CTL_MAGIC0;
+        chunk[11] = CTL_MAGIC1;
+        int now = left < (int)sizeof(chunk) ? left : (int)sizeof(chunk);
+        uart_write_bytes(CTL_UART, chunk, (size_t)now);
+        left -= now;
+    }
+    return bytes;
+}
+
+static void ctl_send(const uint8_t *frame, size_t bytes)
+{
+    if (uart_write_bytes(CTL_UART, frame, bytes) != (int)bytes) s_ctl_tx_fail++;
+}
+
+static void ctl_on_command(const ctl_parser_t *p)
+{
+    uint16_t seq = ctl_frame_seq(p);
+    // A repeat means the reply got lost: the command must not run twice, a toggle would flip back.
+    if (s_ctl_have_seq && seq == s_ctl_last_seq) {
+        s_ctl_dups++;
+        ctl_send(s_ctl_tx, s_ctl_tx_reply_len);
+        return;
+    }
+    size_t len = ctl_frame_len(p);
+    const uint8_t *text = ctl_frame_payload(p);
+    char line[CMD_LINE_MAX];
+    uint8_t status = CTL_ST_OK;
+    bool valid = len > 0 && len < sizeof(line);
+    for (size_t i = 0; valid && i < len; i++) valid = text[i] >= 0x20 && text[i] < 0x7F;
+
+    xSemaphoreTake(s_cmd_mutex, portMAX_DELAY);
+    s_cmd_cap = s_cmd_cap_buf;
+    s_cmd_cap_len = 1;              // the status byte
+    s_cmd_cap_cut = false;
+    s_cmd_unknown = false;
+    if (valid) {
+        memcpy(line, text, len);
+        line[len] = '\0';
+        s_ctl_cmds++;
+        process_cmd(line);
+        status = s_cmd_unknown ? CTL_ST_UNKNOWN : CTL_ST_OK;
+    } else {
+        status = CTL_ST_BAD;
+    }
+    s_cmd_cap[0] = (char)status;
+    s_ctl_tx_reply_len = ctl_frame_build(s_ctl_tx, CTL_T_REPLY, seq, s_cmd_cap, s_cmd_cap_len);
+    s_cmd_cap = NULL;
+    xSemaphoreGive(s_cmd_mutex);
+
+    s_ctl_last_seq = seq;
+    s_ctl_have_seq = true;
+    s_ctl_replies++;
+    ctl_send(s_ctl_tx, s_ctl_tx_reply_len);
+}
+
+static void ctl_rx_bytes(size_t available)
+{
+    uint8_t chunk[64];
+    while (available) {
+        int got = uart_read_bytes(CTL_UART, chunk, available < sizeof(chunk) ? available : sizeof(chunk), 0);
+        if (got <= 0) return;
+        available -= (size_t)got;
+        s_ctl_rx_bytes += (uint32_t)got;
+        uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+        for (int i = 0; i < got; i++) {
+            if (!ctl_parser_feed(&s_ctl_parser, chunk[i], now)) continue;
+            uint8_t type = ctl_frame_type(&s_ctl_parser);
+            if (type == CTL_T_CMD) ctl_on_command(&s_ctl_parser);
+            else if (type == CTL_T_HB_ACK) s_ctl_hb_acks++;
+            else s_ctl_bad_type++;
+        }
+    }
+}
+
+static void ctl_send_heartbeat(uint16_t seq)
+{
+    // s_ctl_tx keeps the last reply for a repeat, so this frame has its own buffer.
+    uint8_t frame[CTL_HEADER_BYTES + sizeof(ctl_hb_t) + CTL_CRC_BYTES];
+    ctl_hb_t hb = {.up_s = (uint32_t)(esp_timer_get_time() / 1000000),
+                   .flags = (uint8_t)((s_slc_up ? 1 : 0) | (s_sco_active ? 2 : 0)), .tone = (uint8_t)s_tone_on};
+    ctl_send(frame, ctl_frame_build(frame, CTL_T_HB, seq, &hb, sizeof(hb)));
+    s_ctl_hb++;
+}
+
+static void ctl_uart_task(void *arg)
+{
+    QueueHandle_t events = NULL;
+    uart_config_t cfg = {
+        .baud_rate  = CTL_BAUD_DEFAULT,
+        .data_bits  = UART_DATA_8_BITS,
+        .parity     = UART_PARITY_DISABLE,
+        .stop_bits  = UART_STOP_BITS_1,
+        .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    // A missing control channel must not stop the headset: log it and let the sound go on.
+    esp_err_t err = uart_driver_install(CTL_UART, CTL_RX_RING, 0, CTL_EVENTS, &events, 0);
+    if (err == ESP_OK) err = uart_param_config(CTL_UART, &cfg);
+    if (err == ESP_OK) err = uart_set_pin(CTL_UART, CTL_PIN_TX, CTL_PIN_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG_CMD, "control UART failed: %s", esp_err_to_name(err));
+        vTaskDelete(NULL);
+    }
+    ESP_LOGI(TAG_CMD, "control UART ready");
+
+    int64_t next_hb = esp_timer_get_time();
+    uint16_t hb_seq = 0;
+    for (;;) {
+        uart_event_t ev;
+        if (xQueueReceive(events, &ev, pdMS_TO_TICKS(CTL_POLL_MS)) == pdTRUE) {
+            switch (ev.type) {
+            case UART_BREAK:
+                s_ctl_breaks++;
+                break;
+            case UART_FRAME_ERR:
+                s_ctl_frame_err++;
+                break;
+            case UART_FIFO_OVF:
+            case UART_BUFFER_FULL:
+                s_ctl_fifo_ovf++;
+                uart_flush_input(CTL_UART);
+                xQueueReset(events);
+                break;
+            default:
+                break;
+            }
+        }
+        size_t available = 0;
+        if (uart_get_buffered_data_len(CTL_UART, &available) == ESP_OK && available) ctl_rx_bytes(available);
+        int64_t now = esp_timer_get_time();
+        if (now >= next_hb) {
+            next_hb = now + CTL_HB_MS * 1000LL;
+            ctl_send_heartbeat(hb_seq++);
         }
     }
 }
@@ -1747,6 +1996,9 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Free heap: %"PRIu32" bytes", esp_get_free_heap_size());
 
+    s_cmd_mutex = xSemaphoreCreateMutex();
+    configASSERT(s_cmd_mutex);
+
     // Ring buffers — BT path
     s_rb_call_rx = xRingbufferCreate(FRAME_BYTES_MONO * RINGBUF_FRAMES,
                                      RINGBUF_TYPE_BYTEBUF);
@@ -1776,6 +2028,7 @@ void app_main(void)
     xTaskCreatePinnedToCore(i2s_tx_task,       "i2s_tx",    4096, NULL, 15, NULL, 1);
     xTaskCreatePinnedToCore(mic_rx_task,        "mic_rx",    8192, NULL, 14, NULL, 1);
     xTaskCreatePinnedToCore(console_task,       "console",   4096, NULL,  5, NULL, 1);
+    xTaskCreatePinnedToCore(ctl_uart_task,      "ctl_uart",  4096, NULL,  4, NULL, 1);
 
     ESP_LOGI(TAG, "Free heap after init: %"PRIu32" bytes", esp_get_free_heap_size());
     ESP_LOGI(TAG, "Pair Android with '%s', type 'help' in monitor for DSP control",
