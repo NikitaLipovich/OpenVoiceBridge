@@ -26,6 +26,10 @@ of this PC), wall_s (first packet to the end of the last, on the PC clock) and m
 packet), floor_rms (per channel, the 10th percentile of the 100 ms level: a voice or music leaves quiet moments, the codec
 noise seen in goal 050 #001 does not); with --forward also forward: target, forwarded, failed for each stream.
 As a module: TapRecorder(slots, forward=..., listen_only=...).start(), .stop(), .save(out_dir).
+journal_dir= writes every first copy of a packet to DIR/packets.journal as it arrives, so a dead process loses nothing that
+reached the disk: TapRecorder.from_journal(DIR).save(DIR) makes the files from it. bus_gap_s= keeps the time axis real when the
+I2S bus stops, a LyraT reset for one: the S3 sends nothing then and its frame counter stands still, so the stop is measured on
+the arrival clock and written as silence, listed in gaps and in bus_stops ([first frame, frames]).
 
 Stream names: 5004 is call.wav (phone to headphones), 5005 is mic.wav (headset mic to phone).
 A packet is [4 bytes seq, LE][3 zero bytes][1 byte frame count][mu-law, 1 byte per sample]. The board
@@ -42,6 +46,7 @@ Based on scripts/udp_capture.py. Recordings stay outside git (bench_runs).
 import argparse
 import array
 import json
+import os
 import select
 import socket
 import struct
@@ -185,6 +190,9 @@ TAP_SILENT_S = 3.0        # no stream for this long: the board may be back with 
 TAP_STREAMS = {0: "call", 1: "mic"}
 TAP_PORTS = {"call": 5004, "mic": 5005}
 MARK_EVERY = 500          # about every 7.5 s at 240 frames a packet
+JOURNAL_NAME = "packets.journal"
+JOURNAL_FLUSH_S = 1.0     # to the OS: survives this process
+JOURNAL_SYNC_S = 5.0      # to the disk: survives the PC
 FLOOR_WINDOW = RATE // 10
 MIC_FLOOR_WARN = 400.0    # a healthy mic stays near 100 in the quiet moments; the noisy periods of #001 show 450 and up
 MIC_WARNING = ("mic floor %s: steady noise on the mic line of the LyraT. It came for minutes at a time on the bench, resets "
@@ -236,6 +244,7 @@ class _TapStream:
         self.last_seq = None
         self.first_at = None
         self.last_at = None
+        self.bus_gap_s = None    # arrival time ahead of the frames by more than this: the bus stopped
 
     def add(self, data, at):
         seq, frame, boot = struct.unpack_from("<IIH", data, 4)
@@ -268,7 +277,7 @@ class _TapStream:
     def assemble(self):
         """(channels, PCM array, stats). Losses become silence, a board restart becomes the silence it took."""
         pcm = array.array("h")
-        gaps, bursts = [], []
+        gaps, bursts, bus_stops = [], [], []
         lost = ovf = send_fail = 0
         rates = []
         channels = None
@@ -290,10 +299,18 @@ class _TapStream:
                 pcm.extend([0] * (away * channels))
             expect = None
             prev_seq = None
+            prev_at = None
             for seq in seqs:
-                frame, ch, _, _, _, payload = packets[seq]
+                frame, ch, at, _, _, payload = packets[seq]
                 if ch != channels:
                     continue        # the slots were changed in flight; never mix layouts in one file
+                if self.bus_gap_s and expect is not None and prev_at is not None:
+                    stopped = int((at - prev_at - (frame - expect + SAMPLES_PER_FRAME) / RATE) * RATE)
+                    if stopped > self.bus_gap_s * RATE:
+                        gaps.append([len(pcm) // channels, stopped])
+                        bus_stops.append([len(pcm) // channels, stopped])
+                        pcm.extend([0] * (stopped * channels))
+                prev_at = at
                 if prev_seq is not None and seq != prev_seq + 1:
                     lost += seq - prev_seq - 1
                     bursts.append(seq - prev_seq - 1)
@@ -318,7 +335,7 @@ class _TapStream:
         stats = {"packets": self.packets, "unique": unique, "duplicates": self.duplicates, "reordered": self.reordered,
                  "lost_packets": lost, "loss_pct": round(100.0 * lost / (unique + lost), 3) if unique + lost else None,
                  "max_burst": max(bursts) if bursts else 0, "gap_events": len(gaps), "gaps": gaps,
-                 "boots": len(self.boots), "ovf": ovf, "send_fail": send_fail,
+                 "bus_stops": bus_stops, "boots": len(self.boots), "ovf": ovf, "send_fail": send_fail,
                  "rate_hz": round(sum(t * r for t, r in rates) / seconds, 2) if seconds else None,
                  "channels": channels, "frames": len(pcm) // (channels or 1),
                  "seconds": round(len(pcm) / (channels or 1) / RATE, 3), "floor_rms": floor_rms(pcm, channels),
@@ -329,9 +346,17 @@ class _TapStream:
 
 
 class TapRecorder:
-    def __init__(self, slots=("L", "L"), board=None, forward=None, listen_only=False, ports=None):
+    def __init__(self, slots=("L", "L"), board=None, forward=None, listen_only=False, ports=None, journal_dir=None,
+                 bus_gap_s=None):
         """forward: {"call": (host, port), "mic": (host, port)}. listen_only: never talk to the board, take what
-        arrives on ports ({"call": port, "mic": port}): the far end of someone else's forward."""
+        arrives on ports ({"call": port, "mic": port}): the far end of someone else's forward. journal_dir, bus_gap_s: see
+        the top of this file."""
+        self.journal = None
+        self.journal_error = None
+        self.journal_flushed = self.journal_synced = 0.0
+        if journal_dir:
+            Path(journal_dir).mkdir(parents=True, exist_ok=True)
+            self.journal = open(Path(journal_dir) / JOURNAL_NAME, "ab")
         self.request = ("TAP1 %s %s" % tuple(slots)).encode()
         self.board = board          # known address, or None to find it by broadcast
         self.listen_only = listen_only
@@ -357,6 +382,8 @@ class TapRecorder:
             s.setblocking(False)
             self.senders.append(s)
         self.streams = {name: _TapStream(name) for name in TAP_PORTS}
+        for stream in self.streams.values():
+            stream.bus_gap_s = bus_gap_s
         self.foreign = {name: _Stream(TAP_PORTS[name]) for name in TAP_PORTS}
         self.foreign["call"].name, self.foreign["mic"].name = "lyrat_call", "lyrat_mic"
         self.replies = 0
@@ -402,7 +429,10 @@ class TapRecorder:
                     if data[:2] == TAP_MAGIC and data[2] == TAP_VERSION and len(data) > TAP_HEADER:
                         self.board = sender[0]
                         stream = TAP_STREAMS.get(data[3], name)
-                        if self.streams[stream].add(data, now) and stream in self.forward:
+                        first = self.streams[stream].add(data, now)
+                        if first and self.journal:
+                            self._journal_add(data, now)
+                        if first and stream in self.forward:
                             self._pass_on(stream, data)
                     else:
                         self.foreign[name].add(data, now)
@@ -413,6 +443,45 @@ class TapRecorder:
                         self.board = sender[0]
                     except ValueError:
                         pass
+
+    def _journal_add(self, data, at):
+        """An error here must not stop the recording in memory: the journal only guards against a dead process."""
+        try:
+            self.journal.write(struct.pack("<dI", at, len(data)) + data)
+            if at - self.journal_flushed >= JOURNAL_FLUSH_S:
+                self.journal.flush()
+                self.journal_flushed = at
+            if at - self.journal_synced >= JOURNAL_SYNC_S:
+                os.fsync(self.journal.fileno())
+                self.journal_synced = at
+        except OSError as e:
+            self.journal_error = str(e)
+
+    @classmethod
+    def from_journal(cls, directory, bus_gap_s=None):
+        """A recorder holding what a journal has, for save(); a torn record at the end is left out. Opens no socket."""
+        self = cls.__new__(cls)
+        self.streams = {name: _TapStream(name) for name in TAP_PORTS}
+        for stream in self.streams.values():
+            stream.bus_gap_s = bus_gap_s
+        self.foreign = {}
+        self.forward = {}
+        self.requests = self.broadcasts = self.replies = 0
+        self.board_status = None
+        self.t0 = None
+        head = struct.calcsize("<dI")
+        raw = (Path(directory) / JOURNAL_NAME).read_bytes()
+        pos = 0
+        while pos + head <= len(raw):
+            at, size = struct.unpack_from("<dI", raw, pos)
+            data = raw[pos + head:pos + head + size]
+            if len(data) < size or data[:2] != TAP_MAGIC:
+                break
+            if self.t0 is None:
+                self.t0 = at
+            self.streams[TAP_STREAMS.get(data[3], "call")].add(data, at)
+            pos += head + size
+        return self
 
     def _pass_on(self, stream, data):
         """Never waits and never raises: the recording does not depend on the second consumer."""
@@ -438,6 +507,8 @@ class TapRecorder:
                 pass
         for s in list(self.socks) + self.senders + ([self.forward_sock] if self.forward_sock else []):
             s.close()
+        if self.journal:
+            self.journal.close()
         return self
 
     def recent_floor(self, name, packets=200):

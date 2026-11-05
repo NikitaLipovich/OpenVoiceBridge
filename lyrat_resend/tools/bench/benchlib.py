@@ -13,13 +13,14 @@ DEFAULT_PORT = os.environ.get("BENCH_PORT", "COM15")
 RUNS_ROOT = Path(os.environ.get("BENCH_RUNS", REPO_DIR / "goals_harness" / "bench_runs"))
 
 _MAC = re.compile(r"\b([0-9a-fA-F]{2}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2})\b")
-_PHONE = re.compile(r"\+?\d[\d\- ]{5,}\d")
+_CALLER = re.compile(r"(CLIP\S*\s*).*$")
 
 
 def redact(line: str) -> str:
     """Hide MAC prefixes and any caller number; the last two MAC octets stay for correlation."""
     if "CLIP" in line:
-        line = _PHONE.sub("<number>", line)
+        # Everything after the tag: short numbers and names are the caller's too, and a number pattern would miss them.
+        line = _CALLER.sub(lambda m: m.group(1) + "<number>", line)
     return _MAC.sub(lambda m: "xx:xx:xx:xx:%s:%s" % (m.group(5), m.group(6)), line)
 
 
