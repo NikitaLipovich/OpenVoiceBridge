@@ -275,6 +275,27 @@ void spectral_ns_set_threshold(const float *thresh_db, size_t n_bins)
     s_calibrated = 1;
 }
 
+void spectral_ns_reset(void)
+{
+    memset(s_in_ring, 0, sizeof(s_in_ring));
+    s_in_pos    = 0;
+    s_hop_count = 0;
+    s_out_count = 0;
+    memset(s_ola_buf, 0, sizeof(s_ola_buf));
+    s_ola_write = 0;
+    s_ola_read  = 0;
+    for (int i = 0; i < SNS_N_BINS; i++) s_prev_gain[i] = 1.0f;
+}
+
+void spectral_ns_reset_profile(void)
+{
+    memset(s_noise_sum_db, 0, sizeof(s_noise_sum_db));
+    memset(s_noise_sum_sq_db, 0, sizeof(s_noise_sum_sq_db));
+    s_noise_frames = 0;
+    s_calibrated   = 0;
+    spectral_ns_reset();
+}
+
 int spectral_ns_is_calibrated(void) { return s_calibrated; }
 
 void spectral_ns_set_mode(int mode)

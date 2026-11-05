@@ -3,7 +3,8 @@
 
     python btlog.py --out FILE [--seconds N] [--no-clear]
 Without --seconds it runs until killed. From Python: start_btlog(path) returns the process, stop_btlog(proc) ends it.
-Only the Bluetooth stack's own tags are kept. Nothing from telephony is kept, so no caller number can land here.
+Only the Bluetooth stack's own tags and the audio service's Bluetooth routing tags are kept.
+Nothing from telephony is kept, so no caller number can land here.
 """
 import argparse
 import ctypes
@@ -14,13 +15,16 @@ import time
 from ctypes import wintypes
 
 # Stack tags of the phone, see tools/catalogs/zui_bt_ui.md.
-KEEP = re.compile(r"\s[VDIWEF] (bt_\w+|HeadsetStateMachine)\s*:")
-MAC = re.compile(r"(?:[0-9A-Fa-f]{2}:){4}([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2})")
+KEEP = re.compile(r"\s[VDIWEF] (bt_\w+|HeadsetStateMachine|AS\.BtHelper|AS\.AudioDeviceInventory)\s*:")
+# The audio service prints addresses half masked (XX:XX:XX:aa:bb:cc): those are cut to two bytes as well.
+MAC = re.compile(r"(?:(?:[0-9A-Fa-f]{2}|XX):){4}([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2})")
 # What a series is judged by. Keep in step with the phone's library, see goal 055 DECISIONS D2.
 ENTRY_ADDED = "blacklisting device"
 ENTRY_KNOWN = "is already blacklisted for codec negotiation"
 ENTRY_USED = "disable codec negotiation for phone"
 NEGOTIATION_TIMEOUT = "bta_ag_codec_negotiation_timer_cback"
+# The audio service kept a stale SCO device and refuses the headset: no channel opens until the phone reboots (goal 057 #001).
+AUDIO_REFUSED = "setBtScoActiveDevice() failed to add new device"
 
 
 def die_with_this_process(proc):
@@ -80,7 +84,8 @@ def stop_btlog(proc):
 
 def scan(path):
     """Counts of the lines a series is judged by, and the first timestamp of an added entry."""
-    res = {"entry_added": 0, "entry_known": 0, "entry_used": 0, "first_added": None}
+    res = {"entry_added": 0, "entry_known": 0, "entry_used": 0, "first_added": None,
+           "audio_refused": 0, "first_audio_refused": None}
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -91,6 +96,9 @@ def scan(path):
                     res["entry_known"] += 1
                 elif ENTRY_USED in line:
                     res["entry_used"] += 1
+                elif AUDIO_REFUSED in line:
+                    res["audio_refused"] += 1
+                    res["first_audio_refused"] = res["first_audio_refused"] or line[:18]
     except FileNotFoundError:
         pass
     return res

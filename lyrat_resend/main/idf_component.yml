@@ -10,5 +10,8 @@ dependencies:
   ## ESP-DSP: hardware-accelerated FFT for spectral noise suppression
   espressif/esp-dsp: ">=1.4.0"
 
+  ## WebRTC noise suppression (esp_ns.h). The AFE of this component stays out of the normal build
+  espressif/esp-sr: "2.6.1"
+
   ## IDF версия
   idf: ">=5.3.0"

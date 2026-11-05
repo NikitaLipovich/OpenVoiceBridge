@@ -67,6 +67,8 @@ the same as for the streams.
 Console commands of the LyraT that belong to this channel: `ustat` (its counters), `ubaud N` (baud of its end, for the line
 check), `ugarb N` (noise toward the S3, for a test).
 
+Noise suppression of the microphone: `ns off|sns|web0|web1|web2` switches the mode with the channel open, the reply is `ns = <mode>`, status 1 for a name that does not exist. It takes effect on the next frame, with a fade of 5 ms on both sides. `status` shows `ns=<asked> applied=<running> switches=<count>` and the time of a frame. `nscal` makes `sns` take a new noise profile. `cpu` prints the load of every task since its last call. Anyone in the local network can send these, as all commands here. How to compare the modes by ear: `VOICE_CHECK.md`.
+
 ## Tools
 
 - `tools/bench/s3_uart.py`: `query`, `cmd "tone 1"`, `tx 0|1|A`, `linecheck` (both directions at 9600, GPIO1 stays an input until

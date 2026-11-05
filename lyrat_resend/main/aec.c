@@ -9,13 +9,13 @@ static int16_t      s_buf[AEC_BUF_SAMPLES];
 static uint32_t     s_write_pos = 0;
 static portMUX_TYPE s_mux       = portMUX_INITIALIZER_UNLOCKED;
 
-void aec_init(void)
+void lyrat_aec_init(void)
 {
     for (int i = 0; i < AEC_BUF_SAMPLES; i++) s_buf[i] = 0;
     s_write_pos = 0;
 }
 
-void aec_write_reference(const int16_t *samples, size_t count)
+void lyrat_aec_write_reference(const int16_t *samples, size_t count)
 {
     taskENTER_CRITICAL(&s_mux);
     for (size_t i = 0; i < count; i++) {
@@ -25,7 +25,7 @@ void aec_write_reference(const int16_t *samples, size_t count)
     taskEXIT_CRITICAL(&s_mux);
 }
 
-void aec_process(int16_t *samples, size_t count)
+void lyrat_aec_process(int16_t *samples, size_t count)
 {
     taskENTER_CRITICAL(&s_mux);
     uint32_t read_pos = (s_write_pos + AEC_BUF_SAMPLES

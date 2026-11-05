@@ -40,6 +40,12 @@ void spectral_ns_set_threshold(const float *thresh_db, size_t n_bins);
 // Process audio: input → output
 int spectral_ns_process(const int16_t *in, int16_t *out, size_t n_samples);
 
+// Forget the sound in flight, keep the profile: for a return to this mode
+void spectral_ns_reset(void);
+
+// Forget the profile too, the next frames build a new one
+void spectral_ns_reset_profile(void);
+
 // Is noise profile ready?
 int spectral_ns_is_calibrated(void);
 

@@ -23,10 +23,10 @@
 #define AEC_ALPHA_Q8       128   // 0.5 — moderate-strong cancellation
 
 // Call once at startup
-void aec_init(void);
+void lyrat_aec_init(void);
 
 // Feed reference samples (call audio going to headphones).
-void aec_write_reference(const int16_t *samples, size_t count);
+void lyrat_aec_write_reference(const int16_t *samples, size_t count);
 
 // Apply echo cancellation to mic samples in-place.
-void aec_process(int16_t *samples, size_t count);
+void lyrat_aec_process(int16_t *samples, size_t count);

@@ -1022,6 +1022,13 @@ def stage_audio(args):
         watch.close_port()
         watch.finish(0)
         return audio_no_data(args, out, "the board did not confirm vol 0")
+    # A restart brings the firmware's defaults back, so a mode under test is set here, after the boot check.
+    for cmd in args.board_cmd or []:
+        if not board_cmd(watch, cmd, cmd.split()[0] + " = "):
+            watch.close_port()
+            watch.finish(0)
+            return audio_no_data(args, out, "the board did not confirm: " + cmd)
+    boot["board_cmd"] = args.board_cmd
 
     wav = out / AUDIO_WAV
     make_tone_wav(wav)
@@ -3030,6 +3037,7 @@ def main():
     p.add_argument("--close-timeout", type=float, default=10.0)
     p.add_argument("--slc-timeout", type=float, default=30.0)
     p.add_argument("--gap", type=float, default=3.0, help="seconds between trials")
+    p.add_argument("--board-cmd", action="append", help="console command after the boot check, may repeat")
     p.add_argument("--stop-on-fail", action="store_true", help="stop at the first failed trial")
     p.add_argument("--label", default="")
     p.add_argument("--port", default=DEFAULT_PORT)

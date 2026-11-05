@@ -13,9 +13,12 @@ Variants compile bench switches through the ignored main/bench_variant.h:
   bod7     the same at level 7, about 2.80 V
   mac_b5, mac_b3, mac_b2, mac_b1   one byte of the Bluetooth address plus 1: the phone sees a new device, see goal 044 DECISIONS D7
   mac_b<I>p<N>                     byte I of the address plus N, for bench experiments that may burn an address (goal 055)
+  no_ctl_uart                      the control UART task is not started (goal 057 #004); commands through the S3 stop working
   no_first_sniff                   the board does not ask for sniff before the phone, as before goal 055: burns addresses, comparison only
   no_wbs   CONFIG_BT_HFP_WBS_ENABLE=n in sdkconfig: the phone can only choose CVSD; any other variant restores =y
   fdrop    test build: console commands fdrop P B and fdstat replace frames with a marked loss, see goal 045
+  nsinj    test build: command inj N puts a known signal in front of the microphone chain, the bus carries input and output, goal 057
+  afe      test build: noise suppression modes afe (whole ESP-SR AFE) and webo (older esp_ns call), only to compare, goal 057
 Combine with "+": no_pa+no_wbs.
 
 A flash counts as done only when esptool confirmed the hash of all three images.
@@ -43,7 +46,8 @@ MACROS = {"no_pa": ("BENCH_NO_PA", 1), "no_bt": ("BENCH_NO_BT", 1),
           # BENCH_MAC_PATCH: byte index * 256 + what to add to that byte of the address.
           "mac_b5": ("BENCH_MAC_PATCH", 5 * 256 + 1), "mac_b3": ("BENCH_MAC_PATCH", 3 * 256 + 1),
           "mac_b2": ("BENCH_MAC_PATCH", 2 * 256 + 1), "mac_b1": ("BENCH_MAC_PATCH", 1 * 256 + 1),
-          "fdrop": ("BENCH_FRAME_DROP", 1), "no_first_sniff": ("BENCH_NO_FIRST_SNIFF", 1)}
+          "fdrop": ("BENCH_FRAME_DROP", 1), "no_first_sniff": ("BENCH_NO_FIRST_SNIFF", 1),
+          "nsinj": ("BENCH_NS_INJECT", 1), "afe": ("BENCH_NS_AFE", 1), "no_ctl_uart": ("BENCH_NO_CTL_UART", 1)}
 MAC_SHIFT = re.compile(r"^mac_b([0-5])p([1-9][0-9]?)$")
 
 

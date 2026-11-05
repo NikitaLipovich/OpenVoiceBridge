@@ -107,6 +107,12 @@ def hfp_connected(dump=None):
     return False
 
 
+def audio_has_headset():
+    """The audio service's own view of the active headset, separate from the Bluetooth stack's. None if not readable."""
+    found = re.search(r"mBluetoothHeadsetDevice: (\S+)", adb("shell", "dumpsys", "audio", timeout=60))
+    return found.group(1) != "null" if found else None
+
+
 def status():
     dump = adb("shell", "dumpsys", "bluetooth_manager", timeout=60)
     bonds = bond_list(dump)
@@ -118,6 +124,8 @@ def status():
         "bt_enabled": bool(re.search(r"enabled: true", dump)),
         "bonded": is_bonded(bonds),
         "hfp_connected": hfp_connected(dump),
+        # False with hfp_connected true: the audio service refused the headset and no channel can open (goal 057 #001).
+        "audio_has_headset": audio_has_headset(),
         "bonds_total": len(bonds),
         "other_bonds": len(others(bonds)),
         "keyguard": "isKeyguardShowing=true" in win,
