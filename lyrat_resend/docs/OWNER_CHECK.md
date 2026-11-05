@@ -40,6 +40,7 @@ python lyrat_resend/tools/bench/fw.py flash --variant mac_b1
 python lyrat_resend/tools/bench/fw.py erase-bonds
 python lyrat_resend/tools/bench/phone.py forget
 python lyrat_resend/tools/bench/phone.py pair
+python lyrat_resend/tools/bench/phone.py connect
 ```
 
 Если `sco_probe` нет на телефоне: `python lyrat_resend/tools/android/build_apk.py --install`.
@@ -58,9 +59,9 @@ python lyrat_resend/tools/bench/call_record.py
 
 - `call.wav`: собеседник, то, что телефон шлёт в наушники.
 - `mic.wav`: ваш микрофон, два канала, **до** шумоподавления и Bluetooth. Собеседник слышал не это.
-- `call_summary.json`, `summary` на экране: длительность, потери, сбросы, кодек, где в файле был канал.
+- `call_summary.json` и вывод на экране, он же `output.txt`: длительность, потери, сбросы, кодек, где в файле был канал.
 
-Сброс платы или S3, пропажа порта или обрыв канала не теряют записанного: всё остаётся в файлах, время сбоя записано тишиной, итог `FAIL` называет причину. Если упала сама команда или закрыли окно:
+Сброс платы или S3 и потеря порта не теряют записанного: всё остаётся в файлах, время сбоя записано тишиной, итог `FAIL` называет причину. Обрыв канала без сброса выглядит как конец разговора: итог может быть `PASS`, смотрите длину канала в сводке. Если упала сама команда или закрыли окно:
 
 ```
 python lyrat_resend/tools/bench/call_record.py --recover goals_harness/bench_runs/call/<время>
