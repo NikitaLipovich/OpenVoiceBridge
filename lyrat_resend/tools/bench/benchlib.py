@@ -7,8 +7,9 @@ from datetime import datetime
 from pathlib import Path
 
 BENCH_DIR = Path(__file__).resolve().parent
-FW_DIR = BENCH_DIR.parents[1]                 # lyrat_resend/
-REPO_DIR = FW_DIR.parent
+# BENCH_FW_DIR: build and flash another checkout of the firmware, e.g. an old commit (goal 062). Runs stay in this repo.
+FW_DIR = Path(os.environ.get("BENCH_FW_DIR", BENCH_DIR.parents[1]))   # lyrat_resend/
+REPO_DIR = BENCH_DIR.parents[2]
 DEFAULT_PORT = os.environ.get("BENCH_PORT", "COM15")
 RUNS_ROOT = Path(os.environ.get("BENCH_RUNS", REPO_DIR / "goals_harness" / "bench_runs"))
 

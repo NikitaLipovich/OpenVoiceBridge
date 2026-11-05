@@ -1458,6 +1458,16 @@ static esp_err_t bt_init(void)
     esp_bluedroid_config_t bd_cfg = BT_BLUEDROID_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_bluedroid_init_with_cfg(&bd_cfg));
     ESP_ERROR_CHECK(esp_bluedroid_enable());
+#ifdef BENCH_BREDR_POWER
+    // Bench only: fixed BR/EDR transmit power, level 0 is -12 dBm, level 7 is +9 dBm, goal 062. The stack's default is 0...+3 dBm.
+    ESP_ERROR_CHECK(esp_bredr_tx_power_set((esp_power_level_t)BENCH_BREDR_POWER, (esp_power_level_t)BENCH_BREDR_POWER));
+    {
+        esp_power_level_t bredr_min, bredr_max;
+        if (esp_bredr_tx_power_get(&bredr_min, &bredr_max) == ESP_OK) {
+            ESP_LOGI(TAG_BT, "BREDR tx power min=%d max=%d", bredr_min, bredr_max);
+        }
+    }
+#endif
 
     ESP_ERROR_CHECK(esp_bt_gap_set_device_name(BT_DEVICE_NAME));
     link_power_init();
