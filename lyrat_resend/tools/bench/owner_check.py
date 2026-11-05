@@ -610,7 +610,7 @@ def step_rehearsal(args):
         rnd.adb("shell", "rm", "-f", rnd.SCO_DIR + "/" + rnd.RECORD_WAV)
     passed = sum(1 for r in rows if r["result"] == PASS)
     step.num("Попытки", "%d из %d" % (passed, args.n))
-    step.num("Длительность файла минус канал и хвост, с", [r["duration_error_s"] for r in rows])
+    step.num("Файл минус часы ПК, с", [r["duration_error_s"] for r in rows])
     step.num("Тоны в call.wav, минимум дБ", [r["tones_min_db"] for r in rows])
     outcome = oc.worst_of(results)
     if outcome == PASS:

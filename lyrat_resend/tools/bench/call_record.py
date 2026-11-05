@@ -223,8 +223,9 @@ class CallRecording:
         return self.watch.sco_open if self.watch and self.watch.sp is not None else None
 
     def channel_now(self):
-        votes = [v for v in (self.console_says(), self.s3.says_open()) if v is not None]
-        return any(votes) if votes else None
+        # The console is immediate; the heartbeat is up to 2 s old, so it speaks only when the console cannot.
+        console = self.console_says()
+        return console if console is not None else self.s3.says_open()
 
     def _note(self, kind, now):
         texts = {"console_reset": "LyraT перезагрузилась (консоль)", "lyrat_reset": "LyraT перезагрузилась (сердцебиение через S3)",
