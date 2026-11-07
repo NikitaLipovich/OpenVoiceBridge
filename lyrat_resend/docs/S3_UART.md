@@ -21,7 +21,7 @@ Code: `main/ctl_frame.h`, used by both firmwares. Little endian.
 | Offset | Field |
 |---|---|
 | 0 | `A5 5A` |
-| 2 | type: 1 command, 2 reply, 3 heartbeat, 4 heartbeat ack, 5 log, 6 OTA request, 7 OTA reply (5-7: `OTA.md`) |
+| 2 | type: 1 command, 2 reply, 3 heartbeat, 4 heartbeat ack, 5 log, 6 OTA request, 7 OTA reply (5-7: `OTA.md`), 8 mode, 9 mode ack (reserved for R21: `PLATFORM_OTA.md`) |
 | 3 | u16 seq |
 | 5 | u16 payload length, at most 1024 |
 | 7 | xor of bytes 2 to 6 |

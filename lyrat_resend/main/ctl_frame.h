@@ -30,6 +30,8 @@ typedef enum {
     CTL_T_LOG = 5,      // LyraT to S3: log records of dbg_log.h, docs/OTA.md
     CTL_T_OTA = 6,      // S3 to LyraT: an ota_link request, docs/OTA.md
     CTL_T_OTA_ACK = 7,  // LyraT to S3: an ota_link reply
+    CTL_T_MODE = 8,     // reserved for R21 (goal 095): relay to node, u8 mode, u8 flags, ...; not implemented yet
+    CTL_T_MODE_ACK = 9, // reserved for R21: node to relay, u8 status (0 ok, 2 unsupported), u8 mode
 } ctl_type_t;
 
 typedef enum {

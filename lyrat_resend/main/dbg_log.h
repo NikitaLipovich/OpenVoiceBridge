@@ -20,6 +20,10 @@
 
 #define DBG_BOARD_S3     0
 #define DBG_BOARD_LYRAT  1
+#define DBG_BOARD_U3     2        // platform of goal 095: relay
+#define DBG_BOARD_U1     3        // HF to the phone
+#define DBG_BOARD_U2     4        // AG to the BT headphones
+#define DBG_BOARD_CON    0x80     // | board: a line of that board's UART0 console, read by the relay
 #define DBG_REC_HDR      18
 #define DBG_TEXT_MAX     160
 #define DBG_UDP_PORT     5008

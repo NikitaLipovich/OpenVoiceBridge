@@ -10,6 +10,9 @@ PC <-UDP 5008 (log)------- S3 <-UART1 frame 5 (log)-------- LyraT
 PC --UDP 5008 (LOG1/LOG0)> S3 --heartbeat ack (on, level)--> LyraT
 ```
 
+The platform of variant D (U1, U2 through U3 over Wi-Fi, ROM loader, three-board log) uses the same protocol:
+`PLATFORM_OTA.md`.
+
 Code: `main/ota_link.[ch]` (image protocol, both ends), `main/ota_sha256.[ch]`, `main/dbg_log.[ch]` (log ring and record),
 `main/ctl_frame.h` (UART frame). These files are plain C without platform calls: both firmwares build them, and the PC
 tests build the same files with MSVC (goal 090 sandbox). The transport and the flash are behind function tables, so a

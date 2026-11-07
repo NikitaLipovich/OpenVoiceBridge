@@ -1,0 +1,17 @@
+LIBRARY plathost
+EXPORTS
+    rom_err_name
+    rom_phase_name
+    rom_bundle_err_name
+    rom_bundle_parse
+    host_rom_new
+    host_rom_set
+    host_rom_info
+    host_rom_flash
+    host_rom_sync
+    host_rom_md5
+    host_rom_enter
+    host_rom_reset
+    host_bundle_new
+    host_bundle_info
+    host_free

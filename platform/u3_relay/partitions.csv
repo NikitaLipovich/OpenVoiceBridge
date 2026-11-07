@@ -1,0 +1,10 @@
+# U3, 16 MB: two app slots with rollback, and a staging area per node for its app or its ROM bundle (goal 095, D7).
+# 0xA20000-0xFFFFFF stays free for recordings (R20/R21).
+# Name,   Type, SubType, Offset,   Size
+nvs,      data, nvs,     0x9000,   0x6000,
+otadata,  data, ota,     0xF000,   0x2000,
+phy_init, data, phy,     0x11000,  0x1000,
+ota_0,    app,  ota_0,   0x20000,  0x300000,
+ota_1,    app,  ota_1,   0x320000, 0x300000,
+u1_img,   data, 0x40,    0x620000, 0x200000,
+u2_img,   data, 0x40,    0x820000, 0x200000,

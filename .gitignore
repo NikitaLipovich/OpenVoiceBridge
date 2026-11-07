@@ -37,3 +37,5 @@ goals_harness/
 old_version/main/wifi_secrets.h
 # OTA token of the S3 (docs/OTA.md): never in the public repo
 s3_eth_bridge/main/ota_secrets.h
+# Wi-Fi and OTA token of U3, platform of goal 095 (docs/PLATFORM_OTA.md)
+platform/u3_relay/main/plat_secrets.h

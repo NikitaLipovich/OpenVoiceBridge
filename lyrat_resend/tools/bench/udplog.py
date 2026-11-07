@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Debug log of both boards over UDP: the S3's own lines and the LyraT's through the S3. Protocol: docs/OTA.md, "Debug log".
+"""Debug log over UDP: the S3's own lines and the LyraT's through the S3 (docs/OTA.md, "Debug log"), or on the variant D
+platform U3's own lines and those of U1 and U2 through U3, their control-frame logs and their UART0 consoles
+(docs/PLATFORM_OTA.md; goal 095).
 
-  udplog.py [--seconds N] [--host ADDR] [--port 5008] [--s3-level 3] [--lyrat-level 3]
-            [--board s3|lyrat|all] [--level E|W|I|D|V] [--grep RE] [--echo] [--label NAME]
+  udplog.py [--seconds N] [--host ADDR] [--port 5008] [--s3-level 3] [--lyrat-level 3] [--u2-level 3]
+            [--board s3|lyrat|u3|u1|u2|u1con|u2con|all] [--level E|W|I|D|V] [--grep RE] [--echo] [--label NAME]
 
-Asks the S3 with "LOG1 <s3_level> <lyrat_level>" every 2 s and stops it with "LOG0" at the end; without --seconds it runs
-until Ctrl+C. The lines that pass the filter go to goals_harness/bench_runs/udplog/<stamp>/udplog.log, MAC prefixes hidden;
+Asks the relay with "LOG1 <s3|u3 level> <lyrat|u1 level> <u2 level>" every 2 s (an S3 reads the first two) and stops it
+with "LOG0" at the end; without --seconds it runs until Ctrl+C. --u3-level and --u1-level are other names of --s3-level
+and --lyrat-level. The address: --host, else BENCH_S3_ADDR / BENCH_U3_ADDR, else the S3 found by broadcast, else U3. The lines that pass the filter go to goals_harness/bench_runs/udplog/<stamp>/udplog.log, MAC prefixes hidden;
 the counters of all lines go to summary.json: per board lines, restarts (a new boot id), lost on the board (its own
 counter) and lost on the way (the rest of the gaps in the line numbers), duplicates. Levels: 0 none, 1 E, 2 W, 3 I, 4 D, 5 V.
 Exit code: 0 lines came, 1 none came, 2 S3 not found.
@@ -29,7 +32,7 @@ from benchlib import redact, run_dir, write_json  # noqa: E402
 LOG_PORT = 5008
 REC_HDR = 18
 UDP_VERSION = 1
-BOARD_NAMES = {0: "s3", 1: "lyrat"}
+BOARD_NAMES = {0: "s3", 1: "lyrat", 2: "u3", 3: "u1", 4: "u2", 0x83: "u1con", 0x84: "u2con"}
 LEVELS = {"N": 0, "E": 1, "W": 2, "I": 3, "D": 4, "V": 5}
 LEVEL_CHARS = "-EWIDV"
 LEASE_REPEAT_S = 2.0
@@ -103,7 +106,8 @@ def level_value(text):
 
 
 def make_filter(board=None, level=None, grep=None):
-    want_board = {"s3": 0, "lyrat": 1}.get(board) if board and board != "all" else None
+    names = {v: k for k, v in BOARD_NAMES.items()}
+    want_board = names.get(board) if board and board != "all" else None
     max_level = level_value(level)
     rx = re.compile(grep) if grep else None
 
@@ -127,9 +131,10 @@ def main(argv=None):
     ap.add_argument("--seconds", type=float, default=0.0)
     ap.add_argument("--host")
     ap.add_argument("--port", type=int, default=LOG_PORT)
-    ap.add_argument("--s3-level", default="3")
-    ap.add_argument("--lyrat-level", default="3")
-    ap.add_argument("--board", choices=["s3", "lyrat", "all"], default="all")
+    ap.add_argument("--s3-level", "--u3-level", dest="s3_level", default="3")
+    ap.add_argument("--lyrat-level", "--u1-level", dest="lyrat_level", default="3")
+    ap.add_argument("--u2-level", default=None, help="default: the level of U1")
+    ap.add_argument("--board", choices=["all"] + sorted(BOARD_NAMES.values()), default="all")
     ap.add_argument("--level", help="show lines up to this level: E, W, I, D, V")
     ap.add_argument("--grep")
     ap.add_argument("--echo", action="store_true", help="also print the lines")
@@ -137,12 +142,16 @@ def main(argv=None):
     ap.add_argument("--out", help="directory instead of bench_runs/udplog/<stamp>")
     args = ap.parse_args(argv)
 
-    host = args.host or os.environ.get("BENCH_S3_ADDR")
+    host = args.host or os.environ.get("BENCH_S3_ADDR") or os.environ.get("BENCH_U3_ADDR")
     if not host:
         from ota import find_host
         host = find_host(argparse.Namespace(host=None))
     if not host:
-        print("S3 not found", file=sys.stderr)
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "platform"))
+        from platform_ota import find_u3
+        host = find_u3()
+    if not host:
+        print("S3 / U3 not found", file=sys.stderr)
         return 2
     out = Path(args.out) if args.out else run_dir("udplog", args.label)
     out.mkdir(parents=True, exist_ok=True)
@@ -150,7 +159,8 @@ def main(argv=None):
     tracker = Tracker()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("", 0))
-    request = ("LOG1 %d %d" % (level_value(args.s3_level), level_value(args.lyrat_level))).encode()
+    u2 = level_value(args.u2_level) if args.u2_level is not None else level_value(args.lyrat_level)
+    request = ("LOG1 %d %d %d" % (level_value(args.s3_level), level_value(args.lyrat_level), u2)).encode()
     t0 = time.monotonic()
     next_ask = 0.0
     datagrams = written = 0
@@ -205,7 +215,7 @@ def main(argv=None):
         sock.close()
     summary = {"seconds": round(time.monotonic() - t0, 1), "datagrams": datagrams, "written": written,
                "filter": {"board": args.board, "level": args.level, "grep": args.grep},
-               "boards": tracker.summary(), "s3": s3_state}
+               "boards": tracker.summary(), "s3": s3_state, "relay": s3_state}
     write_json(out / "summary.json", summary)
     print(json.dumps({"out": str(out), "boards": summary["boards"]}))
     return 0 if datagrams else 1
