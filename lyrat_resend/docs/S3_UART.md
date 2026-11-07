@@ -21,7 +21,7 @@ Code: `main/ctl_frame.h`, used by both firmwares. Little endian.
 | Offset | Field |
 |---|---|
 | 0 | `A5 5A` |
-| 2 | type: 1 command, 2 reply, 3 heartbeat, 4 heartbeat ack |
+| 2 | type: 1 command, 2 reply, 3 heartbeat, 4 heartbeat ack, 5 log, 6 OTA request, 7 OTA reply (5-7: `OTA.md`) |
 | 3 | u16 seq |
 | 5 | u16 payload length, at most 1024 |
 | 7 | xor of bytes 2 to 6 |
@@ -37,7 +37,7 @@ of the console. Peer addresses are left out of the reply, since it leaves the bo
 the same seq is not run again: the LyraT answers from its copy of the last reply. Without this a repeat after a lost reply
 would flip a toggle such as `hpf` back.
 
-The LyraT sends a heartbeat every second, payload: u32 uptime in seconds, u8 flags (bit 0 SLC, bit 1 SCO), u8 tone.
+The LyraT sends a heartbeat every second, payload: u32 uptime in seconds, u8 flags (bit 0 SLC, bit 1 SCO), u8 tone. The ack of the S3 carries u8 log on, u8 log level since goal 090 (empty before): whether the LyraT sends its log, see `OTA.md`.
 
 ## Who drives GPIO1
 

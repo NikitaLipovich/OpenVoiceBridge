@@ -12,7 +12,8 @@
  *   5. AEC              — acoustic echo cancellation
  *   6. Soft limiter     — anti-clip on call audio path
  *
- * Commands also come from the ESP32-S3-ETH over a framed UART, docs/S3_UART.md.
+ * Commands also come from the ESP32-S3-ETH over a framed UART, docs/S3_UART.md. New firmware and the log for the PC go
+ * the same way (lyrat_ota.c, lyrat_dbglog.c, docs/OTA.md); this board has no Wi-Fi.
  * UART console (type in idf.py monitor):
  *   help, status, hpf 0/1, notch 0/1, wiener 0/1, gate 0/1,
  *   aec 0/1, limiter 0/1, mic_gain N, call_gain N
@@ -58,6 +59,7 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "ctl_frame.h"
+#include "lyrat_link.h"
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 
@@ -1639,6 +1641,8 @@ static void print_help(void)
     CMD_OUT("  ustat  — counters of the control UART to the S3");
     CMD_OUT("  ubaud N — baud rate of that UART, for the line check");
     CMD_OUT("  ugarb N — N bytes of noise onto that UART, for the test of the S3's parser");
+    CMD_OUT("  ota    — running image, its state, the receiver of new firmware");
+    CMD_OUT("  ulog   — the log ring for the PC: listener, level, lines dropped");
     CMD_OUT("  all    — ALL DSP on/off");
     CMD_OUT("  s      — Status");
     CMD_OUT("  h|?    — This help");
@@ -1806,6 +1810,14 @@ static void process_cmd(char *line)
         CMD_OUT("ubaud = %d", ctl_uart_set_baud(val));
     } else if (strcmp(cmd, "ugarb") == 0) {
         CMD_OUT("ugarb = %d", ctl_uart_garbage(val));
+    } else if (strcmp(cmd, "ota") == 0) {
+        char text[300];
+        lyrat_ota_status(text, sizeof(text));
+        CMD_OUT("%s", text);
+    } else if (strcmp(cmd, "ulog") == 0) {
+        char text[160];
+        lyrat_log_status(text, sizeof(text));
+        CMD_OUT("%s", text);
     } else {
         s_cmd_unknown = true;
         if (s_cmd_cap) CMD_OUT("Unknown: '%s'", line);
@@ -1860,7 +1872,7 @@ static void console_task(void *arg)
 #define CTL_UART          UART_NUM_1
 #define CTL_PIN_TX        GPIO_NUM_14
 #define CTL_PIN_RX        GPIO_NUM_13
-#define CTL_RX_RING       2048
+#define CTL_RX_RING       4096      // two image chunks of the S3's window, docs/OTA.md
 #define CTL_EVENTS        16
 #define CTL_POLL_MS       100
 #define CTL_HB_MS         1000
@@ -1965,9 +1977,16 @@ static void ctl_rx_bytes(size_t available)
         for (int i = 0; i < got; i++) {
             if (!ctl_parser_feed(&s_ctl_parser, chunk[i], now)) continue;
             uint8_t type = ctl_frame_type(&s_ctl_parser);
-            if (type == CTL_T_CMD) ctl_on_command(&s_ctl_parser);
-            else if (type == CTL_T_HB_ACK) s_ctl_hb_acks++;
-            else s_ctl_bad_type++;
+            if (type == CTL_T_CMD) {
+                ctl_on_command(&s_ctl_parser);
+            } else if (type == CTL_T_HB_ACK) {
+                s_ctl_hb_acks++;
+                lyrat_log_on_ack(ctl_frame_payload(&s_ctl_parser), ctl_frame_len(&s_ctl_parser));
+            } else if (type == CTL_T_OTA) {
+                lyrat_ota_request(ctl_frame_payload(&s_ctl_parser), ctl_frame_len(&s_ctl_parser));
+            } else {
+                s_ctl_bad_type++;
+            }
         }
     }
 }
@@ -1981,6 +2000,28 @@ static void ctl_send_heartbeat(uint16_t seq)
     ctl_send(frame, ctl_frame_build(frame, CTL_T_HB, seq, &hb, sizeof(hb)));
     s_ctl_hb++;
 }
+
+// What the OTA and log modules need of this file, lyrat_link.h.
+static volatile bool s_bt_ready;
+bool lyrat_sco_active(void) { return s_sco_active; }
+bool lyrat_slc_up(void) { return s_slc_up; }
+bool lyrat_bt_ready(void) { return s_bt_ready; }
+uint32_t lyrat_s3_acks(void) { return s_ctl_hb_acks; }
+uint32_t lyrat_ctl_frames(void) { return s_ctl_parser.frames; }
+#define LINK_PAYLOAD_MAX 640       // log frames (600) and OTA replies (256): the buffer is on the caller's stack
+void lyrat_ctl_send(uint8_t type, const void *payload, size_t len)
+{
+    // Not s_ctl_tx: it keeps the last reply for a repeat. One write per frame, the driver keeps it whole.
+    uint8_t frame[CTL_HEADER_BYTES + LINK_PAYLOAD_MAX + CTL_CRC_BYTES];
+    if (len > LINK_PAYLOAD_MAX) {
+        s_ctl_tx_fail++;
+        return;
+    }
+    ctl_send(frame, ctl_frame_build(frame, type, 0, payload, len));
+}
+int lyrat_ctl_get_baud(void) { return s_ctl_baud; }
+int lyrat_ctl_set_baud(int baud) { return ctl_uart_set_baud(baud); }
+void lyrat_ctl_wait_tx(void) { uart_wait_tx_done(CTL_UART, pdMS_TO_TICKS(200)); }
 
 static void ctl_uart_task(void *arg)
 {
@@ -2027,6 +2068,7 @@ static void ctl_uart_task(void *arg)
         }
         size_t available = 0;
         if (uart_get_buffered_data_len(CTL_UART, &available) == ESP_OK && available) ctl_rx_bytes(available);
+        lyrat_log_drain();
         int64_t now = esp_timer_get_time();
         if (now >= next_hb) {
             next_hb = now + CTL_HB_MS * 1000LL;
@@ -2075,6 +2117,7 @@ void app_main(void)
     };
     brownout_hal_config(&bod);
 #endif
+    lyrat_log_init((uint16_t)esp_random());    // from here every log line also waits in the ring for the PC
     esp_reset_reason_t reset_reason = esp_reset_reason();
     ESP_LOGI(TAG, "BOOT reset_reason=%s code=%d", reset_reason_name(reset_reason), (int)reset_reason);
     ESP_LOGI(TAG, "=== LyraT Phone Stream — All Phases ===");
@@ -2117,14 +2160,17 @@ void app_main(void)
     ESP_LOGW(TAG, "BENCH: Bluetooth disabled");
 #else
     ESP_ERROR_CHECK(bt_init());
+    s_bt_ready = true;
 #endif
+    lyrat_ota_init();
 
     // Tasks on Core 1 (Core 0 = BT stack)
     xTaskCreatePinnedToCore(i2s_tx_task,       "i2s_tx",    4096, NULL, 15, NULL, 1);
     xTaskCreatePinnedToCore(mic_rx_task,        "mic_rx",    8192, NULL, 14, NULL, 1);
     xTaskCreatePinnedToCore(console_task,       "console",   4096, NULL,  5, NULL, 1);
 #ifndef BENCH_NO_CTL_UART  // goal 057 #004: measures the link without this task
-    xTaskCreatePinnedToCore(ctl_uart_task,      "ctl_uart",  4096, NULL,  4, NULL, 1);
+    // 5 KB: it also drains the log ring and answers "ota" (goal 090); nothing of it is audio.
+    xTaskCreatePinnedToCore(ctl_uart_task,      "ctl_uart",  5120, NULL,  4, NULL, 1);
 #endif
 
     ESP_LOGI(TAG, "Free heap after init: %"PRIu32" bytes", esp_get_free_heap_size());

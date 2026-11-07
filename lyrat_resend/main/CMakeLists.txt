@@ -1,4 +1,5 @@
 idf_component_register(SRCS "voice_ns.c" "main.c" "aec.c" "spectral_ns.c" "msbc_codec.c" "plc.c" "link_power.c" "voice_ns.c"
+                         "ota_link.c" "ota_sha256.c" "dbg_log.c" "lyrat_ota.c" "lyrat_dbglog.c"
                     INCLUDE_DIRS "."
                     REQUIRES
                         nvs_flash
@@ -6,6 +7,9 @@ idf_component_register(SRCS "voice_ns.c" "main.c" "aec.c" "spectral_ns.c" "msbc_
                         driver
                         esp_timer
                         heap
+                        app_update
+                        esp_app_format
+                        log
 )
 
 # The SBC code is compiled inside the bt component as long as A2DP keeps its internal codec. Its headers are private

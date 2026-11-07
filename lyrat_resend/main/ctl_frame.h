@@ -26,7 +26,10 @@ typedef enum {
     CTL_T_CMD = 1,      // S3 to LyraT: payload is a console command
     CTL_T_REPLY = 2,    // LyraT to S3: same seq, payload is a status byte and the text of the command
     CTL_T_HB = 3,       // LyraT to S3 every second, see ctl_hb_t
-    CTL_T_HB_ACK = 4,   // S3 to LyraT: same seq
+    CTL_T_HB_ACK = 4,   // S3 to LyraT: same seq; payload u8 log on, u8 log level (none from an S3 before goal 090)
+    CTL_T_LOG = 5,      // LyraT to S3: log records of dbg_log.h, docs/OTA.md
+    CTL_T_OTA = 6,      // S3 to LyraT: an ota_link request, docs/OTA.md
+    CTL_T_OTA_ACK = 7,  // LyraT to S3: an ota_link reply
 } ctl_type_t;
 
 typedef enum {
@@ -35,11 +38,20 @@ typedef enum {
     CTL_ST_BAD = 2,       // not text, or too long for the console
 } ctl_status_t;
 
-typedef struct __attribute__((packed)) {
+#ifdef _MSC_VER                // the PC tests build this header with MSVC
+#pragma pack(push, 1)
+#define CTL_PACKED
+#else
+#define CTL_PACKED __attribute__((packed))
+#endif
+typedef struct CTL_PACKED {
     uint32_t up_s;
     uint8_t flags;        // bit 0 SLC up, bit 1 SCO active
     uint8_t tone;
 } ctl_hb_t;
+#ifdef _MSC_VER
+#pragma pack(pop)
+#endif
 
 typedef struct {
     uint8_t buf[CTL_MAX_FRAME];

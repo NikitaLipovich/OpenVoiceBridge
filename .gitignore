@@ -35,3 +35,5 @@ Thumbs.db
 # goal-extruder harness (local only)
 goals_harness/
 old_version/main/wifi_secrets.h
+# OTA token of the S3 (docs/OTA.md): never in the public repo
+s3_eth_bridge/main/ota_secrets.h

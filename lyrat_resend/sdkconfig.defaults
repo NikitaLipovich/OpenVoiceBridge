@@ -56,10 +56,14 @@ CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 # ── Flash и таблица разделов ─────────────────────────────────────────────────
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 
-# Кастомная таблица разделов: nvs(24K) + phy(4K) + factory(3MB)
-# Нужна т.к. BT стек требует > 1MB app-раздела
+# Partitions: nvs (24K, same place as before), otadata, phy, two app slots of 1984K for updates through the S3 with
+# rollback (docs/OTA.md). The old table with one factory slot is partitions_bt_sink_example.csv.
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_bt_sink_example.csv"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_ota.csv"
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# With rollback the bootloader at INFO leaves 2 % of its 28K before the table; WARN leaves 10 % (goal 090 #001).
+# The bench reads only the ROM's "rst:" lines, not the bootloader's.
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
 
 # PHY: the radio start pulled the chip supply below 2.8 V at 20 dBm (goal 010 RESULTS). The cap also
 # bounds the start calibration, which runs without Wi-Fi too, so it stays. See goal 044 for the sag now.

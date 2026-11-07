@@ -11,6 +11,9 @@
 // 5005 (mic), until no request came for LEASE_MS or "TAP0" arrives. <call> and <mic> pick the slots: L, R or
 // LR. Each request is answered on its source port with one line of JSON counters.
 //
+// Updates over the network (UDP 5007, also of the LyraT through the UART) and the debug log of both boards (UDP 5008):
+// s3_ota.c and s3_dbglog.c, docs/OTA.md.
+//
 // Control channel on the same port, answered on the source port of the request:
 //   UC <seq> <command>   relay one console command; the answer is "UR <seq> <status>\n<text>", the frame's own status
 //                        or 3 when the TX is off. The PC repeats on a timeout with the same seq, the LyraT then answers
@@ -45,11 +48,14 @@
 #include "ctl_frame.h"
 #include "esp_random.h"
 #include "esp_check.h"
+#include "esp_app_desc.h"
 #include "esp_eth.h"
 #include "esp_event.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
+#include "nvs_flash.h"
+#include "s3_link.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -126,7 +132,9 @@ static uint16_t s_boot_id;
 static volatile bool s_pins_ok;
 
 static volatile bool s_link_up;
+static volatile bool s_got_ip;
 static volatile bool s_eth_ok;
+static esp_err_t s_i2s_call_err = ESP_FAIL, s_i2s_mic_err = ESP_FAIL, s_uart_err = ESP_FAIL;
 static char s_ip[16] = "-";
 
 static SemaphoreHandle_t s_tx_lock;    // the state of the TX pin and pins_check() must see each other whole
@@ -320,9 +328,16 @@ static void ctl_on_frame(const ctl_parser_t *p)
             s_have_hb = true;
         }
         if (s_tx_on) {
-            uint8_t frame[CTL_HEADER_BYTES + CTL_CRC_BYTES];
-            uart_write_bytes(CTL_UART, frame, ctl_frame_build(frame, CTL_T_HB_ACK, ctl_frame_seq(p), NULL, 0));
+            // The ack carries whether the LyraT sends its log, and at which level.
+            uint8_t ctl[2];
+            uint8_t frame[CTL_HEADER_BYTES + sizeof(ctl) + CTL_CRC_BYTES];
+            size_t n = s3_log_lyrat_ctl(ctl);
+            uart_write_bytes(CTL_UART, frame, ctl_frame_build(frame, CTL_T_HB_ACK, ctl_frame_seq(p), ctl, n));
         }
+    } else if (type == CTL_T_LOG) {
+        s3_log_relay(ctl_frame_payload(p), ctl_frame_len(p));
+    } else if (type == CTL_T_OTA_ACK) {
+        s3_ota_on_lyrat_reply(ctl_frame_payload(p), ctl_frame_len(p));
     }
 }
 
@@ -361,6 +376,39 @@ static esp_err_t ctl_uart_init(void)
     ESP_RETURN_ON_ERROR(uart_set_pin(CTL_UART, UART_PIN_NO_CHANGE, PIN_UART_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE),
                         TAG, "uart pins");
     return ESP_OK;
+}
+
+bool s3_uart_tx_on(void) { return s_tx_on; }
+int s3_uart_get_baud(void) { return s_ctl_baud; }
+uint16_t s3_boot_id(void) { return s_boot_id; }
+
+int s3_uart_set_baud(int baud)
+{
+    if (baud >= 1200 && baud <= 921600 && uart_set_baudrate(CTL_UART, (uint32_t)baud) == ESP_OK) s_ctl_baud = baud;
+    return s_ctl_baud;
+}
+
+bool s3_uart_send(uint8_t type, const void *payload, size_t len)
+{
+    static uint16_t seq;
+    uint8_t frame[CTL_MAX_FRAME];
+    if (!s_tx_on || len > CTL_MAX_PAYLOAD) return false;
+    size_t n = ctl_frame_build(frame, type, seq++, payload, len);
+    // One write per frame: the driver's lock keeps frames of different tasks whole.
+    return uart_write_bytes(CTL_UART, frame, n) == (int)n;
+}
+
+void s3_health(s3_health_t *h)
+{
+    h->eth_ok = s_eth_ok;
+    h->got_ip = s_got_ip;
+    h->i2s_call_ok = s_i2s_call_err == ESP_OK;
+    h->i2s_mic_ok = s_i2s_mic_err == ESP_OK;
+    h->uart_ok = s_uart_err == ESP_OK;
+    h->call_frames = s_call.total_frames;
+    h->mic_frames = s_mic.total_frames;
+    h->uart_rx_bytes = s_ctl_rx_bytes;
+    h->uart_frames = s_ctl_parser.frames;
 }
 
 static int hex_value(char c)
@@ -412,9 +460,7 @@ static bool ctl_request(char *text, int n, const struct sockaddr_in *from, sockl
         else if (text[3] == 'A') s_tx_mode = TX_MODE_AUTO;
         len = snprintf(reply, sizeof(reply), "UT %d", s_tx_mode);
     } else if (strncmp(text, "UB ", 3) == 0) {
-        int baud = atoi(text + 3);
-        if (baud >= 1200 && baud <= 921600 && uart_set_baudrate(CTL_UART, (uint32_t)baud) == ESP_OK) s_ctl_baud = baud;
-        len = snprintf(reply, sizeof(reply), "UB %d", s_ctl_baud);
+        len = snprintf(reply, sizeof(reply), "UB %d", s3_uart_set_baud(atoi(text + 3)));
     } else if (strcmp(text, "UQ") == 0) {
         int64_t now = esp_timer_get_time();
         len = snprintf(reply, sizeof(reply),
@@ -497,6 +543,7 @@ static void on_eth_event(void *arg, esp_event_base_t base, int32_t id, void *dat
         ESP_LOGI(TAG, "ethernet link up");
     } else if (id == ETHERNET_EVENT_DISCONNECTED) {
         s_link_up = false;
+        s_got_ip = false;
         strcpy(s_ip, "-");
         ESP_LOGW(TAG, "ethernet link down");
     }
@@ -506,6 +553,7 @@ static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     const ip_event_got_ip_t *e = data;
     snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&e->ip_info.ip));
+    s_got_ip = true;
     ESP_LOGI(TAG, "ethernet ip %s", s_ip);
 }
 
@@ -559,14 +607,14 @@ static esp_err_t ethernet_init(void)
     return esp_eth_start(eth);
 }
 
-static void report(listener_t *l, uint32_t dt_ms)
+static int report(listener_t *l, uint32_t dt_ms, char *out, size_t cap)
 {
     uint32_t frames = l->frames;
     l->frames = 0;
     int peak_l = l->peak_l, peak_r = l->peak_r;
     l->peak_l = 0;
     l->peak_r = 0;
-    printf(" %s rate=%" PRIu32 " peak=%d/%d", l->name, frames * 1000 / dt_ms, peak_l, peak_r);
+    return snprintf(out, cap, " %s rate=%" PRIu32 " peak=%d/%d", l->name, frames * 1000 / dt_ms, peak_l, peak_r);
 }
 
 void app_main(void)
@@ -576,9 +624,19 @@ void app_main(void)
     configASSERT(s_tx_lock && s_peer_lock);
     pins_to_safe_inputs();
     s_boot_id = (uint16_t)esp_random();
+    s3_log_init(s_boot_id);     // from here every log line also waits in the ring for the PC
+
+    esp_err_t nvs = nvs_flash_init();
+    if (nvs == ESP_ERR_NVS_NO_FREE_PAGES || nvs == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        nvs = nvs_flash_init();
+    }
+    if (nvs != ESP_OK) ESP_LOGE(TAG, "nvs: %s", esp_err_to_name(nvs));
 
     esp_err_t a = listener_init(&s_call, I2S_NUM_0, PIN_I2S_DSDIN);
     esp_err_t b = listener_init(&s_mic, I2S_NUM_1, PIN_I2S_ASDOUT);
+    s_i2s_call_err = a;
+    s_i2s_mic_err = b;
     if (a == ESP_OK) xTaskCreatePinnedToCore(listener_task, "i2s_call", 4096, &s_call, 10, NULL, 1);
     if (b == ESP_OK) xTaskCreatePinnedToCore(listener_task, "i2s_mic", 4096, &s_mic, 10, NULL, 1);
 
@@ -587,13 +645,18 @@ void app_main(void)
     if (!s_eth_ok) ESP_LOGE(TAG, "ethernet init failed: %s", esp_err_to_name(e));
 
     esp_err_t u = ctl_uart_init();
+    s_uart_err = u;
     if (u != ESP_OK) ESP_LOGE(TAG, "uart init failed: %s", esp_err_to_name(u));
     s_pins_ok = pins_check();
     if (s_eth_ok) xTaskCreatePinnedToCore(request_task, "tap_req", 4096, NULL, 5, NULL, 0);
     if (u == ESP_OK) xTaskCreatePinnedToCore(ctl_uart_task, "ctl_uart", 4096, NULL, 5, NULL, 0);
+    // The self-test runs without the network too: a new image without Ethernet must roll back.
+    s3_ota_start(s_eth_ok);
+    if (s_eth_ok) s3_log_start();
 
-    printf("s3eth stage3 i2s0=%s i2s1=%s eth=%s uart=%s pins_ok=%d\n", esp_err_to_name(a), esp_err_to_name(b),
-           esp_err_to_name(e), esp_err_to_name(u), s_pins_ok);
+    const esp_app_desc_t *app = esp_app_get_description();
+    s3_log_line("s3eth stage3 i2s0=%s i2s1=%s eth=%s uart=%s pins_ok=%d ver=%s", esp_err_to_name(a),
+                esp_err_to_name(b), esp_err_to_name(e), esp_err_to_name(u), s_pins_ok, app->version);
 
     int64_t last = esp_timer_get_time();
     for (;;) {
@@ -601,17 +664,21 @@ void app_main(void)
         int64_t now = esp_timer_get_time();
         uint32_t dt_ms = (uint32_t)((now - last) / 1000);
         last = now;
-        printf("stat up=%" PRIu32 " eth=%s link=%d ip=%s", (uint32_t)(now / 1000000), s_eth_ok ? "ok" : "fail",
-               s_link_up, s_ip);
-        report(&s_call, dt_ms);
-        report(&s_mic, dt_ms);
+        // The same text as before on the console (s3.py parse_stat), new fields only at the end; it also goes to the log.
+        static char line[512];
+        int n = snprintf(line, sizeof(line), "stat up=%" PRIu32 " eth=%s link=%d ip=%s", (uint32_t)(now / 1000000),
+                         s_eth_ok ? "ok" : "fail", s_link_up, s_ip);
+        n += report(&s_call, dt_ms, line + n, sizeof(line) - n);
+        n += report(&s_mic, dt_ms, line + n, sizeof(line) - n);
         s_pins_ok = pins_check();
         bool streaming = s_dest_ip && now < s_lease_until_us;
-        printf(" timeouts=%" PRIu32 "/%" PRIu32 " ovf=%" PRIu32 "/%" PRIu32 " send_fail=%" PRIu32 "/%" PRIu32
-               " sent=%" PRIu32 "/%" PRIu32 " streaming=%d pins_ok=%d uart tx=%d rx=%" PRIu32 " frames=%" PRIu32
-               " bad=%" PRIu32 "/%" PRIu32 "\n",
-               s_call.timeouts, s_mic.timeouts, s_call.overflows, s_mic.overflows, s_call.send_fail, s_mic.send_fail,
-               s_call.sent, s_mic.sent, streaming, s_pins_ok, s_tx_on, s_ctl_rx_bytes, s_ctl_parser.frames,
-               s_ctl_parser.bad_header, s_ctl_parser.bad_crc);
+        snprintf(line + n, sizeof(line) - n,
+                 " timeouts=%" PRIu32 "/%" PRIu32 " ovf=%" PRIu32 "/%" PRIu32 " send_fail=%" PRIu32 "/%" PRIu32
+                 " sent=%" PRIu32 "/%" PRIu32 " streaming=%d pins_ok=%d uart tx=%d rx=%" PRIu32 " frames=%" PRIu32
+                 " bad=%" PRIu32 "/%" PRIu32 " lrelay_lost=%" PRIu32 " selftest=%s",
+                 s_call.timeouts, s_mic.timeouts, s_call.overflows, s_mic.overflows, s_call.send_fail, s_mic.send_fail,
+                 s_call.sent, s_mic.sent, streaming, s_pins_ok, s_tx_on, s_ctl_rx_bytes, s_ctl_parser.frames,
+                 s_ctl_parser.bad_header, s_ctl_parser.bad_crc, s3_log_relay_lost(), s3_ota_selftest_name());
+        s3_log_line("%s", line);
     }
 }
