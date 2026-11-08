@@ -1,7 +1,7 @@
-"""Tests of the platform's ROM flasher (rom_flasher.c) and bundle check (rom_bundle.c) against rom_emu.py. Goal 095.
+"""Tests of the platform's ROM flasher (rom_flasher.c) and bundle check (rom_bundle.c) against rom_emu.py. Goal 510.
 
   build_host.cmd, then: python test_rom.py [-v]
-Images: the real builds of u1_hf and u2_ag (env PLAT_BUILDS, default the sandbox of goal 095: <dir>/u1_hf-cur,
+Images: the real builds of u1_hf and u2_ag (env PLAT_BUILDS, default the sandbox of goal 510: <dir>/u1_hf-cur,
 <dir>/u2_ag-cur); without them a synthetic bundle of the same shape is used and the test says so.
 """
 import json
@@ -18,7 +18,7 @@ import rombundle as RB  # noqa: E402
 import romhost as H  # noqa: E402
 
 REPO = HERE.parents[2]
-BUILDS = Path(os.environ.get("PLAT_BUILDS", REPO / "goals_harness" / "phone-then-pc" / "095-platform-ota-relay" /
+BUILDS = Path(os.environ.get("PLAT_BUILDS", REPO / "goals_harness" / "phone-then-pc" / "510-platform-ota-relay" /
                              "sandbox" / "build"))
 RESULTS = {}
 

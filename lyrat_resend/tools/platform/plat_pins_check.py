@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pins of the firmware against the wire table of goal 068 (variant D: U1, U2, U3). Goal 095.
+"""Pins of the firmware against the wire table of goal 508 (variant D: U1, U2, U3). Goal 510.
 
   plat_pins_check.py [--header platform/components/plat_core/include/plat_pins.h] [--wires .../asm_data.py] [--mutate]
 
@@ -27,7 +27,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 HEADER = REPO / "platform" / "components" / "plat_core" / "include" / "plat_pins.h"
-WIRES = REPO / "goals_harness" / "phone-then-pc" / "068-node-placement" / "sandbox" / "scripts" / "asm_data.py"
+WIRES = REPO / "goals_harness" / "phone-then-pc" / "508-node-placement" / "sandbox" / "scripts" / "asm_data.py"
 U3_SRC = REPO / "platform" / "u3_relay" / "main"
 BOARDS = ("U1", "U2", "U3")
 

@@ -1,7 +1,7 @@
-"""platform_ota.py and udplog.py against u3_emu.py (goal 095). Based on lyrat_resend/tools/ota_test/test_tools.py.
+"""platform_ota.py and udplog.py against u3_emu.py (goal 510). Based on lyrat_resend/tools/ota_test/test_tools.py.
 
   build_host.cmd here and in ../ota_test, then: python test_platform_tools.py [-v]
-Images: env PLAT_BUILDS (default the sandbox of goal 095) with u3_relay-cur/, u1_hf-cur/, u2_ag-cur/ of idf.py builds.
+Images: env PLAT_BUILDS (default the sandbox of goal 510) with u3_relay-cur/, u1_hf-cur/, u2_ag-cur/ of idf.py builds.
 """
 import json
 import os
@@ -14,7 +14,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
-BUILDS = Path(os.environ.get("PLAT_BUILDS", REPO / "goals_harness" / "phone-then-pc" / "095-platform-ota-relay" /
+BUILDS = Path(os.environ.get("PLAT_BUILDS", REPO / "goals_harness" / "phone-then-pc" / "510-platform-ota-relay" /
                              "sandbox" / "build"))
 U3 = BUILDS / "u3_relay-cur" / "u3_relay.bin"
 U1 = BUILDS / "u1_hf-cur"
@@ -71,7 +71,7 @@ def ota_tool(*args):
 
 
 @unittest.skipUnless(U3.exists() and (U1 / "flasher_args.json").exists() and (U2 / "flasher_args.json").exists(),
-                     "builds of goal 095 missing: set PLAT_BUILDS")
+                     "builds of goal 510 missing: set PLAT_BUILDS")
 class Tools(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -181,7 +181,7 @@ class Tools(unittest.TestCase):
         self.assertTrue(kept and all(" u2 " in x for x in kept))
 
 
-@unittest.skipUnless(U3.exists() and (U1 / "flasher_args.json").exists(), "builds of goal 095 missing")
+@unittest.skipUnless(U3.exists() and (U1 / "flasher_args.json").exists(), "builds of goal 510 missing")
 class RomFaults(unittest.TestCase):
     """The ROM job through U3 with a line cut for 3 s in the middle, and a node whose IO0 is not wired."""
 
@@ -208,7 +208,7 @@ class RomFaults(unittest.TestCase):
         self.assertEqual(rom["err"], "sync")
 
 
-@unittest.skipUnless((U1 / "u1_hf.bin").exists() and U3.exists(), "builds of goal 095 missing")
+@unittest.skipUnless((U1 / "u1_hf.bin").exists() and U3.exists(), "builds of goal 510 missing")
 class LinkFaults(unittest.TestCase):
     """The app of U1 through U3 over a control UART with bit errors: lost frames are sent again (go-back-N)."""
 

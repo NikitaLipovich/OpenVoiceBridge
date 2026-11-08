@@ -1,6 +1,6 @@
 # Platform of variant D: updates and logs of U1, U2, U3
 
-Three controllers (goal 095; boards and wires: goals 066-068). Code in `platform/`, built without the boards; nothing here
+Three controllers (goal 510; boards and wires: goals 066-068). Code in `platform/`, built without the boards; nothing here
 has run on hardware yet. The image protocol, the log record and the UART frame are those of goal 090 (`docs/OTA.md`):
 this file only says what is new.
 
@@ -24,8 +24,8 @@ PC <-Wi-Fi UDP 5008 (log)------------------- U3 <-C1/C2 frame 5 (log records)-- 
 ## Pins
 
 One source: `platform/components/plat_core/include/plat_pins.h`, a table of every wire end with the wire name of the
-goal 068 table. `lyrat_resend/tools/platform/plat_pins_check.py --mutate` compares it with
-`goals_harness/.../068-node-placement/sandbox/scripts/asm_data.py` both ways, checks the pin rules of both chips and R13
+goal 508 table. `lyrat_resend/tools/platform/plat_pins_check.py --mutate` compares it with
+`goals_harness/.../508-node-placement/sandbox/scripts/asm_data.py` both ways, checks the pin rules of both chips and R13
 in the code of U3. Change a pin in both places.
 
 | U3 GPIO | Signal | To | Use |
@@ -56,7 +56,7 @@ restart or an update of U3 does not reset U1 or U2.
 
 The flash size of the WROVER boards is not stated by the seller: 4 MB is the smallest module and works on all. A board
 with more flash still uses 4 MB until the table changes. Image limit: 85 % of a slot, U1/U2 1 684 KB, U3 2 611 KB.
-At goal 095: U1 and U2 skeletons 244 496 B (12 %), U3 407 968 B (13 %); the full HF firmware of the LyraT is 1.27 MB (64 %).
+At goal 510: U1 and U2 skeletons 244 496 B (12 %), U3 407 968 B (13 %); the full HF firmware of the LyraT is 1.27 MB (64 %).
 
 All three build with `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`. Self-test of a new image, within 90 s:
 
@@ -111,7 +111,7 @@ The job (`u3_ota.c` rom task, `u3_port.c` port):
 6. Always at the end: IO0 released, EN pulsed: the node starts from its flash; TX back to input, the console back.
    Then U3 waits up to 60 s for the node's first frame: `done`, or `no_link` (written and checked, but the app is silent).
 
-Time at 115200 for a skeleton bundle (282 KB): about 29 s plus the erase; at 460800 about 9 s (emulator, goal 095).
+Time at 115200 for a skeleton bundle (282 KB): about 29 s plus the erase; at 460800 about 9 s (emulator, goal 510).
 A 1.3 MB app: about 2.5 min at 115200, 40 s at 460800.
 
 ## Log of three boards
@@ -136,7 +136,7 @@ Board numbers 0 and 1 (S3-ETH, LyraT) are those of the bench of direction 2: `ud
 
 ## Room for the modes of R21
 
-Not implemented in goal 095, only the place:
+Not implemented in goal 510, only the place:
 
 - UART frame types `CTL_T_MODE = 8` (U3 to a node: `u8 mode, u8 flags`, more may follow) and `CTL_T_MODE_ACK = 9` (node
   to U3: `u8 status, u8 mode`; status 0 ok, 2 unsupported) in `ctl_frame.h`. The skeletons answer every MODE with
@@ -171,6 +171,6 @@ Not implemented in goal 095, only the place:
 `test_rom.py` (the C flasher against `rom_emu.py`, an emulator of the ESP32 ROM with virtual time: download mode by IO0 at
 EN, SLIP, erase, NOR writes, MD5; faults: lost SYNCs, cut line, corrupt byte, lost answer, bit flip, stuck baud, other chip,
 slow erase), `test_platform_tools.py` (`platform_ota.py` and `udplog.py` against `u3_emu.py`, whose receivers, sender,
-frames and log rings are the C of goal 090 and whose ROM jobs are the C of goal 095), `plat_pins_check.py --mutate`.
+frames and log rings are the C of goal 090 and whose ROM jobs are the C of goal 510), `plat_pins_check.py --mutate`.
 Not covered there: the ESP-IDF glue of `u3_*.c` and `node_link.c` (drivers, `esp_ota_*`, Wi-Fi, sockets, tasks); it is
 built and read only, and rewritten in Python in the emulator.

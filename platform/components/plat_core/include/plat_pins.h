@@ -1,5 +1,5 @@
-// Pins of the three boards of variant D (goal 095), from the wire table of goal 068
-// (goals_harness/phone-then-pc/068-node-placement/sandbox/scripts/asm_data.py, list W) and goal 066 REPORT §4.
+// Pins of the three boards of variant D (goal 510), from the wire table of goal 508
+// (goals_harness/phone-then-pc/508-node-placement/sandbox/scripts/asm_data.py, list W) and goal 506 REPORT §4.
 //
 //   U1  ESP32-WROVER DevKitC     HF to the phone (I2S master)
 //   U2  ESP32-WROVER DevKitC     HFP AG to the Bluetooth headphones
