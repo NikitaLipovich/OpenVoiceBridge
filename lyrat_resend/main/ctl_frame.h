@@ -95,6 +95,21 @@ static inline size_t ctl_frame_build(uint8_t *out, uint8_t type, uint16_t seq, c
     return CTL_HEADER_BYTES + len + CTL_CRC_BYTES;
 }
 
+// After a header that failed its check: a real frame may have begun inside the bytes already taken (garbage holding
+// "A5 5A" right before it), so start again from the next magic among them instead of dropping them all.
+static inline void ctl_parser_resync(ctl_parser_t *p)
+{
+    size_t keep = 0;
+    for (size_t i = 1; i < p->pos; i++) {
+        if (p->buf[i] == CTL_MAGIC0 && (i + 1 == p->pos || p->buf[i + 1] == CTL_MAGIC1)) {
+            keep = p->pos - i;
+            memmove(p->buf, p->buf + i, keep);
+            break;
+        }
+    }
+    p->pos = keep;
+}
+
 // Feeds one byte; true when p->buf holds a whole valid frame.
 static inline bool ctl_parser_feed(ctl_parser_t *p, uint8_t byte, uint32_t now_ms)
 {
@@ -124,7 +139,7 @@ static inline bool ctl_parser_feed(ctl_parser_t *p, uint8_t byte, uint32_t now_m
         size_t len = (size_t)p->buf[5] | ((size_t)p->buf[6] << 8);
         if (ctl_header_check(p->buf) != byte || len > CTL_MAX_PAYLOAD) {
             p->bad_header++;
-            p->pos = 0;
+            ctl_parser_resync(p);
             return false;
         }
         p->need = CTL_HEADER_BYTES + len + CTL_CRC_BYTES;
