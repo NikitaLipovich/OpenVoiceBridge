@@ -44,6 +44,7 @@ lib.ota_tx_on_reply.argtypes = [C.c_void_p, C.c_char_p, C.c_size_t, C.c_uint32]
 lib.host_ring_new.argtypes = [C.c_uint32, C.c_uint8, C.c_uint16]
 lib.host_ring_log.argtypes = [C.c_void_p, C.c_uint32, C.c_char_p]
 lib.host_ring_info.argtypes = [C.c_void_p, C.c_void_p]
+lib.dbg_ring_push_long.argtypes = [C.c_void_p, C.c_uint32, C.c_char_p, C.c_size_t]
 lib.dbg_ring_pack.argtypes = [C.c_void_p, C.c_void_p, C.c_size_t, C.c_void_p]
 lib.dbg_ring_push_record.argtypes = [C.c_void_p, C.c_char_p, C.c_size_t, C.POINTER(C.c_size_t)]
 lib.dbg_line_level.argtypes = [C.c_char_p, C.c_size_t]
@@ -314,6 +315,11 @@ class Ring:
 
     def log(self, t_ms, line: str):
         return lib.host_ring_log(self.r, t_ms, line.encode("utf-8"))
+
+    def log_long(self, t_ms, line: str):
+        """s3_log_line() of the S3: a line longer than a slot as several records; returns how many."""
+        b = line.encode("utf-8")
+        return lib.dbg_ring_push_long(self.r, t_ms, b, len(b))
 
     def push_record(self, rec: bytes):
         used = C.c_size_t(0)

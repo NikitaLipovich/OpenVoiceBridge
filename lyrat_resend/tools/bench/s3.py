@@ -28,9 +28,18 @@ from serial_watch import SerialWatch  # noqa: E402
 S3_VID = 0x303A
 S3_DIR = REPO_DIR / "s3_eth_bridge"
 FLASH_IMAGES = 3
-STAT = re.compile(r"stat up=(\d+) eth=(\w+) link=(\d) ip=(\S+) dsdin rate=(\d+) peak=(\d+)/(\d+) "
-                  r"asdout rate=(\d+) peak=(\d+)/(\d+) timeouts=(\d+)/(\d+) ovf=(\d+)/(\d+) "
-                  r"send_fail=(\d+)/(\d+) sent=(\d+)/(\d+) streaming=(\d) pins_ok=(\d)")
+STAT = re.compile(r"stat up=(\d+) eth=(\w+) link=(\d) ip=(\S+)")
+# The fields after the head, each found on its own: a line from an older firmware lacks the newer ones, and an older S3
+# cut the line at 159 characters in its UDP log (goal 092 #002). Pairs are call/mic.
+STAT_FIELDS = (
+    ("dsdin_rate", r" dsdin rate=(\d+)", int), ("dsdin_peak", r" dsdin rate=\d+ peak=(\d+)/(\d+)", int),
+    ("asdout_rate", r" asdout rate=(\d+)", int), ("asdout_peak", r" asdout rate=\d+ peak=(\d+)/(\d+)", int),
+    ("timeouts", r" timeouts=(\d+)/(\d+)", int), ("ovf", r" ovf=(\d+)/(\d+)", int),
+    ("send_fail", r" send_fail=(\d+)/(\d+)", int), ("sent", r" sent=(\d+)/(\d+)", int),
+    ("streaming", r" streaming=(\d)\b", int), ("pins_ok", r" pins_ok=(\d)\b", int),
+    ("uart_tx", r" uart tx=(\d)\b", int), ("uart_rx", r" uart tx=\d rx=(\d+)", int), ("frames", r" frames=(\d+)", int),
+    ("bad", r" bad=(\d+)/(\d+)", int), ("lrelay_lost", r" lrelay_lost=(\d+)", int), ("selftest", r" selftest=(\w+)", str),
+    ("net", r" net=(\w+)", str), ("rssi", r" rssi=(-?\d+)", int))
 
 
 def find_port():
@@ -64,15 +73,20 @@ def restart(w):
 
 
 def parse_stat(line):
+    """The S3's stat line (console, or udplog.py with its parts joined) as a dict; None when it is not one. Fields the line
+    does not carry are left out; ip is not kept. Since goal 092 also uart_tx, uart_rx, frames, bad, lrelay_lost, selftest,
+    net (wifi or eth) and rssi (dBm, 0 without Wi-Fi)."""
     m = STAT.search(line)
     if not m:
         return None
-    g = m.groups()
-    return {"up": int(g[0]), "eth": g[1], "link": int(g[2]), "dsdin_rate": int(g[4]),
-            "dsdin_peak": [int(g[5]), int(g[6])], "asdout_rate": int(g[7]), "asdout_peak": [int(g[8]), int(g[9])],
-            "timeouts": [int(g[10]), int(g[11])], "ovf": [int(g[12]), int(g[13])],
-            "send_fail": [int(g[14]), int(g[15])], "sent": [int(g[16]), int(g[17])],
-            "streaming": int(g[18]), "pins_ok": int(g[19])}
+    out = {"up": int(m.group(1)), "eth": m.group(2), "link": int(m.group(3))}
+    rest = line[m.end():]
+    for name, rx, kind in STAT_FIELDS:
+        f = re.search(rx, rest)
+        if f:
+            values = [kind(v) for v in f.groups()]
+            out[name] = values if len(values) > 1 else values[0]
+    return out
 
 
 def build():

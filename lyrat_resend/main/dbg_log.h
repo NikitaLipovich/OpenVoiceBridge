@@ -62,6 +62,10 @@ void dbg_ring_init(dbg_ring_t *r, dbg_slot_t *slots, uint32_t n, uint8_t board, 
 dbg_slot_t *dbg_ring_reserve(dbg_ring_t *r, uint32_t t_ms);
 void dbg_ring_commit(dbg_ring_t *r, dbg_slot_t *s, int formatted_len);
 int dbg_ring_push(dbg_ring_t *r, uint32_t t_ms, const char *text, size_t len);
+// A line longer than a slot as several records, cut at spaces; each record after the first starts with DBG_CONT.
+// Returns the records written (fewer when the ring filled up: the rest is counted as lost).
+#define DBG_CONT "+ "
+int dbg_ring_push_long(dbg_ring_t *r, uint32_t t_ms, const char *text, size_t len);
 
 // A record made elsewhere (the LyraT's, relayed by the S3) keeps its own board, number and counters. 0 when it does not
 // parse, -1 when the ring was full.

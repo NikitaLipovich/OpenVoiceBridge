@@ -26,6 +26,7 @@ EXPORTS
     dbg_ring_commit
     dbg_ring_push
     dbg_ring_push_record
+    dbg_ring_push_long
     dbg_ring_pack
     dbg_ring_pending
     dbg_rec_encode

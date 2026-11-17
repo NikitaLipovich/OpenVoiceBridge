@@ -45,19 +45,21 @@ static bool listening(void)
     return s_lease_until_us && esp_timer_get_time() < s_lease_until_us;
 }
 
+// Only app_main calls this (the boot line and the stat line every STATUS_MS), so one static buffer serves: the stat line
+// is longer than a ring slot and the main task's stack is small.
 void s3_log_line(const char *fmt, ...)
 {
-    char line[DBG_TEXT_MAX];
+    static char line[512];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(line, sizeof(line), fmt, ap);
     va_end(ap);
-    // The console sees the whole line, the ring keeps what fits.
-    va_start(ap, fmt);
-    vprintf(fmt, ap);
-    va_end(ap);
-    printf("\n");
-    if (n > 0) dbg_ring_push(&s_own, (uint32_t)(esp_timer_get_time() / 1000), line, (size_t)n);
+    if (n < 0) return;
+    if ((size_t)n >= sizeof(line)) n = sizeof(line) - 1;
+    printf("%s\n", line);
+    // A line longer than a slot goes as several records, "+ " before each one after the first; udplog.py joins them.
+    // Over Wi-Fi this log is the only way to see the stat line, so it must arrive whole (goal 092 #002).
+    dbg_ring_push_long(&s_own, (uint32_t)(esp_timer_get_time() / 1000), line, (size_t)n);
 }
 
 void s3_log_relay(const uint8_t *payload, size_t len)

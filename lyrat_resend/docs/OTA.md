@@ -66,7 +66,7 @@ only after its self-test; until then any restart, crash or watchdog brings the o
 
 | Board | Self-test, within 90 s of the start |
 |---|---|
-| S3-ETH | Ethernet has an IP address; both I2S channels run; the control UART is installed. The LyraT is alive (a valid frame came) and then both I2S lines delivered samples, or the LyraT is silent: no byte on the line at all. Bytes without a valid frame fail. |
+| S3-ETH | The network has an IP address (Wi-Fi, or Ethernet in a build with `S3_NET_ETH=1`); both I2S channels run; the control UART is installed. The LyraT is alive (a valid frame came) and then both I2S lines delivered samples, or the LyraT is silent: no byte on the line at all. Bytes without a valid frame fail. |
 | LyraT | The Bluetooth stack came up (`bt_init` returned); a valid frame from the S3 came over the UART. |
 
 A failed self-test calls `esp_ota_mark_app_invalid_rollback_and_reboot()`. The LyraT does not restart during a call: when
@@ -194,6 +194,11 @@ oldest lines stay, so the lines of the start, before any network, wait in the ri
 Record (the same in a UART frame and in a UDP datagram): `0 u8 board (0 S3, 1 LyraT), 1 u8 level (1 E .. 5 V, 0 other),
 2 u16 boot id, 4 u32 line number since boot, 8 u32 ms since boot, 12 u32 lines dropped on the board so far, 16 u16 length,
 18 text`. UDP datagram: `"UL", u8 version 1, u8 count`, then records, at most 1400 bytes.
+
+A line longer than a slot is cut to 159 characters ending in `~`, except the S3's own lines of `s3_log_line()` (its `stat`
+line every 2 s): they go as several records cut at spaces, each after the first starting with `+ ` and with the next line
+number (`dbg_ring_push_long`). `udplog.py` joins them back into one line. Without USB this log is the only place the
+`stat` line is seen, with `selftest=`, `net=` and `rssi=` at its end (goal 092 #002).
 
 Losses: a gap in the line numbers of one board whose `dropped` grew by the same count was lost on the board; the rest of
 the gap was lost on the way (UDP, or the S3's relay ring, counted in its `stat` line as `lrelay_lost`). A new boot id is a

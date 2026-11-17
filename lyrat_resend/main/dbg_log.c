@@ -118,6 +118,39 @@ int dbg_ring_push(dbg_ring_t *r, uint32_t t_ms, const char *text, size_t len)
     return 1;
 }
 
+int dbg_ring_push_long(dbg_ring_t *r, uint32_t t_ms, const char *text, size_t len)
+{
+    const size_t cont = sizeof(DBG_CONT) - 1;
+    int records = 0;
+    size_t at = 0;
+    while (at < len) {
+        size_t room = DBG_TEXT_MAX - 1 - (records ? cont : 0);
+        size_t take = len - at;
+        if (take > room) {
+            take = room;        // no space in the second half: cut inside a word
+            for (size_t i = room; i > room / 2; i--) {
+                if (text[at + i] == ' ') {
+                    take = i;
+                    break;
+                }
+            }
+        }
+        dbg_slot_t *s = dbg_ring_reserve(r, t_ms);
+        if (!s) return records;
+        size_t w = 0;
+        if (records) {
+            memcpy(s->text, DBG_CONT, cont);
+            w = cont;
+        }
+        memcpy(s->text + w, text + at, take);
+        dbg_ring_commit(r, s, (int)(w + take));
+        records++;
+        at += take;
+        while (at < len && text[at] == ' ') at++;
+    }
+    return records;
+}
+
 static uint16_t get16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static uint32_t get32(const uint8_t *p)
 {

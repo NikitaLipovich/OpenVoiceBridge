@@ -13,7 +13,8 @@ the counters of all lines go to summary.json: per board lines, restarts (a new b
 counter) and lost on the way (the rest of the gaps in the line numbers), duplicates. Levels: 0 none, 1 E, 2 W, 3 I, 4 D, 5 V.
 Exit code: 0 lines came, 1 none came, 2 S3 not found.
 
-As a module: parse_datagram(), parse_records(), Tracker, format_line(), LEVELS.
+A line longer than a record slot comes as several records, the later ones starting with "+ " (the S3's stat line):
+they are written as one line again. As a module: parse_datagram(), parse_records(), Tracker, Joiner, format_line(), LEVELS.
 """
 import argparse
 import json
@@ -36,6 +37,7 @@ BOARD_NAMES = {0: "s3", 1: "lyrat", 2: "u3", 3: "u1", 4: "u2", 0x83: "u1con", 0x
 LEVELS = {"N": 0, "E": 1, "W": 2, "I": 3, "D": 4, "V": 5}
 LEVEL_CHARS = "-EWIDV"
 LEASE_REPEAT_S = 2.0
+CONT = "+ "             # DBG_CONT of dbg_log.h: a record that continues the line before it (dbg_ring_push_long)
 
 
 def parse_records(data: bytes):
@@ -96,6 +98,28 @@ def format_line(rec, pc_time=None):
     board = BOARD_NAMES.get(rec["board"], "b%d" % rec["board"])
     stamp = (pc_time or datetime.now()).strftime("%H:%M:%S.%f")[:-3]
     return "%s %-5s %9.3f %s" % (stamp, board, rec["t_ms"] / 1000.0, rec["text"])
+
+
+class Joiner:
+    """Puts the records of one long line back together: a record whose text starts with CONT and that follows the line
+    before it (same board and boot, next line number) is added to it. feed() returns the lines that are complete."""
+
+    def __init__(self):
+        self.held = None
+
+    def feed(self, rec):
+        h = self.held
+        if h and rec["text"].startswith(CONT) and rec["board"] == h["board"] and rec["boot"] == h["boot"] \
+                and rec["seq"] == h["last_seq"] + 1:
+            h["text"] += " " + rec["text"][len(CONT):]
+            h["last_seq"] = rec["seq"]
+            return []
+        self.held = dict(rec, last_seq=rec["seq"])
+        return [h] if h else []
+
+    def flush(self):
+        h, self.held = self.held, None
+        return [h] if h else []
 
 
 def level_value(text):
@@ -165,6 +189,17 @@ def main(argv=None):
     next_ask = 0.0
     datagrams = written = 0
     s3_state = None
+    joiner = Joiner()
+
+    def write(f, rec):
+        if not keep(rec):
+            return 0
+        line = redact(format_line(rec))
+        f.write(line + "\n")
+        if args.echo:
+            print(line, flush=True)
+        return 1
+
     try:
         with open(out / "udplog.log", "w", encoding="utf-8") as f:
             while not args.seconds or time.monotonic() - t0 < args.seconds:
@@ -199,12 +234,10 @@ def main(argv=None):
                 datagrams += 1
                 for rec in recs:
                     tracker.add(rec)
-                    if keep(rec):
-                        line = redact(format_line(rec))
-                        f.write(line + "\n")
-                        written += 1
-                        if args.echo:
-                            print(line, flush=True)
+                    for whole in joiner.feed(rec):
+                        written += write(f, whole)
+            for whole in joiner.flush():
+                written += write(f, whole)
     except KeyboardInterrupt:
         pass
     finally:
