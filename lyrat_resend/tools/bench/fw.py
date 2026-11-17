@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
-"""Build and flash the LyraT firmware, and erase the bond memory only.
+"""Build and flash the bench firmwares, and erase the bond memory only. Over the network by default (goal 093).
 
-  fw.py build [--variant NAME]
-  fw.py flash [--variant NAME] [--retries N]   builds first, retries when the port drops
-  fw.py erase-bonds [--retries N]              erases the nvs partition, nothing else
+  fw.py build [--variant NAME] [--board lyrat|s3|both]
+  fw.py flash [--variant NAME] [--board lyrat|s3|both]   builds first, then ota.py over Wi-Fi through the S3
+  fw.py flash --image FILE [--board lyrat|s3]           a ready image over the network, no build
+  fw.py erase-bonds                                      the LyraT forgets its bonds and peer list, then restarts
+  ... --usb [--port COM15] [--retries N]                 the same over USB as before: idf.py flash, esptool erase_region
+
+Over the network: flash runs `ota.py lyrat|s3 build/<image>` (the LyraT with --force: the update is taken during a link
+to the phone, its restart still waits for the end of a call), result and exit code are those of ota.py (0 done, 1 refused
+or failed, 2 S3 not found, 3 rolled back, 4 timeout); erase-bonds sends the console commands "unpair" and "reboot" through
+the S3 and waits for the LyraT to come back. Over USB (--usb or --port, or BENCH_USB=1): idf.py flash with retries,
+esptool erase_region of the nvs partition, as before goal 093.
 
 Variants compile bench switches through the ignored main/bench_variant.h:
   base     normal firmware
@@ -25,7 +33,8 @@ Variants compile bench switches through the ignored main/bench_variant.h:
   afe      test build: noise suppression modes afe (whole ESP-SR AFE) and webo (older esp_ns call), only to compare, goal 057
 Combine with "+": no_pa+no_wbs.
 
-A flash counts as done only when esptool confirmed the hash of all three images.
+Over USB a flash counts as done only when esptool confirmed the hash of all three images (four with otadata, see
+first_flash.py); over the network only when ota.py saw the new image running and valid (ELF SHA-256).
 
 Environment: IDF_PATH (default C:\\esp\\v5.5.2\\esp-idf), IDF_TOOLS_PATH (default C:\\Espressif),
 BENCH_PORT (default COM15). Exit code other than 0 means a real failure. erase_flash is never used.
@@ -66,6 +75,31 @@ def macro_of(name: str):
         return (BENCH_NUMBER_MACROS[number.group(1)], int(value[1:], 16) if value[0] == "x" else int(value))
     shift = MAC_SHIFT.match(name)
     return ("BENCH_MAC_PATCH", int(shift.group(1)) * 256 + int(shift.group(2))) if shift else MACROS.get(name)
+
+
+def current_variant(header: Path = None, sdkconfig: Path = None) -> str:
+    """The variant the working tree is built with, from bench_variant.h (and sdkconfig for no_wbs): what a new build
+    must keep, the Bluetooth address of mac_b1 above all, or the phone loses its pairing. "base" when nothing is set."""
+    header = header or VARIANT_H
+    sdkconfig = sdkconfig or SDKCONFIG
+    names = []
+    text = header.read_text(encoding="utf-8") if header.exists() else ""
+    for macro, value in re.findall(r"^#define\s+(\w+)\s+(-?\d+)", text, re.M):
+        value = int(value)
+        named = [n for n, mv in MACROS.items() if mv == (macro, value)]
+        if named:
+            names.append(named[0])
+        elif macro == "BENCH_MAC_PATCH":
+            names.append("mac_b%dp%d" % (value // 256, value % 256))
+        else:
+            kind = next((k for k, m in BENCH_NUMBER_MACROS.items() if m == macro), None)
+            if kind is None:
+                raise SystemExit("bench_variant.h: unknown macro %s" % macro)
+            names.append("%s_%d" % (kind, value))
+    if sdkconfig.exists():
+        conf = sdkconfig.read_text(encoding="utf-8")
+        names += [v for v, opt in KCONFIG_OFF.items() if "# %s is not set\n" % opt in conf]
+    return "+".join(names) or "base"
 
 
 PORT_ERRORS = ("could not open port", "serial port", "Failed to connect", "Write timeout",
@@ -154,24 +188,132 @@ def nvs_region():
     raise SystemExit("nvs partition not found")
 
 
+IMAGES = {"lyrat": FW_DIR / "build" / "lyrat_resend.bin",
+          "s3": FW_DIR.parent / "s3_eth_bridge" / "build" / "s3_eth_bridge.bin"}
+UNPAIR_REPLY = re.compile(r"unpair removed=(-?\d+) bonds_before=(\d+)")
+BACK_TIMEOUT_S = 30.0
+
+
+def build_board(board: str, variant: str) -> int:
+    if board == "lyrat":
+        return build(variant)
+    import s3
+    return s3.build()
+
+
+def ota_flash(board: str, variant: str, image=None) -> int:
+    """ota.py with the image just built (or the one given); its JSON line is printed, its whole output kept in
+    bench_runs/fw/."""
+    import subprocess
+    args = [sys.executable, str(Path(__file__).resolve().parent / "ota.py"), board, str(image or IMAGES[board]),
+            "--label", "fw-" + (variant.replace("+", "_") if board == "lyrat" else "s3")]
+    if board == "lyrat":
+        args.append("--force")
+    res = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800,
+                         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    log_dir = RUNS_ROOT / "fw"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / ("%s-ota-%s.txt" % (stamp(), board))).write_text(res.stdout + res.stderr, encoding="utf-8")
+    last = (res.stdout.strip().splitlines() or [""])[-1]
+    print("flash %s over the network: %s rc=%d" % (board, last, res.returncode), flush=True)
+    return res.returncode
+
+
+def lyrat_up(channel):
+    """(seconds the LyraT has been up, from its heartbeat through the S3) or None when no fresh frame came."""
+    q = channel.query()
+    if q and 0 <= q.get("last_frame_ms", -1) < 3000 and q.get("lyrat_up_s", -1) >= 0:
+        return q["lyrat_up_s"]
+    return None
+
+
+def erase_bonds_net() -> int:
+    """unpair, then reboot, through the S3; done when the LyraT is back with a new start. 2: S3 not found."""
+    import s3_uart
+    ch = s3_uart.Channel()
+    lines = []
+    try:
+        if not ch.find():
+            print("erase-bonds: S3 not found on the network", flush=True)
+            return 2
+        got = ch.command("unpair", timeout=1.0)
+        lines.append("unpair: status=%s %s" % (got["status"], (got["text"] or "").strip()))
+        m = UNPAIR_REPLY.search(got["text"] or "")
+        if got["status"] != s3_uart.ST_OK or not m or int(m.group(1)) < 0:
+            print("\n".join(lines + ["erase-bonds: not done"]), flush=True)
+            return 1
+        up_before = lyrat_up(ch)
+        # The heartbeat counts whole seconds: a board up for less than 2 s could not show that it started again.
+        settle = time.monotonic() + 3.0
+        while (up_before is None or up_before < 2) and time.monotonic() < settle:
+            time.sleep(0.5)
+            up_before = lyrat_up(ch)
+        time.sleep(0.5)        # the stack writes the removal to NVS before the restart
+        got = ch.command("reboot", retries=2)
+        lines.append("reboot: status=%s %s" % (got["status"], (got["text"] or "").strip()))
+        if got["status"] != s3_uart.ST_OK or "reboot in" not in (got["text"] or ""):
+            print("\n".join(lines + ["erase-bonds: reboot refused"]), flush=True)
+            return 1
+        end = time.monotonic() + BACK_TIMEOUT_S
+        time.sleep(1.5)
+        back = None
+        while time.monotonic() < end:
+            up = lyrat_up(ch)
+            if up is not None and (up_before is None or up < up_before):
+                back = up
+                break
+            time.sleep(0.5)
+        lines.append("lyrat back: %s" % ("up %d s" % back if back is not None else "no"))
+        print("\n".join(lines), flush=True)
+        return 0 if back is not None else 4
+    finally:
+        ch.close()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("action", choices=["build", "flash", "erase-bonds"])
     ap.add_argument("--variant", default="base")
-    ap.add_argument("--port", default=DEFAULT_PORT)
+    ap.add_argument("--board", choices=["lyrat", "s3", "both"], default="lyrat")
+    ap.add_argument("--usb", action="store_true", help="over USB as before goal 093 (idf.py flash, esptool)")
+    ap.add_argument("--port", default=None, help="LyraT USB port (implies --usb); default BENCH_PORT or COM15")
     ap.add_argument("--retries", type=int, default=12)   # "Wrong boot mode" came 8 times in a row
+    ap.add_argument("--image", help="flash: this app image over the network, no build (one --board)")
     args = ap.parse_args()
+    usb = args.usb or bool(args.port) or os.environ.get("BENCH_USB") == "1"
+    port = args.port or DEFAULT_PORT
+    boards = ["s3", "lyrat"] if args.board == "both" else [args.board]
     if args.action == "build":
-        return build(args.variant)
+        for board in boards:
+            rc = build_board(board, args.variant)
+            if rc != 0:
+                return rc
+        return 0
+    if args.action == "flash" and args.image:
+        if usb or len(boards) != 1:
+            ap.error("--image goes over the network to one board")
+        return ota_flash(boards[0], args.variant, args.image)
     if args.action == "flash":
-        rc = build(args.variant)
-        if rc != 0:
-            return rc
-        return with_retries("flash", "idf.py -C '%s' -p %s flash" % (FW_DIR, args.port), args.retries,
-                            verify_images=FLASH_IMAGES)
+        for board in boards:
+            rc = build_board(board, args.variant)
+            if rc != 0:
+                return rc
+            if not usb:
+                rc = ota_flash(board, args.variant)
+            elif board == "lyrat":
+                rc = with_retries("flash", "idf.py -C '%s' -p %s flash" % (FW_DIR, port), args.retries,
+                                  verify_images=FLASH_IMAGES)
+            else:
+                import s3
+                rc = s3.flash_usb(args.retries)
+            if rc != 0:
+                return rc
+        return 0
+    if not usb:
+        return erase_bonds_net()
     offset, size = nvs_region()
     return with_retries("erase-bonds",
-                        "python -m esptool --chip esp32 -p %s erase_region %s %s" % (args.port, offset, size),
+                        "python -m esptool --chip esp32 -p %s erase_region %s %s" % (port, offset, size),
                         args.retries)
 
 

@@ -20,7 +20,8 @@ judgement against what the owner needs, which the tools leave out on purpose: ro
 passes with any number of breaks. The result comes from the file the run wrote and its numbers, never from an exit code alone.
 
 Nothing here dials or answers (R3), plays a sound on the PC (R15), or touches other Bluetooth devices (R4). A busy port or a running
-series of the chain gives НЕ ПРОВЕРЕНО and leaves them alone. Exit code: 0 PASS, 1 FAIL, 2 НЕ ПРОВЕРЕНО. Output: bench_runs/owner/.
+series of the chain gives НЕ ПРОВЕРЕНО and leaves them alone. No step needs a USB cable of the boards: the consoles go over the
+network through the S3 (goal 093); --usb takes the USB consoles as before. Exit code: 0 PASS, 1 FAIL, 2 НЕ ПРОВЕРЕНО. Output: bench_runs/owner/.
 """
 import argparse
 import hashlib
@@ -49,7 +50,7 @@ APP_VERSION = re.compile(r"App version:\s+(\S+)")
 APP_TIME = re.compile(r"Compile time:\s+(.+)$")
 APP_ELF = re.compile(r"ELF file SHA256:\s+([0-9a-f]+)")
 BOARD_MAC = re.compile(r"Bluetooth MAC: (\S+)")
-ASK_S3 = "S3-ETH включена, кабель в сети, ПК в той же сети? Ответ S3 приходит на широковещательный запрос, адрес искать не нужно."
+ASK_S3 = "S3-ETH включена и в сети Wi-Fi, ПК в той же сети? Ответ S3 приходит на широковещательный запрос, адрес искать не нужно."
 REHEARSAL_S = 30
 TONES = [400, 1000, 1800]
 
@@ -68,9 +69,14 @@ def step_ports(args):
         return oc.refuse_if_busy(step, need_lyrat=False, need_udp=False)
     faults, busy = [], []
     lyrat, s3 = oc.lyrat_port(), oc.s3_port()
-    state_l, state_s = oc.port_state(lyrat), oc.port_state(s3)
-    step.num("Порт LyraT", "%s: %s" % (lyrat, state_l))
-    step.num("Порт S3", "%s: %s" % (s3, state_s))
+    if oc.usb_mode():
+        state_l, state_s = oc.port_state(lyrat), oc.port_state(s3)
+        step.num("Порт LyraT", "%s: %s" % (lyrat, state_l))
+        step.num("Порт S3", "%s: %s" % (s3, state_s))
+    else:
+        # Goal 093: the bench works over Wi-Fi through the S3; a USB cable is not needed and not looked at.
+        state_l = state_s = None
+        step.num("Порты USB", "не нужны: консоль, прошивка и сброс идут по сети через S3 (--usb, чтобы проверить порты)")
     for name, state, port in (("LyraT", state_l, lyrat), ("S3", state_s, s3)):
         if state == "absent":
             faults.append("порта %s нет (%s): плата включена, USB-кабель на месте?" % (name, port))
@@ -155,11 +161,15 @@ def git_head():
         return None
 
 
+OTA_VER = re.compile(r"\bver=(\S+)")
+OTA_ELF = re.compile(r"\belf=([0-9a-f]+)")
+
+
 def step_firmware(args):
     import round as rnd
     import s3_uart
     import voice_check
-    from serial_watch import SerialWatch
+    from console import open_watch
     step = Step("firmware", "Версия прошивки и режим шумоподавления")
     refused = oc.refuse_if_busy(step, need_udp=False)
     if refused:
@@ -172,21 +182,33 @@ def step_firmware(args):
     if before is None:
         step.say("Через S3 нет ответа, режим до сброса узнать нельзя.")
     step.say("Сбрасываю LyraT: версия видна только при загрузке. Канал и связь с телефоном вернутся сами.")
-    watch = SerialWatch(oc.lyrat_port(), step.out)
+    watch = open_watch(oc.lyrat_port() if oc.usb_mode() else None, step.out)
     watch.pump(time.monotonic() + 8, until=lambda: watch.sp is not None)
     if watch.sp is None:
         watch.finish(0)
         ch.close()
-        return step.finish(NOT_CHECKED, "порт LyraT не открылся", "Закройте программу, которая его держит, и повторите.")
+        if oc.usb_mode():
+            return step.finish(NOT_CHECKED, "порт LyraT не открылся", "Закройте программу, которая его держит, и повторите.")
+        return step.finish(NOT_CHECKED, "S3 не отвечает по сети", ASK_S3)
     ups = watch.slc_ups
     watch.pulse_reset()
     slc = rnd.wait_slc(watch, ups, 30.0)
+    if rnd.is_net(watch):
+        # The boot lines with the version come before the log ring starts: over the network the running image says it.
+        t = watch.now()
+        watch.send("ota")
+        watch.pump(time.monotonic() + 1.0)
+        ota_text = " ".join(rnd.lines_since(watch, t))
+        net_ver, net_elf = OTA_VER.search(ota_text), OTA_ELF.search(ota_text)
     lines = [line for _, line in watch.recent]
     watch.close_port()
     serial = watch.finish(0)
     version = next((m.group(1) for m in map(APP_VERSION.search, lines) if m), None)
     built = next((m.group(1).strip() for m in map(APP_TIME.search, lines) if m), None)
     elf = next((m.group(1) for m in map(APP_ELF.search, lines) if m), None)
+    if rnd.is_net(watch):
+        version, elf = net_ver and net_ver.group(1), net_elf and net_elf.group(1)
+        built = "не видно по сети"
     mac = next((m.group(1) for m in map(BOARD_MAC.search, lines) if m), None)
     sha, variant = local_build()
     same_build = bool(elf and sha and sha.startswith(elf))
@@ -201,7 +223,8 @@ def step_firmware(args):
     step.num("Телефон после сброса", "SLC за %s с" % slc)
     faults = []
     if version is None or elf is None:
-        return step.finish(NOT_CHECKED, "в логе загрузки нет версии: сброс не прошёл или порт терял данные", "Запустить шаг снова.")
+        return step.finish(NOT_CHECKED, "версия не прочитана: в логе загрузки её нет (USB) или LyraT не ответила на ota (сеть)",
+                           "Запустить шаг снова.")
     if slc is None:
         faults.append("телефон не подключился за 30 с после сброса")
     if serial["board_resets"] and serial["board_resets"] > 1:
@@ -443,7 +466,7 @@ def step_uart(args):
     refused = oc.refuse_if_busy(step)
     if refused:
         return refused
-    state = oc.port_state(oc.s3_port())
+    state = oc.port_state(oc.s3_port()) if oc.usb_mode() else "free"     # over the network the S3 restarts by UX
     if state != "free":
         # The stage restarts the S3 through its USB port.
         return step.finish(NOT_CHECKED, "порт S3 %s: %s. Шаг сбрасывает S3 через него." % (oc.s3_port(), state), "Закройте программу, которая его держит, или проверьте кабель, и повторите.")
@@ -622,7 +645,7 @@ def step_rehearsal(args):
 def rehearsal_one(step, i, tag, args, rnd, call_record, audio_check, np, wave):
     out = step.out / ("try-%02d" % i)
     silent = lambda text: step.log.write(text + "\n")  # noqa: E731
-    rec = call_record.CallRecording(out, port=oc.lyrat_port(), grace=args.grace, say=silent, no_stream=args.control_no_stream).start()
+    rec = call_record.CallRecording(out, port=oc.lyrat_port() if oc.usb_mode() else None, grace=args.grace, say=silent, no_stream=args.control_no_stream).start()
     reasons, opened_at, closed_at = [], None, None
     started = rec.wait_first_packets()
     if not started:
@@ -842,7 +865,11 @@ def main():
     ap.add_argument("--control-no-stream", action="store_true", default=None, help="mic, rehearsal, control: nothing asks the S3 for the stream")
     ap.add_argument("--fault", choices=["lyrat-reset", "s3-restart", "console-lost", "app-killed"], help="rehearsal, control: done to the running recording")
     ap.add_argument("--drop-at", type=float, help="rehearsal, control: seconds after the channel opened")
+    ap.add_argument("--usb", action="store_true", help="the consoles over USB as before goal 093; default: the network via the S3")
     args = ap.parse_args()
+    if args.usb:
+        import os
+        os.environ["BENCH_USB"] = "1"
     oc.console_utf8()
     oc.adb_on_path()
     if args.min_snr is not None and args.min_snr < 20.0:

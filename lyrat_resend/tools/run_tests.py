@@ -67,6 +67,9 @@ CHECKS = [
      unittest_cmd("test_bench_tools"), TESTS, 1200, "base", True),
     ("bench_unit", "fw.py variants, sound analysis on synthetic WAV, phone_mic.level, every bench module loads",
      unittest_cmd("test_bench_unit"), TESTS, 300, "base", False),
+    ("usb_free", "the bench without USB vs the simulator: first_flash --dry-run, NetWatch, link trials, round power, "
+                 "fw.py/s3.py/s3_uart.py over the network, Wi-Fi power in stat, WAV silence by frame, call_record",
+     unittest_cmd("test_usb_free"), TESTS, 1500, "base", True),
     ("platform_rom", "platform: ROM loader in C against the esptool protocol model",
      [PY, "test_rom.py"], PLATFORM, 900, "base", False),
     ("platform_tools", "platform: platform_ota.py and udplog.py against the U3 emulator",
@@ -156,6 +159,8 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     env = {k: v for k, v in os.environ.items() if k not in ("MSYSTEM", "BENCH_S3_ADDR", "BENCH_U3_ADDR")}
     env["PYTHONIOENCODING"] = "utf-8"
+    env["BENCH_NO_ADB"] = "1"       # the phone is never touched by a test (goal 093)
+    env.pop("BENCH_USB", None)
     env["OTA_TEST_OUT"] = str(run_dir / "ota_test_runs")
     summary = {"stamp": stamp, "mode": "quick" if args.quick else "full", "only": only, "out": str(run_dir),
                "python": sys.version.split()[0], "checks": []}

@@ -63,6 +63,8 @@ class Sim:
 def env():
     e = dict(os.environ)
     e["BENCH_S3_ADDR"] = "127.0.0.1"
+    e["BENCH_NO_ADB"] = "1"          # no test touches the phone (goal 093)
+    e.pop("BENCH_USB", None)
     e["PYTHONIOENCODING"] = "utf-8"
     return e
 

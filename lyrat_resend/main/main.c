@@ -1228,8 +1228,9 @@ static void hf_client_cb(esp_hf_client_cb_event_t    event,
         break;
 
     case ESP_HF_CLIENT_CLIP_EVT:
-        ESP_LOGI(TAG_BT, "CLIP: %s",
-                 param->clip.number ? param->clip.number : "(none)");
+        // The number stays on the board: every log line also goes over the network to the PC (goal 093).
+        ESP_LOGI(TAG_BT, "CLIP: number of %u chars",
+                 param->clip.number ? (unsigned)strlen(param->clip.number) : 0u);
         break;
 
     case ESP_HF_CLIENT_CIND_CALL_EVT:
@@ -1576,7 +1577,10 @@ static void print_status(void)
     CMD_OUT("  bonds=%d", esp_bt_gap_get_bond_device_num());
     // Addresses stay on the local console: a reply on the control channel leaves the board over the network.
     if (s_cmd_cap) {
+        // Only the last two bytes, as the PC's logs keep them: enough to tell the peers apart (goal 093).
         CMD_OUT("  peers=%u", s_peer_cnt);
+        for (uint8_t i = 0; i < s_peer_cnt; i++)
+            CMD_OUT("  peer[%u] = xx:xx:xx:xx:%02x:%02x", i, s_peers[i][4], s_peers[i][5]);
     } else {
         for (uint8_t i = 0; i < s_peer_cnt; i++)
             CMD_OUT("  peer[%u] = %02x:%02x:%02x:%02x:%02x:%02x", i,
@@ -1643,9 +1647,58 @@ static void print_help(void)
     CMD_OUT("  ugarb N — N bytes of noise onto that UART, for the test of the S3's parser");
     CMD_OUT("  ota    — running image, its state, the receiver of new firmware");
     CMD_OUT("  ulog   — the log ring for the PC: listener, level, lines dropped");
+    CMD_OUT("  reboot [1] — restart in 1 s; refused during SCO unless 1");
+    CMD_OUT("  unpair — remove every bond and the peer list (the phone keeps its own)");
     CMD_OUT("  all    — ALL DSP on/off");
     CMD_OUT("  s      — Status");
     CMD_OUT("  h|?    — This help");
+}
+
+// Restart a while after the reply: the reply leaves first, and a repeat of the command (same seq, its reply lost) comes
+// within this time and is answered from the copy instead of restarting twice.
+#define REBOOT_DELAY_MS 1000
+
+static void reboot_now(void *arg)
+{
+    esp_restart();
+}
+
+static void reboot_later(void)
+{
+    static esp_timer_handle_t timer;
+    ESP_LOGW(TAG_CMD, "reboot requested, in %d ms", REBOOT_DELAY_MS);
+    if (!timer) {
+        const esp_timer_create_args_t args = {.callback = reboot_now, .name = "reboot"};
+        if (esp_timer_create(&args, &timer) != ESP_OK) esp_restart();
+    }
+    esp_timer_stop(timer);
+    esp_timer_start_once(timer, REBOOT_DELAY_MS * 1000ULL);
+}
+
+// What erase-bonds over USB did to the nvs partition, without USB: the bonds of the stack and our own peer list go.
+// -1 when Bluetooth is not running. The phone keeps its side; the bench forgets it there (phone.py forget).
+static int s_unpair_found;
+
+static int unpair_all(void)
+{
+    s_unpair_found = 0;
+    if (!lyrat_bt_ready()) return -1;
+    int removed = 0;
+    int num = esp_bt_gap_get_bond_device_num();
+    s_unpair_found = num;
+    if (num > 0) {
+        esp_bd_addr_t *list = calloc((size_t)num, sizeof(esp_bd_addr_t));
+        if (list && esp_bt_gap_get_bond_device_list(&num, list) == ESP_OK) {
+            for (int i = 0; i < num; i++) {
+                if (esp_bt_gap_remove_bond_device(list[i]) == ESP_OK) removed++;
+            }
+        }
+        free(list);
+    }
+    s_peer_cnt = 0;
+    hf_peers_save();
+    ESP_LOGW(TAG_CMD, "unpair: %d of %d bonds removed, peer list cleared", removed, s_unpair_found);
+    return removed;
 }
 
 // Toggle helper: no value = flip, 0 = off, 1 = on
@@ -1818,6 +1871,21 @@ static void process_cmd(char *line)
         char text[160];
         lyrat_log_status(text, sizeof(text));
         CMD_OUT("%s", text);
+    } else if (strcmp(cmd, "reboot") == 0) {
+        // Over the network nothing else can reset this board: the S3 has no wire to EN (R13).
+        if (s_sco_active && val != 1) {
+            CMD_OUT("reboot refused: SCO active, 'reboot 1' forces");
+        } else {
+            CMD_OUT("reboot in %d ms", REBOOT_DELAY_MS);
+            reboot_later();
+        }
+    } else if (strcmp(cmd, "unpair") == 0) {
+        if (s_sco_active) {
+            CMD_OUT("unpair refused: SCO active");
+        } else {
+            int removed = unpair_all();
+            CMD_OUT("unpair removed=%d bonds_before=%d peers=%u", removed, s_unpair_found, s_peer_cnt);
+        }
     } else {
         s_cmd_unknown = true;
         if (s_cmd_cap) CMD_OUT("Unknown: '%s'", line);

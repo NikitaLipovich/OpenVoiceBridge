@@ -26,6 +26,11 @@
 //   UT 0|1|A             TX off, on, or following the LyraT (default)
 //   UB <baud>            baud rate of this end
 //   UW <hex>             raw bytes onto the line, for tests of the LyraT's parser; refused when the TX is off
+//   UX <boot>            restart this board in RESTART_DELAY_MS, only when <boot> is its boot id (a repeat after the
+//                        restart is refused): "UX <boot> 1" restarting, "UX <boot> 0" not this boot. Goal 093: without
+//                        USB nothing else restarts the S3
+//   UP [<qdbm>]          Wi-Fi transmit power cap in 0.25 dBm (8..84) now, until the next start; without a value only
+//                        read. "UP <applied qdbm> <esp_err>"; also in the stat line as txp=. -1: no Wi-Fi in this build
 //
 // Stream packet, little endian, PCM 16 bit after the header:
 //   0  'S' '3'   2  version   3  stream (0 call, 1 mic)   4  u32 seq (per stream, since boot)
@@ -51,6 +56,7 @@
 #include "driver/uart.h"
 #include "ctl_frame.h"
 #include "esp_random.h"
+#include "esp_system.h"
 #include "esp_check.h"
 #include "esp_app_desc.h"
 #include "esp_eth.h"
@@ -143,6 +149,7 @@ typedef struct {
 #define TX_MODE_AUTO    2
 #ifndef CTL_TX_MODE_BOOT
 #define CTL_TX_MODE_BOOT TX_MODE_AUTO
+#define RESTART_DELAY_MS 500
 #endif
 
 static listener_t s_call = {.name = "dsdin", .stream = 0, .port = PORT_CALL, .slots = SLOT_LR};
@@ -441,6 +448,26 @@ static int hex_value(char c)
     return -1;
 }
 
+static int wifi_tx_power(void);
+static esp_err_t wifi_set_tx_power(int qdbm);
+
+static void restart_now(void *arg)
+{
+    esp_restart();
+}
+
+static void restart_later(void)
+{
+    static esp_timer_handle_t timer;
+    ESP_LOGW(TAG, "restart asked over the network, in %d ms", RESTART_DELAY_MS);
+    if (!timer) {
+        const esp_timer_create_args_t args = {.callback = restart_now, .name = "restart"};
+        if (esp_timer_create(&args, &timer) != ESP_OK) esp_restart();
+    }
+    esp_timer_stop(timer);
+    esp_timer_start_once(timer, RESTART_DELAY_MS * 1000ULL);
+}
+
 // Handles the control words of the request port; false when the text is not one of them.
 static bool ctl_request(char *text, int n, const struct sockaddr_in *from, socklen_t from_len, int sock)
 {
@@ -483,6 +510,15 @@ static bool ctl_request(char *text, int n, const struct sockaddr_in *from, sockl
         len = snprintf(reply, sizeof(reply), "UT %d", s_tx_mode);
     } else if (strncmp(text, "UB ", 3) == 0) {
         len = snprintf(reply, sizeof(reply), "UB %d", s3_uart_set_baud(atoi(text + 3)));
+    } else if (strncmp(text, "UX ", 3) == 0) {
+        unsigned long boot = strtoul(text + 3, NULL, 10);
+        bool now = boot == s_boot_id;
+        len = snprintf(reply, sizeof(reply), "UX %lu %d", boot, now);
+        if (now) restart_later();
+    } else if (strcmp(text, "UP") == 0 || strncmp(text, "UP ", 3) == 0) {
+        esp_err_t err = ESP_OK;
+        if (text[2] == ' ') err = wifi_set_tx_power(atoi(text + 3));
+        len = snprintf(reply, sizeof(reply), "UP %d %d", wifi_tx_power(), (int)err);
     } else if (strcmp(text, "UQ") == 0) {
         int64_t now = esp_timer_get_time();
         len = snprintf(reply, sizeof(reply),
@@ -632,6 +668,8 @@ static esp_err_t net_init(void)
 }
 
 static int wifi_rssi(void) { return 0; }
+static int wifi_tx_power(void) { return -1; }
+static esp_err_t wifi_set_tx_power(int qdbm) { (void)qdbm; return ESP_ERR_NOT_SUPPORTED; }
 
 #else
 
@@ -689,6 +727,22 @@ static int wifi_rssi(void)
 {
     wifi_ap_record_t ap;
     return s_got_ip && esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0;
+}
+
+// The cap the driver holds now, in 0.25 dBm; -1 when it cannot be read (Wi-Fi not started).
+static int wifi_tx_power(void)
+{
+    int8_t q = 0;
+    return esp_wifi_get_max_tx_power(&q) == ESP_OK ? q : -1;
+}
+
+// A new cap while running, for the experiments of goal 091 with the LyraT's Bluetooth; gone at the next start.
+static esp_err_t wifi_set_tx_power(int qdbm)
+{
+    if (qdbm < 8 || qdbm > 84) return ESP_ERR_INVALID_ARG;
+    esp_err_t err = esp_wifi_set_max_tx_power((int8_t)qdbm);
+    ESP_LOGI(TAG, "tx power cap %d: %s, now %d", qdbm, esp_err_to_name(err), wifi_tx_power());
+    return err;
 }
 
 #endif
@@ -761,11 +815,11 @@ void app_main(void)
         snprintf(line + n, sizeof(line) - n,
                  " timeouts=%" PRIu32 "/%" PRIu32 " ovf=%" PRIu32 "/%" PRIu32 " send_fail=%" PRIu32 "/%" PRIu32
                  " sent=%" PRIu32 "/%" PRIu32 " streaming=%d pins_ok=%d uart tx=%d rx=%" PRIu32 " frames=%" PRIu32
-                 " bad=%" PRIu32 "/%" PRIu32 " lrelay_lost=%" PRIu32 " selftest=%s net=%s rssi=%d",
+                 " bad=%" PRIu32 "/%" PRIu32 " lrelay_lost=%" PRIu32 " selftest=%s net=%s rssi=%d txp=%d",
                  s_call.timeouts, s_mic.timeouts, s_call.overflows, s_mic.overflows, s_call.send_fail, s_mic.send_fail,
                  s_call.sent, s_mic.sent, streaming, s_pins_ok, s_tx_on, s_ctl_rx_bytes, s_ctl_parser.frames,
                  s_ctl_parser.bad_header, s_ctl_parser.bad_crc, s3_log_relay_lost(), s3_ota_selftest_name(),
-                 S3_NET_ETH ? "eth" : "wifi", wifi_rssi());
+                 S3_NET_ETH ? "eth" : "wifi", wifi_rssi(), wifi_tx_power());
         s3_log_line("%s", line);
     }
 }

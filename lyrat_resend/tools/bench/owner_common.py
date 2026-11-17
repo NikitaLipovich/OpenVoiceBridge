@@ -206,6 +206,35 @@ def udp_state(ports=(5004, 5005)):
     return busy
 
 
+def usb_mode():
+    """USB consoles only when asked (owner_check.py --usb, BENCH_USB=1); the network through the S3 otherwise. Goal 093."""
+    return os.environ.get("BENCH_USB") == "1"
+
+
+def lyrat_over_network(timeout=5.0):
+    """None when the S3 answers on the network and the LyraT is alive behind it, else what is missing, in Russian."""
+    import s3_uart
+    try:
+        ch = s3_uart.Channel()
+    except OSError as e:
+        return "сеть ПК недоступна: %s" % e
+    try:
+        end = time.monotonic() + timeout
+        if not ch.find(timeout=timeout):
+            return "S3 не отвечает по сети (Wi-Fi). Она включена, ПК в той же сети?"
+        while True:
+            # A heartbeat comes once a second: right after a start of either board there may be none yet.
+            q = ch.query() or {}
+            last = q.get("last_frame_ms")
+            if last is not None and 0 <= last <= 3000:
+                return None
+            if time.monotonic() >= end:
+                return "LyraT не отвечает через S3 (нет кадров на UART %s мс). Плата включена, провода UART на месте?" % last
+            time.sleep(0.5)
+    finally:
+        ch.close()
+
+
 def bench_busy(step, need_lyrat=True, need_udp=True):
     """A message if something else holds the bench, otherwise None. Nothing here stops anything."""
     procs = other_bench_processes()
@@ -217,7 +246,11 @@ def bench_busy(step, need_lyrat=True, need_udp=True):
         note = " Цепочка гоалов: %s." % ", ".join(running) if running else ""
         return ("стенд занят другой программой: %s.%s Я её не трогаю. Дождитесь конца или поставьте цепочку на паузу "
                 "(строка в NEEDS-OWNER, пункт 45), потом запустите шаг снова." % (names, note))
-    if need_lyrat:
+    if need_lyrat and not usb_mode():
+        missing = lyrat_over_network()
+        if missing:
+            return missing
+    elif need_lyrat:
         port = lyrat_port()
         state = port_state(port)
         if state == "busy":
@@ -265,8 +298,8 @@ def run_round(step, stage, *extra, power="adapter", port=None, tag=None, env=Non
     """One stage of round.py. Returns (result dict or None, exit code). The result is the file this very run wrote,
     found by a label nobody else has, so an old round.json can never pass as this one."""
     label = "owner-%s-%s" % (stamp(), step.name)
-    port = port or lyrat_port()
-    args = [TOOLS / "round.py", stage, "--power", power, "--label", label, "--port", port, *extra]
+    console = ["--port", port or lyrat_port()] if usb_mode() else []      # the network otherwise (goal 093)
+    args = [TOOLS / "round.py", stage, "--power", power, "--label", label, *console, *extra]
     rc, _ = run_tool(step, args, tag or ("round_" + stage), env=env)
     found = sorted((RUNS_ROOT / stage).glob("*-%s/round.json" % label))
     if not found:

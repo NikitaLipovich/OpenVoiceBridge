@@ -5,6 +5,9 @@
   s3_uart.py cmd "tone 1"          one console command on the LyraT through the S3
   s3_uart.py tx 0|1|A              the S3's TX: off, on, follow the LyraT
   s3_uart.py linecheck [--baud N]  low speed check of both directions, GPIO1 stays an input until the first one passed
+  s3_uart.py power [QDBM]          the S3's Wi-Fi power cap in 0.25 dBm (8..84) now, without a new image; shown in stat as txp=
+  s3_uart.py restart               restart the S3 over the network, prints its new boot id
+  s3_uart.py reboot                restart the LyraT (console command "reboot 1" through the relay)
 
 As a module: Channel (query, command, raw, set_tx, set_baud), frame(), and line_check(watch, channel, baud).
 The S3 is found by broadcast, its address is not stored. Exit code: 0 done, 1 failed, 2 board not found.
@@ -143,6 +146,33 @@ class Channel:
         got = self._ask("UB %d" % baud, lambda d: d.startswith(b"UB "))
         return int(got.split()[1]) if got else None
 
+    def power(self, qdbm=None):
+        """The S3's Wi-Fi transmit power cap in 0.25 dBm, set when qdbm is given (8..84, until the next start).
+        Returns (applied, esp_err) or None without an answer. -1: a build without Wi-Fi. Goal 093."""
+        got = self._ask("UP" if qdbm is None else "UP %d" % qdbm, lambda d: d.startswith(b"UP "))
+        if not got:
+            return None
+        parts = got.split()
+        return int(parts[1]), int(parts[2])
+
+    def restart_s3(self, timeout=20.0):
+        """Restart of the S3 over the network ("UX <boot>": a repeat after the restart is refused by the new boot id).
+        Returns the new boot id once the S3 answers again, None when it did not restart or come back. Goal 093."""
+        q = self.query()
+        if q is None:
+            return None
+        got = self._ask("UX %d" % q["boot"], lambda d: d.startswith(b"UX "))
+        if not got or got.split()[-1] != b"1":
+            return None
+        end = time.monotonic() + timeout
+        time.sleep(0.6)
+        while time.monotonic() < end:
+            q2 = self.query()
+            if q2 and q2["boot"] != q["boot"]:
+                return q2["boot"]
+            time.sleep(0.3)
+        return None
+
     def raw(self, data):
         """Bytes onto the line toward the LyraT; returns how many the S3 took, -1 with its TX off."""
         got = self._ask("UW " + data.hex(), lambda d: d.startswith(b"UW "))
@@ -255,6 +285,10 @@ def main():
     p.add_argument("text")
     p = sub.add_parser("tx")
     p.add_argument("mode", choices=["0", "1", "A"])
+    p = sub.add_parser("power")
+    p.add_argument("qdbm", nargs="?", type=int)
+    sub.add_parser("restart")
+    sub.add_parser("reboot")
     p = sub.add_parser("linecheck")
     p.add_argument("--baud", type=int, default=9600)
     p.add_argument("--seconds", type=float, default=6.0)
@@ -275,6 +309,19 @@ def main():
         return 0 if got["status"] == ST_OK else 1
     elif args.action == "tx":
         print(channel.set_tx(args.mode))
+    elif args.action == "power":
+        got = channel.power(args.qdbm)
+        print(json.dumps({"txp": got[0], "err": got[1]} if got else {"txp": None}))
+        return 0 if got and got[1] == 0 else 1
+    elif args.action == "restart":
+        boot = channel.restart_s3()
+        print(json.dumps({"restarted": boot is not None, "boot": boot}))
+        return 0 if boot is not None else 1
+    elif args.action == "reboot":
+        got = channel.command("reboot 1", retries=2)
+        print(redact(got["text"] or ""))
+        print(json.dumps({k: got[k] for k in ("status", "attempts", "ms")}))
+        return 0 if got["status"] == ST_OK else 1
     else:
         out = RUNS_ROOT / "uart" / ("%s-linecheck" % stamp())
         watch = SerialWatch(args.port, out)

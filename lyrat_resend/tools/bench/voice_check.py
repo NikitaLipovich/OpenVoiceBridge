@@ -449,7 +449,7 @@ def owner_run(args):
     tag = time.strftime("%H%M%S")
     ch = s3_uart.Channel()
     if not ch.find():
-        print("S3-ETH не найдена в сети. Плата S3 включена и в кабеле?")
+        print("S3-ETH не найдена в сети. Плата S3 включена и в сети Wi-Fi?")
         return 2
     first = wait_board(ch)
     if not first or "ns" not in first:
@@ -519,7 +519,7 @@ def owner_run(args):
 
 def switch_test(args):
     import numpy as np
-    from serial_watch import SerialWatch
+    from console import apply_usb_args, open_watch
     rnd, s3_uart, RUNS_ROOT, stamp, TapRecorder, floor_warn, tap_check = _bench()
     out = RUNS_ROOT / RUN_DIR / (stamp() + "-switches" + ("-" + args.label if args.label else ""))
     out.mkdir(parents=True, exist_ok=True)
@@ -528,10 +528,12 @@ def switch_test(args):
     if not ch.find():
         print("no S3")
         return 2
-    watch = SerialWatch(args.port, out, False)
+    apply_usb_args(args)
+    watch = open_watch(args.port, out)
     watch.pump(time.monotonic() + 10, until=lambda: watch.sp is not None)
     if watch.sp is None:
-        print("console port is not free")
+        print("no console of the LyraT: %s" % ("S3 not found on the network" if args.port is None else
+                                                "port %s is not free" % args.port))
         return 2
     report = {"power": args.power, "n": args.n, "period_s": args.period, "modes": args.modes, "steps": [], "checks": {}}
     wrong = []
@@ -745,7 +747,7 @@ def analyse_noise(right):
 
 def inject_stage(args):
     import numpy as np
-    from serial_watch import SerialWatch
+    from console import apply_usb_args, open_watch
     rnd, s3_uart, RUNS_ROOT, stamp, TapRecorder, floor_warn, tap_check = _bench()
     out = RUNS_ROOT / RUN_DIR / (stamp() + "-inject" + ("-" + args.label if args.label else ""))
     out.mkdir(parents=True, exist_ok=True)
@@ -755,10 +757,12 @@ def inject_stage(args):
     if not ch.find():
         print("no S3")
         return 2
-    watch = SerialWatch(args.port, out, False)
+    apply_usb_args(args)
+    watch = open_watch(args.port, out)
     watch.pump(time.monotonic() + 10, until=lambda: watch.sp is not None)
     if watch.sp is None:
-        print("console port is not free")
+        print("no console of the LyraT: %s" % ("S3 not found on the network" if args.port is None else
+                                                "port %s is not free" % args.port))
         return 2
     first = wait_board(ch)
     if not first or "ns" not in first:
@@ -872,13 +876,15 @@ def main():
     s.add_argument("--modes", type=lambda t: t.split(","), default=list(ALL_MODES))
     s.add_argument("--inject", type=int, default=0, help="test build nsinj: inj 1 signal and noise, 2 noise only; the bus is judged too")
     s.add_argument("--label", default="")
-    s.add_argument("--port", default="COM15")
+    s.add_argument("--port", default=None, help="LyraT console on this USB port (implies --usb)")
+    s.add_argument("--usb", action="store_true", help="LyraT console over USB (BENCH_PORT, COM15); default: the network")
     i = sub.add_parser("inject", help="the known signal in front of the chain, test build nsinj")
     i.add_argument("--power", required=True)
     i.add_argument("--modes", type=lambda t: t.split(","), default=list(ALL_MODES))
     i.add_argument("--settle", type=float, default=4.0, help="seconds on the noise before the measured runs")
     i.add_argument("--label", default="")
-    i.add_argument("--port", default="COM15")
+    i.add_argument("--port", default=None, help="LyraT console on this USB port (implies --usb)")
+    i.add_argument("--usb", action="store_true", help="LyraT console over USB (BENCH_PORT, COM15); default: the network")
     for p in (ap, r):
         p.add_argument("--modes", type=lambda t: t.split(","), default=list(OWNER_MODES))
         p.add_argument("--seconds", type=int, default=SPEAK_S)

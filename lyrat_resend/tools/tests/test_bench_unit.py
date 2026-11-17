@@ -140,7 +140,7 @@ class NoiseMeasures(unittest.TestCase):
 
 
 class Imports(unittest.TestCase):
-    MODULES = ("audio_check", "benchlib", "btlog", "call_record", "fw", "ota", "owner_check", "owner_common", "phone",
+    MODULES = ("audio_check", "benchlib", "btlog", "call_record", "console", "first_flash", "fw", "ota", "owner_check", "owner_common", "phone",
                "phone_mic", "round", "s3", "s3_uart", "serial_watch", "tap_check", "tone_blocks", "udp_record",
                "udplog", "voice_check")
 

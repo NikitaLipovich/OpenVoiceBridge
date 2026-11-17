@@ -198,7 +198,9 @@ Record (the same in a UART frame and in a UDP datagram): `0 u8 board (0 S3, 1 Ly
 A line longer than a slot is cut to 159 characters ending in `~`, except the S3's own lines of `s3_log_line()` (its `stat`
 line every 2 s): they go as several records cut at spaces, each after the first starting with `+ ` and with the next line
 number (`dbg_ring_push_long`). `udplog.py` joins them back into one line. Without USB this log is the only place the
-`stat` line is seen, with `selftest=`, `net=` and `rssi=` at its end (goal 092 #002).
+`stat` line is seen, with `selftest=`, `net=`, `rssi=` and `txp=` (the Wi-Fi power cap in 0.25 dBm, goal 093) at its end
+(goal 092 #002). Since goal 093 the bench tools read the LyraT's console from this log (`tools/bench/console.py`,
+`NetWatch`): `serial.log` of their runs comes from here unless they run with `--usb`.
 
 Losses: a gap in the line numbers of one board whose `dropped` grew by the same count was lost on the board; the rest of
 the gap was lost on the way (UDP, or the S3's relay ring, counted in its `stat` line as `lrelay_lost`). A new boot id is a
@@ -236,6 +238,7 @@ running image with the file, waits for `valid`. Exit code: 0 done, 1 refused or 
 
 ## When everything is broken: back over USB
 
-Over USB, as before: `idf.py -C s3_eth_bridge flash` (S3, its own USB) or `fw.py flash` (LyraT, COM15). A board that rolls
+Over USB, as before: `s3.py flash --usb` (S3, its own USB) or `fw.py flash --usb` (LyraT, COM15); both boards at once with
+the first flash of `FIRST_FLASH.md`. A board that rolls
 back has its old image and needs nothing. A board whose both slots fail: `idf.py erase-otadata` then `flash`; `nvs` stays.
 `erase_flash` is never needed and would take the pairings.

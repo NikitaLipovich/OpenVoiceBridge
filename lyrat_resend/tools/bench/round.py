@@ -10,6 +10,9 @@
   round.py plc   --power SOURCE --codec mSBC|CVSD [--n 3] [--period 30] [--keep-wav] [--label NAME]
   round.py uart  --power SOURCE [--commands 1000] [--lyrat-resets 3] [--s3-resets 3] [--line-low 8] [--label NAME]
   round.py record --power SOURCE [--n 1] [--seconds 300] [--max-loss 2] [--label NAME]
+Every stage reads the LyraT's console over the network through the S3 (console.NetWatch: its UDP log, commands through
+the relay, reset by "reboot 1", bonds erased by fw.py over the network; goal 093). --usb (or --port COMx) takes the USB
+console as before; --no-open of power is a USB experiment and implies it.
 
 power: watches the board, the phone ACL history and Windows USB removal events.
 Writes <runs>/power/<stamp>-<label>/round.json and appends one line to <runs>/rounds.jsonl.
@@ -97,6 +100,7 @@ import json
 import math
 import random
 import hashlib
+import os
 import re
 import subprocess
 import sys
@@ -111,7 +115,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audio_check  # noqa: E402
 import phone  # noqa: E402
 from benchlib import DEFAULT_PORT, RUNS_ROOT, keep_awake, powershell, redact, run_dir, write_json  # noqa: E402
-from serial_watch import SerialWatch  # noqa: E402
+from console import apply_usb_args, open_watch  # noqa: E402
 from udp_record import MIC_FLOOR_WARN, TapRecorder, floor_too_high  # noqa: E402
 import s3  # noqa: E402
 import s3_uart  # noqa: E402
@@ -131,6 +135,8 @@ BONDED_LINE = re.compile(r"([0-9a-fA-F]{2}:[0-9a-fA-F]{2})\s+\[[^\]\n]*\]\[[^\]\
 
 
 def adb(*args, timeout=60.0):
+    if os.environ.get("BENCH_NO_ADB") == "1":     # the PC tests: the phone is never touched (goal 093)
+        return ""
     try:
         res = subprocess.run(["adb", *args], capture_output=True, text=True, encoding="utf-8",
                              errors="replace", timeout=timeout)
@@ -197,12 +203,12 @@ def stage_power(args):
     out = run_dir("power", args.label)
     start = datetime.now()
     phone_before = adb("get-state").strip() or "gone"
-    watch = SerialWatch(args.port, out, args.no_open, echo=args.echo).run(args.seconds)
+    watch = open_watch(args.port, out, args.no_open, echo=args.echo).run(args.seconds)
     end = datetime.now()
     closed_sample = None
     if args.no_open:
         # Liveness without the phone: the first uptime read after the closed window must cover it.
-        closed_sample = SerialWatch(args.port, out / "after_close", False, echo=args.echo).run(CLOSED_SAMPLE_S)
+        closed_sample = open_watch(args.port, out / "after_close", False, echo=args.echo).run(CLOSED_SAMPLE_S)
     acl = phone_acl(start, end)
     removals = usb_removals(start, end)
     standby = pc_standby_entries(start, end)
@@ -246,12 +252,26 @@ BONDS_LINE = re.compile(r"bonds=(\d+)")
 # The board's own connect attempt names the peer it loaded; the plain boot line can be garbled by
 # interleaved UART output, so it is only the fallback.
 PEER_TRY = re.compile(r"HFP connect try peer\[\d+\] \S*?([0-9a-f]{2}:[0-9a-f]{2})\s*$")
-PEER_BOOT = re.compile(r"BT: peer\[\d+\] = \S*?([0-9a-f]{2}:[0-9a-f]{2})")
+PEER_BOOT = re.compile(r"BT: peer\[\d+\] = \S*?([0-9a-f]{2}:[0-9a-f]{2})")
 PEER_STATUS = re.compile(r"CMD:\s+peer\[0\] = \S*?([0-9a-f]{2}:[0-9a-f]{2})\s*$")
 SSP_LINE = re.compile(r"SSP confirm (\d{6})")
 ACL_DOWN = re.compile(r"ACL DOWN reason=(0x[0-9a-f]+)")
 SLC_SETTLE_S = 3.0      # SLC must survive this long to count
 ERASE_RETRIES = 12
+
+
+def is_net(watch):
+    return getattr(watch, "transport", "usb") == "net"
+
+
+def no_console(watch):
+    return "S3 not found on the network (or it does not answer)" if is_net(watch) else "port not opened"
+
+
+def own_commands(watch):
+    """Console commands this watch sent through the S3 that were answered: each ran once on the LyraT and counts in its
+    UART counters (ustat), which the USB console's commands never do. 0 on USB."""
+    return watch.net["replies"] if is_net(watch) else 0
 
 
 def lines_since(watch, t):
@@ -317,11 +337,12 @@ def reboot_trial(watch, index, slc_timeout):
 
 
 def erase_board(watch, port, log_dir, index):
-    """esptool needs the port, so the watcher lets go of it for the erase."""
+    """esptool needs the port, so the watcher lets go of it for the erase. Over the network fw.py sends "unpair" and
+    "reboot" through the S3 instead, and the watch keeps listening."""
     watch.close_port()
     watch.event("erase_start", trial=index)
-    res = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "fw.py"), "erase-bonds",
-                          "--port", port, "--retries", str(ERASE_RETRIES)],
+    how = [] if is_net(watch) else ["--usb", "--port", port, "--retries", str(ERASE_RETRIES)]
+    res = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "fw.py"), "erase-bonds", *how],
                          capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
     (log_dir / ("erase-%d.txt" % index)).write_text(redact(res.stdout + res.stderr), encoding="utf-8")
     watch.event("erase_end", trial=index, rc=res.returncode)
@@ -399,12 +420,12 @@ def stage_link(args):
         write_json(out / "round.json", result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2
-    watch = SerialWatch(args.port, out, False, echo=args.echo)
+    watch = open_watch(args.port, out, False, echo=args.echo)
     watch.pump(time.monotonic() + 15, until=lambda: watch.sp is not None)
     if watch.sp is None:
         watch.finish(0)
         result = {"stage": "link", "label": args.label, "power": args.power, "verdict": "NO_DATA",
-                  "error": "port not opened", "dir": str(out)}
+                  "error": no_console(watch), "dir": str(out)}
         write_json(out / "round.json", result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2
@@ -633,11 +654,11 @@ def stage_sco(args):
     telecom_before = telecom_state()
     if telecom_before is None or telecom_before["calls_now"] or telecom_before["telephony_busy"]:
         return sco_no_data(args, out, "a call is in progress or telecom is unreadable: %s" % telecom_before)
-    watch = SerialWatch(args.port, out, False, echo=args.echo)
+    watch = open_watch(args.port, out, False, echo=args.echo)
     watch.pump(time.monotonic() + 15, until=lambda: watch.sp is not None)
     if watch.sp is None:
         watch.finish(0)
-        return sco_no_data(args, out, "port not opened")
+        return sco_no_data(args, out, no_console(watch))
     watch.slc_up = True     # the phone just reported the headset connected, so a drop must count
     app_ready()
     tag = datetime.now().strftime("%H%M%S")
@@ -997,11 +1018,11 @@ def stage_audio(args):
     telecom_before = telecom_state()
     if telecom_before is None or telecom_before["calls_now"] or telecom_before["telephony_busy"]:
         return audio_no_data(args, out, "a call is in progress or telecom is unreadable: %s" % telecom_before)
-    watch = SerialWatch(args.port, out, False, echo=args.echo)
+    watch = open_watch(args.port, out, False, echo=args.echo)
     watch.pump(time.monotonic() + 15, until=lambda: watch.sp is not None)
     if watch.sp is None:
         watch.finish(0)
-        return audio_no_data(args, out, "port not opened")
+        return audio_no_data(args, out, no_console(watch))
     app_ready()
 
     # Boot check: the tone must be off with nothing asked of the board, and all links must come back.
@@ -1383,11 +1404,11 @@ def stage_tap(args):
     telecom_before = telecom_state()
     if telecom_before is None or telecom_before["calls_now"] or telecom_before["telephony_busy"]:
         return audio_no_data(args, out, "a call is in progress or telecom is unreadable: %s" % telecom_before)
-    watch = SerialWatch(args.port, out, False, echo=args.echo)
+    watch = open_watch(args.port, out, False, echo=args.echo)
     watch.pump(time.monotonic() + 15, until=lambda: watch.sp is not None)
     if watch.sp is None:
         watch.finish(0)
-        return audio_no_data(args, out, "port not opened")
+        return audio_no_data(args, out, no_console(watch))
     app_ready()
 
     setup = {}
@@ -1724,11 +1745,11 @@ def stage_btloss(args):
     wifi_before = phone_wifi()
     if wifi_before is None:
         return audio_no_data(args, out, "the phone's Wi-Fi state is unreadable")
-    watch = SerialWatch(args.port, out, False, echo=args.echo)
+    watch = open_watch(args.port, out, False, echo=args.echo)
     watch.pump(time.monotonic() + 15, until=lambda: watch.sp is not None)
     if watch.sp is None:
         watch.finish(0)
-        return audio_no_data(args, out, "port not opened")
+        return audio_no_data(args, out, no_console(watch))
     app_ready()
     tag = datetime.now().strftime("%H%M%S")
     windows = []
@@ -1994,11 +2015,11 @@ def stage_plc(args):
     telecom_before = telecom_state()
     if before["keyguard"] or telecom_before is None or telecom_before["calls_now"] or telecom_before["telephony_busy"]:
         return audio_no_data(args, out, "phone not usable: %s %s" % (before["keyguard"], telecom_before))
-    watch = SerialWatch(args.port, out, False, echo=args.echo)
+    watch = open_watch(args.port, out, False, echo=args.echo)
     watch.pump(time.monotonic() + 15, until=lambda: watch.sp is not None)
     if watch.sp is None:
         watch.finish(0)
-        return audio_no_data(args, out, "port not opened")
+        return audio_no_data(args, out, no_console(watch))
     app_ready()
     # The same start as audio: a known state and a live link before anything is asked of the channel.
     ups = watch.slc_ups
@@ -2174,6 +2195,7 @@ def uart_commands(watch, channel, n):
              "tone 2", "status", "tone 0", "pkt")
     usable = n - (n % 2)    # hpf returns to where it was only after an even number of cycles at most; repaired below
     witness_before = s3_uart.console_ustat(watch)
+    own_before = own_commands(watch)
     s3_before = channel.query()
     retries_before, attempts_before = channel.retries, channel.attempts
     wrong, failed, millis, histogram, witness = [], 0, [], {}, []
@@ -2217,6 +2239,8 @@ def uart_commands(watch, channel, n):
     if want["plc"] != 1:
         channel.command("plc 1")
     witness_after = s3_uart.console_ustat(watch)
+    # Over the network the witness's own commands (ustat, the tone reads) go through the same UART: taken off.
+    own = own_commands(watch) - own_before
     s3_after = channel.query()
     delta = uart_delta(witness_before, witness_after)
     return {"planned": usable, "failed_after_retry": failed, "wrong_replies": len(wrong), "wrong": wrong[:10],
@@ -2225,7 +2249,8 @@ def uart_commands(watch, channel, n):
             "ms": {"p50": uart_percentile(millis, 0.5), "p95": uart_percentile(millis, 0.95),
                    "max": max(millis) if millis else None},
             "witness": witness, "witness_ok": all(w["tone_console"] == w["tone_channel"] for w in witness),
-            "lyrat": delta, "lyrat_cmds_extra": (delta["cmds"] - usable) if delta else None,
+            "lyrat": delta, "lyrat_cmds_extra": (delta["cmds"] - usable - own) if delta else None,
+            "witness_through": "network" if is_net(watch) else "usb_console", "witness_own_commands": own,
             "s3": {k: s3_after[k] - s3_before[k] for k in UART_STAT_TAIL + ("frames", "sent", "replies")}
             if s3_before and s3_after else None}
 
@@ -2239,6 +2264,10 @@ def uart_raw_case(watch, channel, name, data, expect, then=None, settle=0.15):
         then()
     after = s3_uart.console_ustat(watch)
     delta = uart_delta(before, after)
+    if delta and is_net(watch):
+        # The two ustat of the witness went through this UART: the later one is in cmds, the earlier one's reply in replies.
+        delta["cmds"] -= 1
+        delta["replies"] -= 1
     case = {"name": name, "took": took, "delta": delta, "expect": expect}
     # A frame that stops may end by the gap, or swallow the next heartbeat ack and end by a check: either way it is gone.
     if delta:
@@ -2438,10 +2467,19 @@ def uart_line_low_action(watch, channel, args):
         checks["tx_really_off"] = trial["s3_tx_on"] == 0
         # The control: with the TX off the command cannot arrive, so the channel is really this wire.
         checks["command_refused_with_tx_off"] = refused["status"] == s3_uart.ST_NO_TX
-        checks["lyrat_rx_held_low"] = trial["lyrat_rx_level_low"] == 0
-        watch.pump(time.monotonic() + args.line_low)
-        answered = s3_uart.console_ustat(watch)
-        checks["console_alive_with_line_low"] = answered is not None
+        if is_net(watch):
+            # No console besides this wire: the LyraT's level is not readable, its life is its heartbeat at the S3.
+            trial["not_checked"] = "lyrat_rx_held_low: the console of the LyraT goes through this very line"
+            hb_before = state and state["hb"]
+            watch.pump(time.monotonic() + args.line_low)
+            later = channel.query()
+            trial["lyrat_hb_during_low"] = later["hb"] - hb_before if later and hb_before is not None else None
+            checks["lyrat_alive_with_line_low"] = bool(trial["lyrat_hb_during_low"])
+        else:
+            checks["lyrat_rx_held_low"] = trial["lyrat_rx_level_low"] == 0
+            watch.pump(time.monotonic() + args.line_low)
+            answered = s3_uart.console_ustat(watch)
+            checks["console_alive_with_line_low"] = answered is not None
         channel.set_tx("A")
         back, _ = uart_wait_command(channel, "status", 10.0)
         trial["command_back_s"] = back
@@ -2476,11 +2514,11 @@ def stage_uart(args):
     channel = s3_uart.Channel()
     if not channel.find():
         return uart_no_data(args, out, "S3 not found")
-    watch = SerialWatch(args.port, out, False, echo=args.echo)
+    watch = open_watch(args.port, out, False, echo=args.echo)
     watch.pump(time.monotonic() + 15, until=lambda: watch.sp is not None)
     if watch.sp is None:
         watch.finish(0)
-        return uart_no_data(args, out, "port not opened")
+        return uart_no_data(args, out, no_console(watch))
     app_ready()
 
     s3_start = channel.query()
@@ -2567,7 +2605,12 @@ def stage_uart(args):
                           "line_low_s": args.line_low, "max_retry_pct": args.max_retry_pct, "min_snr_db": args.min_snr,
                           "max_rx_bytes_per_s": args.max_rx_rate, "codec": args.codec},
               "not_checked": "A real power loss of the S3 is not tried: the wiring forbids it while the LyraT is on. "
-                             "A restart and a line held low are what is measured.",
+                             "A restart and a line held low are what is measured." + (
+                                 " Console over the network: the witness goes through the UART under test (its own "
+                                 "commands are taken off the counters), and the LyraT's RX level with the line held "
+                                 "low is not read; its heartbeat at the S3 stands for it. --usb gives the independent "
+                                 "witness." if is_net(watch) else ""),
+              "witness_through": "network" if is_net(watch) else "usb_console",
               "setup": setup, "commands": commands, "parser": parser, "lyrat_resets": lyrat_resets, "s3_restarts": s3_restarts,
               "line_low": line_low, "tone_end": tone_end, "s3_end": s3_end, "lyrat_uart_end": witness_end,
               "telecom_before": telecom_before, "telecom_after": telecom_after, "phone_before": before, "phone_after": after,
@@ -2889,11 +2932,11 @@ def stage_record(args):
     telecom_before = telecom_state()
     if telecom_before is None or telecom_before["calls_now"] or telecom_before["telephony_busy"]:
         return audio_no_data(args, out, "a call is in progress or telecom is unreadable: %s" % telecom_before)
-    watch = SerialWatch(args.port, out, False, echo=args.echo)
+    watch = open_watch(args.port, out, False, echo=args.echo)
     watch.pump(time.monotonic() + 15, until=lambda: watch.sp is not None)
     if watch.sp is None:
         watch.finish(0)
-        return audio_no_data(args, out, "port not opened")
+        return audio_no_data(args, out, no_console(watch))
     app_ready()
     setup = {}
     trials = []
@@ -2996,7 +3039,8 @@ def main():
     p.add_argument("--no-open", action="store_true", help="keep the serial port closed")
     p.add_argument("--label", default="")
     p.add_argument("--power", required=True, help="what feeds the board, e.g. adapter or battery (R11)")
-    p.add_argument("--port", default=DEFAULT_PORT)
+    p.add_argument("--port", default=None, help="LyraT console on this USB port (implies --usb)")
+    p.add_argument("--usb", action="store_true", help="LyraT console over USB (BENCH_PORT, COM15) instead of the network")
     p.add_argument("--echo", action="store_true", help="print events live")
     p = sub.add_parser("link", help="reboot to SLC and full re-pair series")
     p.add_argument("--power", required=True, help="what feeds the board, e.g. adapter or battery (R11)")
@@ -3006,7 +3050,8 @@ def main():
     p.add_argument("--pair-timeout", type=float, default=90.0, help="seconds for the pairing on the phone")
     p.add_argument("--stop-on-fail", action="store_true", help="stop at the first failed trial")
     p.add_argument("--label", default="")
-    p.add_argument("--port", default=DEFAULT_PORT)
+    p.add_argument("--port", default=None, help="LyraT console on this USB port (implies --usb)")
+    p.add_argument("--usb", action="store_true", help="LyraT console over USB (BENCH_PORT, COM15) instead of the network")
     p.add_argument("--echo", action="store_true", help="print events live")
     p = sub.add_parser("sco", help="open and close the headset channel without a call, through the probe app")
     p.add_argument("--power", required=True, help="what feeds the board, e.g. adapter or battery (R11)")
@@ -3017,7 +3062,8 @@ def main():
     p.add_argument("--gap", type=float, default=3.0, help="seconds between cycles")
     p.add_argument("--stop-on-fail", action="store_true", help="stop at the first failed cycle")
     p.add_argument("--label", default="")
-    p.add_argument("--port", default=DEFAULT_PORT)
+    p.add_argument("--port", default=None, help="LyraT console on this USB port (implies --usb)")
+    p.add_argument("--usb", action="store_true", help="LyraT console over USB (BENCH_PORT, COM15) instead of the network")
     p.add_argument("--echo", action="store_true", help="print events live")
     p = sub.add_parser("audio", help="control tones through Bluetooth both ways, judged by the content of the sound")
     p.add_argument("--power", required=True, help="what feeds the board, e.g. adapter or battery (R11)")
@@ -3040,7 +3086,8 @@ def main():
     p.add_argument("--board-cmd", action="append", help="console command after the boot check, may repeat")
     p.add_argument("--stop-on-fail", action="store_true", help="stop at the first failed trial")
     p.add_argument("--label", default="")
-    p.add_argument("--port", default=DEFAULT_PORT)
+    p.add_argument("--port", default=None, help="LyraT console on this USB port (implies --usb)")
+    p.add_argument("--usb", action="store_true", help="LyraT console over USB (BENCH_PORT, COM15) instead of the network")
     p.add_argument("--echo", action="store_true", help="print events live")
     p.add_argument("--uart-load", type=float, default=0.0, help="commands per second through the S3 during the trials")
     p = sub.add_parser("tap", help="content of both I2S lines captured by the S3-ETH board, no sound on the PC")
@@ -3060,7 +3107,8 @@ def main():
     p.add_argument("--close-timeout", type=float, default=10.0)
     p.add_argument("--slc-timeout", type=float, default=30.0)
     p.add_argument("--label", default="")
-    p.add_argument("--port", default=DEFAULT_PORT)
+    p.add_argument("--port", default=None, help="LyraT console on this USB port (implies --usb)")
+    p.add_argument("--usb", action="store_true", help="LyraT console over USB (BENCH_PORT, COM15) instead of the network")
     p.add_argument("--echo", action="store_true", help="print events live")
     p = sub.add_parser("btloss", help="rate and time of the failures of the Bluetooth link, phone Wi-Fi A/B")
     p.add_argument("--power", required=True, help="what feeds the board, e.g. adapter or battery (R11)")
@@ -3077,7 +3125,8 @@ def main():
     p.add_argument("--open-timeout", type=float, default=15.0)
     p.add_argument("--close-timeout", type=float, default=10.0)
     p.add_argument("--label", default="")
-    p.add_argument("--port", default=DEFAULT_PORT)
+    p.add_argument("--port", default=None, help="LyraT console on this USB port (implies --usb)")
+    p.add_argument("--usb", action="store_true", help="LyraT console over USB (BENCH_PORT, COM15) instead of the network")
     p.add_argument("--echo", action="store_true", help="print events live")
     p = sub.add_parser("plc", help="the concealment on a voice-like signal, with controls; needs the variant fdrop")
     p.add_argument("--power", required=True, help="what feeds the board, e.g. adapter or battery (R11)")
@@ -3091,7 +3140,8 @@ def main():
     p.add_argument("--slc-timeout", type=float, default=60.0)
     p.add_argument("--gap", type=float, default=3.0)
     p.add_argument("--label", default="")
-    p.add_argument("--port", default=DEFAULT_PORT)
+    p.add_argument("--port", default=None, help="LyraT console on this USB port (implies --usb)")
+    p.add_argument("--usb", action="store_true", help="LyraT console over USB (BENCH_PORT, COM15) instead of the network")
     p.add_argument("--echo", action="store_true", help="print events live")
     p = sub.add_parser("uart", help="commands through the S3 and the UART, a bad line, restarts of both boards")
     p.add_argument("--power", required=True, help="what feeds the board, e.g. adapter or battery (R11)")
@@ -3111,7 +3161,8 @@ def main():
     p.add_argument("--close-timeout", type=float, default=10.0)
     p.add_argument("--slc-timeout", type=float, default=30.0)
     p.add_argument("--label", default="")
-    p.add_argument("--port", default=DEFAULT_PORT)
+    p.add_argument("--port", default=None, help="LyraT console on this USB port (implies --usb)")
+    p.add_argument("--usb", action="store_true", help="LyraT console over USB (BENCH_PORT, COM15) instead of the network")
     p.add_argument("--echo", action="store_true", help="print events live")
     p = sub.add_parser("record", help="the recording of both sides through the S3-ETH board, with a second consumer of the stream")
     p.add_argument("--power", required=True, help="what feeds the board, e.g. adapter or battery (R11)")
@@ -3128,9 +3179,11 @@ def main():
     p.add_argument("--close-timeout", type=float, default=10.0)
     p.add_argument("--slc-timeout", type=float, default=30.0)
     p.add_argument("--label", default="")
-    p.add_argument("--port", default=DEFAULT_PORT)
+    p.add_argument("--port", default=None, help="LyraT console on this USB port (implies --usb)")
+    p.add_argument("--usb", action="store_true", help="LyraT console over USB (BENCH_PORT, COM15) instead of the network")
     p.add_argument("--echo", action="store_true", help="print events live")
     args = ap.parse_args()
+    apply_usb_args(args)        # goal 093: USB only when asked; the tools this one starts follow (BENCH_USB)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)

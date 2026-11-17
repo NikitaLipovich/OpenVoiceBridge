@@ -17,6 +17,7 @@ Based on goals_harness/tools/seeds/repro_connect.py.
 """
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -53,6 +54,9 @@ class OtherBondsChanged(PhoneError):
 
 
 def adb(*args, timeout=30.0):
+    if os.environ.get("BENCH_NO_ADB") == "1":
+        # The PC tests (run_tests.py) set it: the phone is never touched by them (goal 093).
+        raise Unusable("adb disabled by BENCH_NO_ADB")
     try:
         res = subprocess.run(["adb", *args], capture_output=True, text=True, encoding="utf-8",
                              errors="replace", timeout=timeout)

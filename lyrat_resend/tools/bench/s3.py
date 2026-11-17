@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Build and flash the S3-ETH firmware, read its console, restart it. The port is found by USB VID, not by number.
+"""Build and flash the S3-ETH firmware, read its console, restart it. Over the network by default (goal 093).
 
   s3.py port
   s3.py build
-  s3.py flash [--retries N]
-  s3.py console --seconds N [--out DIR] [--echo]
-  s3.py reset
+  s3.py flash [--usb] [--retries N]
+  s3.py console --seconds N [--out DIR] [--echo] [--usb]
+  s3.py reset [--usb]
 
-As a module: find_port(), watch(out), restart(watch), parse_stat(line).
-Environment: BENCH_S3_PORT overrides the search. Logs stay outside git (bench_runs).
+Over the network: flash is ota.py s3 with the image just built, console the S3's own lines of the UDP log (udplog.py,
+its stat line every 2 s among them), reset the word "UX <boot>" on UDP 5006. Over USB (--usb or BENCH_USB=1): the port is
+found by USB VID, not by number, as before.
+As a module: find_port(), watch(out) (a NetWatch, or a SerialWatch on USB), restart(watch), parse_stat(line).
+Environment: BENCH_S3_PORT overrides the search of the USB port. Logs stay outside git (bench_runs).
 """
 import argparse
 import json
@@ -39,7 +42,7 @@ STAT_FIELDS = (
     ("streaming", r" streaming=(\d)\b", int), ("pins_ok", r" pins_ok=(\d)\b", int),
     ("uart_tx", r" uart tx=(\d)\b", int), ("uart_rx", r" uart tx=\d rx=(\d+)", int), ("frames", r" frames=(\d+)", int),
     ("bad", r" bad=(\d+)/(\d+)", int), ("lrelay_lost", r" lrelay_lost=(\d+)", int), ("selftest", r" selftest=(\w+)", str),
-    ("net", r" net=(\w+)", str), ("rssi", r" rssi=(-?\d+)", int))
+    ("net", r" net=(\w+)", str), ("rssi", r" rssi=(-?\d+)", int), ("txp", r" txp=(-?\d+)", int))
 
 
 def find_port():
@@ -50,8 +53,16 @@ def find_port():
     return found[0] if found else None
 
 
-def watch(out):
-    """A SerialWatch on the S3 console; DTR and RTS stay released until restart()."""
+def usb_mode():
+    return os.environ.get("BENCH_USB") == "1"
+
+
+def watch(out, usb=None):
+    """The S3's console: its lines over the network (console.NetWatch, board s3), or on USB a SerialWatch whose DTR and
+    RTS stay released until restart(). usb: None follows BENCH_USB."""
+    if not (usb_mode() if usb is None else usb):
+        import console
+        return console.NetWatch(out, board="s3")
     port = find_port()
     if port is None:
         raise SystemExit("S3 console not found")
@@ -59,10 +70,13 @@ def watch(out):
 
 
 def restart(w):
-    """Chip reset through USB: RTS pulse with DTR released. The USB port drops and returns; the watch reopens it.
+    """Restart of the S3. Over the network: "UX <boot>" (NetWatch.pulse_reset). On USB: RTS pulse with DTR released;
+    the USB port drops and returns, the watch reopens it.
 
     usbser.sys sends a change of RTS only together with a set of DTR, so DTR is written again after each change.
     """
+    if getattr(w, "transport", "usb") == "net":
+        return w.pulse_reset()
     w.sp.dtr = False
     w.sp.rts = True
     w.sp.dtr = False
@@ -97,7 +111,16 @@ def build():
     return res.returncode
 
 
-def flash(retries):
+def flash(retries, usb=None):
+    """Build, then flash: over the network with ota.py (fw.py flash --board s3), or over USB."""
+    if not (usb_mode() if usb is None else usb):
+        import subprocess
+        return subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "fw.py"), "flash", "--board", "s3"]
+                              ).returncode
+    return flash_usb(retries)
+
+
+def flash_usb(retries):
     rc = build()
     if rc != 0:
         return rc
@@ -126,7 +149,10 @@ def main():
     ap.add_argument("--seconds", type=float, default=10.0)
     ap.add_argument("--out", default=str(RUNS_ROOT / "s3_eth" / "console"))
     ap.add_argument("--echo", action="store_true", help="print the console lines")
+    ap.add_argument("--usb", action="store_true", help="the S3's own USB port instead of the network")
     args = ap.parse_args()
+    if args.usb:
+        os.environ["BENCH_USB"] = "1"
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if args.action == "port":
@@ -139,10 +165,10 @@ def main():
     w = watch(args.out)
     if args.action == "reset":
         w.pump(time.monotonic() + 8, until=lambda: w.sp is not None)
-        restart(w)
+        ok = restart(w) is not False
         w.close_port()
         w.finish(0)
-        return 0
+        return 0 if ok else 1
     w.pump(time.monotonic() + args.seconds)
     w.close_port()
     summary = w.finish(args.seconds)

@@ -28,6 +28,7 @@ As a module: CallRecording(out, ...).start(), .tick(), .stop(), judge(summary). 
 """
 import argparse
 import json
+import os
 import re
 import sys
 import threading
@@ -41,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from benchlib import RUNS_ROOT, keep_awake, redact, stamp, write_json  # noqa: E402
 import owner_common as oc  # noqa: E402
 import s3_uart  # noqa: E402
+from console import open_watch, usb_mode  # noqa: E402
 from serial_watch import SerialWatch  # noqa: E402
 from udp_record import JOURNAL_NAME, MIC_FLOOR_WARN, RATE, TapRecorder, floor_too_high  # noqa: E402
 
@@ -64,8 +66,9 @@ BT_RATE = re.compile(r"SCO\s+= (\w+) bt_rate=(\d+)")
 RATE_CODEC = {16000: "mSBC", 8000: "CVSD"}
 
 
-class CallWatch(SerialWatch):
-    """The LyraT console read for what a recording needs to know. Time is time.monotonic, the clock of the packets."""
+class CallMixin:
+    """The LyraT console read for what a recording needs to know. Time is time.monotonic, the clock of the packets.
+    Put in front of a transport (console.open_watch): USB SerialWatch or the network's NetWatch (goal 093)."""
 
     def __init__(self, *args, **kw):
         super().__init__(*args, **kw)
@@ -95,6 +98,9 @@ class CallWatch(SerialWatch):
             self.pkt = dict(zip(SCO_PKT_KEYS, map(int, m.groups())))
         if self.slc_drops > drops:
             self.notes.append((time.monotonic(), "slc_drop"))
+
+
+CallWatch = type("CallWatch", (CallMixin, SerialWatch), {})     # the USB one, as before goal 093
 
 
 class S3View(threading.Thread):
@@ -195,8 +201,8 @@ class CallRecording:
         self.rec = TapRecorder(SLOTS, journal_dir=self.out, bus_gap_s=BUS_GAP_S, listen_only=self.no_stream,
                                ports=self.listen_ports)
         self.rec.start()
-        if self.port:
-            self.watch = CallWatch(self.port, self.out)
+        if self.port or not usb_mode():
+            self.watch = open_watch(self.port, self.out, mixin=CallMixin)
             self.console_thread = threading.Thread(target=self._console, daemon=True)
             self.console_thread.start()
         self.s3 = S3View()
@@ -247,9 +253,10 @@ class CallRecording:
         if self.watch:
             alive = self.watch.sp is not None
             if self.console_was is True and not alive:
-                self.say("%s: порт LyraT %s пропал. Запись продолжается, канал вижу через S3." % (self.at(now), self.port))
+                self.say("%s: консоль LyraT (%s) пропала. Запись продолжается, канал вижу через S3." % (
+                    self.at(now), self.port or "по сети"))
             elif self.console_was is False and alive:
-                self.say("%s: порт LyraT вернулся." % self.at(now))
+                self.say("%s: консоль LyraT вернулась." % self.at(now))
             self.console_was = alive
 
         last = max((s.last_at for s in self.rec.streams.values() if s.last_at), default=None)
@@ -525,12 +532,15 @@ def run(args):
     busy = oc.bench_busy(step, need_lyrat=False, need_udp=not args.no_stream)
     if busy:
         return step.finish(oc.NOT_CHECKED, busy, "Запустить запись снова, когда стенд свободен.")
-    port = args.port or oc.lyrat_port()
-    state = oc.port_state(port)
-    if state != "free":
-        step.say("Порт LyraT %s: %s. Запись пойдёт и без него, но кодек и сбросы будут видны хуже." % (
-            port, {"busy": "занят другой программой, я её не трогаю", "absent": "не найден"}.get(state, state)))
-        port = None if state == "absent" else port
+    port = None
+    if args.usb or args.port:
+        os.environ["BENCH_USB"] = "1"
+        port = args.port or oc.lyrat_port()
+        state = oc.port_state(port)
+        if state != "free":
+            step.say("Порт LyraT %s: %s. Запись пойдёт и без него, но кодек и сбросы будут видны хуже." % (
+                port, {"busy": "занят другой программой, я её не трогаю", "absent": "не найден"}.get(state, state)))
+            port = None if state == "absent" else port
     keep_awake()
     rec = CallRecording(out, port=port, grace=args.grace, only_enter=args.only_enter, say=step.say, no_stream=args.no_stream)
     try:
@@ -540,7 +550,7 @@ def run(args):
     step.say("Папка: %s" % out)
     if not rec.wait_first_packets():
         s = rec.stop("нет потока")
-        return finish(step, s, ["нет потока с S3 за %.0f с. S3-ETH включена, кабель в сети, ПК в той же сети? Настоящий разговор сейчас записан не будет." % FIRST_PACKET_S])
+        return finish(step, s, ["нет потока с S3 за %.0f с. S3-ETH включена и в сети Wi-Fi, ПК в той же сети? Настоящий разговор сейчас записан не будет." % FIRST_PACKET_S])
     slc = rec.s3.says_slc()
     if slc is False:
         step.say("ВНИМАНИЕ: телефон сейчас не подключён к LyraT_Phone. Подключите в меню телефона, запись уже идёт.")
@@ -574,7 +584,8 @@ def main():
     ap.add_argument("--seconds", type=float, help="stop after this long, for tests")
     ap.add_argument("--grace", type=float, default=GRACE_S, help="seconds after the channel closed before the recording stops")
     ap.add_argument("--only-enter", action="store_true", help="stop only on Enter: for a call that leaves the headset for a while")
-    ap.add_argument("--port", help="console of the LyraT; the default is found by USB id")
+    ap.add_argument("--usb", action="store_true", help="the LyraT console over USB (found by USB id); default: the network")
+    ap.add_argument("--port", help="the LyraT console on this USB port (implies --usb)")
     ap.add_argument("--recover", metavar="DIR", help="make the files from the journal of a recording that died")
     ap.add_argument("--no-stream", action="store_true", help="control: nothing asks the S3 for the stream")
     args = ap.parse_args()

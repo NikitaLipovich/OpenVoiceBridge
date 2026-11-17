@@ -15,6 +15,10 @@ What it repeats, each from the firmware source, not from the documents:
         and a stat line every STATUS_MS in the format of app_main() with net=wifi rssi=
 facts() parses the numbers, the JSON keys and the header layout from s3_eth_bridge/main/main.c; test_s3_sim.py holds the
 simulator to them. Made by goal 092.
+Goal 093: UX <boot> (restart of the S3 with a new boot id) and UP [qdbm] (Wi-Fi power cap, txp= in stat); the LyraT console
+knows s (print_status of the firmware: bonds, SLC, peers by their last two bytes, heap), reboot [1] (restart after
+REBOOT_DELAY_MS with a new boot id and the boot line "BOOT reset_reason=SW code=3", then "SLC CONNECTED" while it has a
+bond), unpair and ota; its log lines carry the uptime since its own start.
 """
 import argparse
 import json
@@ -120,11 +124,19 @@ T = {m.group(1): int(m.group(2)) for m in re.finditer(r"CTL_T_(\w+)\s*=\s*(\d+)"
 
 # --- the LyraT console behind the UART ----------------------------------------------------------------------------
 
+LYRAT_MAIN = TOOLS.parent / "main" / "main.c"
+REBOOT_S = int(re.search(r"#define REBOOT_DELAY_MS (\d+)", LYRAT_MAIN.read_text(encoding="utf-8")).group(1)) / 1000.0
+RESTART_S = D["RESTART_DELAY_MS"] / 1000.0
+PEER = "xx:xx:xx:xx:3c:7a"            # the peer as the firmware shows it on the channel: the last two bytes only
+SLC_AFTER_BOOT_S = 1.5
+
+
 class LyratConsole:
     """ctl_on_command() of the LyraT: a command runs once per seq, a repeat gets the stored reply again."""
 
-
-    def __init__(self):
+    def __init__(self, sim=None):
+        self.sim = sim
+        self.bonds = 1
         self.last_seq = None
         self.last_reply = None
         self.cmds = self.dups = self.replies = self.hb = self.acks = 0
@@ -145,6 +157,31 @@ class LyratConsole:
             return ST_OK, "lyrat_resend sim"
         if word == "status":
             return ST_OK, "slc=%d sco=%d tone=%d" % (self.slc, self.sco, self.tone)
+        if word == "s":
+            peers = ["  peer[0] = %s" % PEER] if self.bonds else []
+            return ST_OK, "\n".join(["=== DSP Pipeline Status ===", "  tone=%d" % self.tone, "  boot_reason=%s" % (
+                self.sim.lyrat_reason if self.sim else "POWERON"), "  SCO     = %s bt_rate=16000" % (
+                "active" if self.sco else "idle"), "  SLC     = %s" % ("up" if self.slc else "down"), "  plc=1",
+                "  bonds=%d" % self.bonds, "  peers=%d" % len(peers)] + peers + ["  heap    = 123456"])
+        if word == "reboot":
+            if self.sco and arg.strip() != "1":
+                return ST_OK, "reboot refused: SCO active, 'reboot 1' forces"
+            if self.sim:
+                self.sim.lyrat_reboot_at = time.monotonic() + REBOOT_S
+            return ST_OK, "reboot in %d ms" % int(REBOOT_S * 1000)
+        if word == "unpair":
+            if self.sco:
+                return ST_OK, "unpair refused: SCO active"
+            before, self.bonds, self.slc = self.bonds, 0, 0
+            return ST_OK, "unpair removed=%d bonds_before=%d peers=0" % (before, before)
+        if word == "ota" and self.sim:
+            return ST_OK, self.sim.lyrat_ota_text()
+        if word == "_pair" and self.sim:
+            # Not a firmware command: what the phone's pairing does to the board, for the tests of round.py link.
+            self.bonds = 1
+            self.sim.lyrat_log("SSP confirm %s" % (arg.strip() or "123456"), tag="BT")
+            self.sim.slc_at = time.monotonic() + 0.5
+            return ST_OK, "paired"
         if word == "ustat":
             return ST_OK, ("ustat baud=115200 rx_level=1 rx_bytes=0 frames=%d bad_hdr=0 bad_crc=0 trunc=0 noise=0 brk=0 "
                            "frm=0 ovf=0 cmds=%d dups=%d replies=%d hb=%d acks=%d bad_type=0 tx_fail=0"
@@ -244,7 +281,13 @@ class Sim(s3_emu.Emulator):
         self.clock = time.monotonic()
         self.loss, self.dup = args.stream_loss, args.stream_dup
         self.rnd_stream = random.Random(11)
-        self.console = LyratConsole()
+        self.console = LyratConsole(self)
+        self.lyrat_reboot_at = None
+        self.lyrat_t0 = time.monotonic()
+        self.lyrat_reason = "POWERON"
+        self.slc_at = time.monotonic() + SLC_AFTER_BOOT_S
+        self.s3_restart_at = None
+        self.txp = 80            # the driver's own cap after start, 20 dBm
         self.lyrat_silent = args.lyrat_silent
         self.tx_mode = TX_AUTO
         self.tx_edges = 0
@@ -330,6 +373,27 @@ class Sim(s3_emu.Emulator):
             if 1200 <= baud <= 921600:
                 self.baud = baud
             reply = "UB %d" % self.baud
+        elif text.startswith("UX "):
+            try:
+                boot = int(text[3:].split()[0])
+            except (ValueError, IndexError):
+                boot = -1
+            now = boot == self.s3.boot
+            reply = "UX %d %d" % (max(boot, 0), int(now))
+            if now:
+                self.s3_restart_at = time.monotonic() + RESTART_S
+        elif text == "UP" or text.startswith("UP "):
+            err = 0
+            if text.startswith("UP "):
+                try:
+                    q = int(text[3:].split()[0])
+                except (ValueError, IndexError):
+                    q = 0
+                if 8 <= q <= 84:
+                    self.txp = q
+                else:
+                    err = 0x102          # ESP_ERR_INVALID_ARG
+            reply = "UP %d %d" % (self.txp, err)
         elif text == "UQ":
             reply = json.dumps(self.uq(), separators=(",", ":"))
         else:
@@ -410,8 +474,61 @@ class Sim(s3_emu.Emulator):
                             s.send_fail += 1
 
     # --- the LyraT's heartbeat and the S3's stat line -------------------------------------------------------------------
+    def lyrat_ota_text(self):
+        b = self.lyrat
+        inv = b.last_invalid.elf[:16] if b.last_invalid else "-"
+        return ("ota state=idle run=%s ver=%s elf=%s img=%s inv=%s selftest=%s baud=115200"
+                % (b.slot, b.run.version.replace(" ", "_")[:23], b.run.elf[:16], b.img, inv, b.selftest))
+
+    def lyrat_log(self, text, level="I", tag="LyraT"):
+        up = int((time.monotonic() - self.lyrat_t0) * 1000)
+        self.ly_ring.log(s3_emu.now_ms(), "%s (%d) %s: %s" % (level, up, tag, text))
+
+    def lyrat_booted(self, reason, code):
+        """A start of the LyraT: new boot id (Board did it, or here), a new log ring, the first lines of app_main()."""
+        self.lyrat_t0 = time.monotonic()
+        self.lyrat_reason = reason
+        self.ly_ring = H.Ring(96, 1, self.lyrat.boot)
+        self.lyrat_log("BOOT reset_reason=%s code=%d" % (reason, code))
+        self.lyrat_log("=== LyraT Phone Stream - All Phases ===")
+        c = self.console
+        c.last_seq = c.last_reply = None
+        c.slc = c.sco = 0
+        c.start = time.monotonic()
+        if c.bonds:
+            self.lyrat_log("peer[0] = 11:22:33:44:3c:7a", tag="BT")
+        self.slc_at = time.monotonic() + SLC_AFTER_BOOT_S if c.bonds else None
+
+    def s3_booted(self, new_boot=True):
+        """esp_restart() of the S3 (UX, or an update): new boot id, a new log ring, the relay's state back to its start."""
+        if new_boot:
+            self.s3.boot = random.randrange(65536)
+            self.s3.restarts += 1
+            self.s3.down_until = time.monotonic() + 1.0
+        self.s3_ring = H.Ring(128, 0, self.s3.boot)
+        self.s3_ring.log(s3_emu.now_ms(), "I (25) s3eth: start after a restart over the network")
+        self.relay_ring = H.Ring(128, 1, 0)
+        self.log_peer = None             # a new start knows no listener until the next LOG1
+        self.tx_mode, self.peer, self.dest = TX_AUTO, None, None
+        self.started = time.monotonic()
+        self.txp = 80
+
     def lyrat_step(self):
         t = time.monotonic()
+        if self.lyrat_reboot_at and t >= self.lyrat_reboot_at:
+            self.lyrat_reboot_at = None
+            self.lyrat.boot = random.randrange(65536)
+            self.lyrat.restarts += 1
+            self.lyrat.down_until = t + 0.4
+            self.ly_rx.reset()
+            self.lyrat_booted("SW", 3)
+        if self.s3_restart_at and t >= self.s3_restart_at:
+            self.s3_restart_at = None
+            self.s3_booted()
+        if self.slc_at and t >= self.slc_at and self.lyrat.up() and self.console.bonds:
+            self.slc_at = None
+            self.console.slc = 1
+            self.lyrat_log("SLC CONNECTED", tag="BT")
         if t >= self.next_hb:
             self.next_hb = t + 1.0
             if self.lyrat.up() and not self.lyrat_silent:
@@ -426,10 +543,37 @@ class Sim(s3_emu.Emulator):
         cnt = self.uart.parsers["to_s3"].counts()
         return ("stat up=%d eth=ok link=1 ip=%s dsdin rate=%d peak=8000/8000 asdout rate=%d peak=8000/8000 "
                 "timeouts=%d/%d ovf=%d/%d send_fail=%d/%d sent=%d/%d streaming=%d pins_ok=1 uart tx=%d rx=%d "
-                "frames=%d bad=%d/%d lrelay_lost=0 selftest=%s net=wifi rssi=-52"
+                "frames=%d bad=%d/%d lrelay_lost=0 selftest=%s net=wifi rssi=-52 txp=%d"
                 % (int(time.monotonic() - self.started), self.host, RATE, RATE, c.timeouts, m.timeouts, c.overflows,
                    m.overflows, c.send_fail, m.send_fail, c.sent, m.sent, streaming, int(self.tx_on()),
-                   cnt["frames"] * 16, cnt["frames"], cnt["bad_header"], cnt["bad_crc"], self.s3.selftest))
+                   cnt["frames"] * 16, cnt["frames"], cnt["bad_header"], cnt["bad_crc"], self.s3.selftest, self.txp))
+
+    def log_step(self):
+        """log_step() of s3_emu with the uptime of each board since its own start in its lines, as ESP_LOG prints it:
+        a restart makes it small again (goal 093). The LyraT writes nothing while it is down."""
+        t = time.monotonic()
+        if t >= self.next_line:
+            self.next_line = t + 0.05
+            self.line_n += 1
+            self.s3_ring.log(s3_emu.now_ms(), "I (%d) s3eth: stat line %d" % (int((t - self.started) * 1000), self.line_n))
+            if self.lyrat.up():
+                self.lyrat_log("line %d" % self.line_n, level="W")
+        listening = self.log_peer is not None and t < self.log_until
+        if listening and self.lyrat.up() and not self.lyrat_silent:
+            payload, n = self.ly_ring.pack(600)          # the LyraT drains only with a listener
+            if n:
+                self.uart.send("to_s3", H.CTL_T_LOG, payload)
+        if listening and self.s3.up():
+            body, a = self.s3_ring.pack(1396)
+            body2, b = self.relay_ring.pack(1396 - len(body))
+            if a + b:
+                if self.rnd.random() < self.log_loss:
+                    self.dropped_datagrams += 1
+                else:
+                    try:
+                        self.log.sendto(b"UL" + bytes([1, a + b]) + body + body2, self.log_peer)
+                    except OSError:
+                        pass
 
     def handle_log(self, data, peer):
         """on_request() and answer() of s3_dbglog.c."""
@@ -465,10 +609,12 @@ class Sim(s3_emu.Emulator):
             for r in self.rx:
                 r.tick(s3_emu.now_ms())
             if self.s3.step():
+                self.s3_booted(new_boot=False)     # an update activated (or rolled back): Board gave the new boot id
                 self.rx = [H.CReceiver(0x300000, s3_emu.ota.CHIP_ESP32S3, "s3_eth_bridge", token=self.token or b""),
                            H.CReceiver(0x1F0000, s3_emu.ota.CHIP_ESP32, "lyrat_resend", token=self.token or b"")]
             if self.lyrat.step():
                 self.ly_rx.reset()
+                self.lyrat_booted("SW", 3)     # an update activated (or rolled back): esp_restart()
             self.relay_step()
             self.log_step()
             self.lyrat_step()

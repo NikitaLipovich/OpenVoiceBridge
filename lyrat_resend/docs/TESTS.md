@@ -34,9 +34,13 @@ if elsewhere), ESP-IDF v5.5.2 (`IDF_PATH`, `IDF_TOOLS_PATH`, as `tools/bench/fw.
 | `s3_sim` | The S3 simulator against the firmware source: numbers, JSON keys of TAP, UQ, LOG and the OTA query, the stream header byte by byte, the stat line, TAP and UC/UT/UB/UW rules, the lease | `tools/tests/test_s3_sim.py` |
 | `bench_tools` | `s3_uart.py` (also through a noisy UART: retries, each command runs once), `ota.py query` and `--dry-run` of both boards, `udplog.py --seconds`, `udp_record.py --tap` (WAV files, slots, a 1 kHz tone checked, loss and repeats counted) as processes against the simulator | `tools/tests/test_bench_tools.py` |
 | `bench_unit` | `fw.py` variant names, `audio_check` on tone, silence, noise and a wrong rate, `voice_check` noise measures, `phone_mic.level`, the mic floor of `udp_record`, every bench module loads | `tools/tests/test_bench_unit.py` |
+| `usb_free` | The bench without USB (goal 093): `first_flash.py --dry-run` (touches no port, file or build; network half passes, fails with its reason without the S3 or the LyraT), the secrets made from `wifi_secrets.h` without printing a value, `fw.current_variant()`; `console.NetWatch` (lines over the log, replies read by `round.py`'s parsers, `reboot` counted as a reset with reason `SW_RESET`, a lost listener comes back, the S3's console and `UX`); `round.reboot_trial` and `pair_trial` with the phone stubbed and `fw.py erase-bonds` over the network; `round.py power` PASS and FAIL on a reboot; `fw.py flash --image` both boards; `s3.py console/reset`; `s3_uart.py power` (`txp=` in stat) and `restart`; `owner_check.py ports` without COM; `call_record.py` with 5 % loss (silence of each lost packet at its frame, loss counters in its report); static: no COM port unless asked, no control characters in the tools | `tools/tests/test_usb_free.py` |
 | `platform_rom`, `platform_tools`, `platform_pins` | The three-board platform of goal 095 | `tools/platform/` |
 
 ## The S3 simulator
+
+`BENCH_NO_ADB=1` is set for every check: `round.adb()` answers nothing and `phone.adb()` refuses, so no test reaches the
+phone (goal 093).
 
 `tools/tests/s3_sim.py` is the Wi-Fi firmware of `s3_eth_bridge` with a LyraT behind it, on 127.0.0.1, on the real ports
 5004 to 5008. The bench tools reach it with `BENCH_S3_ADDR=127.0.0.1` (requests then leave from the loopback only and go
@@ -52,6 +56,12 @@ Images for OTA: `tools/tests/images.py prepare DIR [--s3 BIN] [--lyrat BIN]` mak
 newer one is the same build with another version and ELF SHA, checksum and hash made again. Without a build it makes
 synthetic images (no code in them: for the protocol only).
 
+Since goal 093 it also answers `UX <boot>` (restart, new boot id, new log ring) and `UP [qdbm]` (`txp=` in stat), and its
+LyraT console knows `s` (the status of the firmware with bonds, SLC and peers by their last two bytes), `reboot [1]`
+(restart after 1 s with the boot line `BOOT reset_reason=SW code=3`, then `SLC CONNECTED` while it has a bond), `unpair`
+and `ota`; `_pair <passkey>` is not a firmware command: it plays the phone's pairing (`SSP confirm`, bond, SLC) for the
+tests of `round.py link`.
+
 ## What is not checked here
 
 - Anything of the radio, the I2S bus, the GPIO registers, the flash and `esp_ota_*`: the glue of `main.c`, `s3_ota.c`,
@@ -60,3 +70,8 @@ synthetic images (no code in them: for the protocol only).
   both self-tests need (goal 092 DECISIONS D2).
 - The DSP code of the LyraT (`aec`, `spectral_ns`, `voice_ns`, `plc`, `msbc_codec`) only through its build.
 - `tools/bench/break_shape.py`: a script of goal 062 that runs on import with an argument.
+- Without USB (goal 093), only on the bench: the S3 on real Wi-Fi, the LyraT's log at 2 KB/s through the real UART (lines
+  lost in a burst), `reboot`, `unpair` and `UX` of the real firmwares, `esp_wifi_set_max_tx_power` at run time, and
+  `first_flash.py` without `--dry-run` (the USB flash of both boards, the backup of `sdkconfig`, the builds). The stages of
+  `round.py` that need the phone (`link`, `sco`, `audio`, `tap`, `uart`, `btloss`, `plc`, `record`) run here only in
+  parts: the trials of `link` with the phone stubbed; the rest is the same code with the console swapped.
