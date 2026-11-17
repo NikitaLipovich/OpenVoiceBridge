@@ -14,7 +14,10 @@ Variants compile bench switches through the ignored main/bench_variant.h:
   mac_b5, mac_b3, mac_b2, mac_b1   one byte of the Bluetooth address plus 1: the phone sees a new device, see goal 044 DECISIONS D7
   mac_b<I>p<N>                     byte I of the address plus N, for bench experiments that may burn an address (goal 055)
   no_ctl_uart                      the control UART task is not started (goal 057 #004); commands through the S3 stop working
-  bredr_p9, bredr_n12              fixed BR/EDR transmit power +9 or -12 dBm, the boot log prints it, goal 062: more current in transmit
+  bredr_p9, bredr_p6, bredr_p3, bredr_n12   fixed BR/EDR transmit power, dBm, the boot log prints it, goals 062, 063: more current in transmit
+  afh_N, afhassess_N, esco_pkt_xNNN, esco_lat_N  goal 063, only in its sandbox build: Wi-Fi channels the host marks bad (bit 0 ch 1, bit 1 ch 6, bit 2 ch 11),
+                                   the controller's own assessment of channels on or off,
+                                   packet types and latency the board allows when the phone opens the channel
   no_first_sniff                   the board does not ask for sniff before the phone, as before goal 055: burns addresses, comparison only
   no_wbs   CONFIG_BT_HFP_WBS_ENABLE=n in sdkconfig: the phone can only choose CVSD; any other variant restores =y
   fdrop    test build: console commands fdrop P B and fdstat replace frames with a marked loss, see goal 045
@@ -49,11 +52,18 @@ MACROS = {"no_pa": ("BENCH_NO_PA", 1), "no_bt": ("BENCH_NO_BT", 1),
           "mac_b2": ("BENCH_MAC_PATCH", 2 * 256 + 1), "mac_b1": ("BENCH_MAC_PATCH", 1 * 256 + 1),
           "fdrop": ("BENCH_FRAME_DROP", 1), "no_first_sniff": ("BENCH_NO_FIRST_SNIFF", 1),
           "nsinj": ("BENCH_NS_INJECT", 1), "afe": ("BENCH_NS_AFE", 1), "no_ctl_uart": ("BENCH_NO_CTL_UART", 1),
-          "bredr_p9": ("BENCH_BREDR_POWER", 7), "bredr_n12": ("BENCH_BREDR_POWER", 0)}
+          "bredr_p9": ("BENCH_BREDR_POWER", 7), "bredr_p6": ("BENCH_BREDR_POWER", 6), "bredr_p3": ("BENCH_BREDR_POWER", 5),
+          "bredr_n12": ("BENCH_BREDR_POWER", 0)}
 MAC_SHIFT = re.compile(r"^mac_b([0-5])p([1-9][0-9]?)$")
+BENCH_NUMBER = re.compile(r"^(afhassess|afh|esco_pkt|esco_lat)_(x?[0-9a-f]+)$")
+BENCH_NUMBER_MACROS = {"afhassess": "BENCH_AFH_ASSESS", "afh": "BENCH_AFH_BLOCK", "esco_pkt": "BENCH_ESCO_PKT", "esco_lat": "BENCH_ESCO_LAT"}
 
 
 def macro_of(name: str):
+    number = BENCH_NUMBER.match(name)
+    if number:
+        value = number.group(2)
+        return (BENCH_NUMBER_MACROS[number.group(1)], int(value[1:], 16) if value[0] == "x" else int(value))
     shift = MAC_SHIFT.match(name)
     return ("BENCH_MAC_PATCH", int(shift.group(1)) * 256 + int(shift.group(2))) if shift else MACROS.get(name)
 
