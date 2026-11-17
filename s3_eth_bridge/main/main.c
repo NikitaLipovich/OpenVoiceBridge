@@ -6,7 +6,11 @@
 // only while the LyraT is proven alive by a valid frame, and goes back to an input when the frames stop. Status goes to
 // the USB console.
 //
-// No address or password is built in. The PC sends "TAP1 <call> <mic>" to UDP port 5006, by broadcast until
+// Network: Wi-Fi station by default (the owner, 2026-11-17: no Ethernet cable, it brings the PC's ground into the I2S
+// tap). The network name and password come from main/ota_secrets.h, which git ignores; without them there is no
+// network and the board is flashed over USB only. Build with -DS3_NET_ETH=1 for the old W5500 path.
+//
+// No address is built in. The PC sends "TAP1 <call> <mic>" to UDP port 5006, by broadcast until
 // it knows this board, and repeats it. The streams then go to the sender's address, ports 5004 (call) and
 // 5005 (mic), until no request came for LEASE_MS or "TAP0" arrives. <call> and <mic> pick the slots: L, R or
 // LR. Each request is answered on its source port with one line of JSON counters.
@@ -50,6 +54,7 @@
 #include "esp_check.h"
 #include "esp_app_desc.h"
 #include "esp_eth.h"
+#include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
@@ -65,6 +70,23 @@
 #include "soc/io_mux_reg.h"
 
 static const char *TAG = "s3eth";
+
+#ifndef S3_NET_ETH
+#define S3_NET_ETH 0            // 0: Wi-Fi station (default), 1: W5500 Ethernet
+#endif
+#if __has_include("ota_secrets.h")
+#include "ota_secrets.h"
+#endif
+#ifndef WIFI_SSID
+#define WIFI_SSID ""
+#endif
+#ifndef WIFI_PASS
+#define WIFI_PASS ""
+#endif
+// Optional cap of the Wi-Fi transmit power in 0.25 dBm (8..84), to disturb the LyraT's Bluetooth less; 0 keeps the default.
+#ifndef WIFI_MAX_TX_QDBM
+#define WIFI_MAX_TX_QDBM 0
+#endif
 
 #define PIN_I2S_BCK     GPIO_NUM_15
 #define PIN_I2S_WS      GPIO_NUM_16
@@ -536,6 +558,8 @@ static void request_task(void *arg)
     }
 }
 
+#if S3_NET_ETH
+
 static void on_eth_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (id == ETHERNET_EVENT_CONNECTED) {
@@ -557,7 +581,7 @@ static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
     ESP_LOGI(TAG, "ethernet ip %s", s_ip);
 }
 
-static esp_err_t ethernet_init(void)
+static esp_err_t net_init(void)
 {
     ESP_RETURN_ON_ERROR(gpio_install_isr_service(0), TAG, "isr service");
 
@@ -607,6 +631,68 @@ static esp_err_t ethernet_init(void)
     return esp_eth_start(eth);
 }
 
+static int wifi_rssi(void) { return 0; }
+
+#else
+
+static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        s_link_up = true;
+        ESP_LOGI(TAG, "wifi associated");
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t *d = data;
+        if (s_link_up || s_got_ip) ESP_LOGW(TAG, "wifi lost (reason %d), reconnecting", d ? d->reason : -1);
+        s_link_up = false;
+        s_got_ip = false;
+        strcpy(s_ip, "-");
+        esp_wifi_connect();
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        const ip_event_got_ip_t *e = data;
+        snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&e->ip_info.ip));
+        s_got_ip = true;
+        ESP_LOGI(TAG, "wifi ip %s", s_ip);
+    }
+}
+
+static esp_err_t net_init(void)
+{
+    ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif");
+    ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "event loop");
+    ESP_RETURN_ON_FALSE(WIFI_SSID[0], ESP_ERR_NOT_FOUND, TAG, "no WIFI_SSID in main/ota_secrets.h");
+    ESP_RETURN_ON_FALSE(esp_netif_create_default_wifi_sta(), ESP_FAIL, TAG, "netif new");
+    wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_RETURN_ON_ERROR(esp_wifi_init(&init), TAG, "wifi init");
+    ESP_RETURN_ON_ERROR(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi_event, NULL), TAG, "wifi events");
+    ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_wifi_event, NULL), TAG, "ip events");
+    ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_RAM), TAG, "storage");   // the password stays out of nvs
+    wifi_config_t cfg = {0};
+    snprintf((char *)cfg.sta.ssid, sizeof(cfg.sta.ssid), "%s", WIFI_SSID);
+    snprintf((char *)cfg.sta.password, sizeof(cfg.sta.password), "%s", WIFI_PASS);
+    cfg.sta.threshold.authmode = WIFI_PASS[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+    ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "mode");
+    ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &cfg), TAG, "config");
+    ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "start");
+    // No power save: the requests, the UART relay and the update come from the PC at any time, and a dozing radio holds
+    // them until the next beacon. Only receiving is added; what we send does not change.
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    if (WIFI_MAX_TX_QDBM) {
+        esp_err_t p = esp_wifi_set_max_tx_power(WIFI_MAX_TX_QDBM);
+        if (p != ESP_OK) ESP_LOGW(TAG, "tx power %d: %s", WIFI_MAX_TX_QDBM, esp_err_to_name(p));
+    }
+    return ESP_OK;
+}
+
+static int wifi_rssi(void)
+{
+    wifi_ap_record_t ap;
+    return s_got_ip && esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0;
+}
+
+#endif
+
 static int report(listener_t *l, uint32_t dt_ms, char *out, size_t cap)
 {
     uint32_t frames = l->frames;
@@ -640,9 +726,9 @@ void app_main(void)
     if (a == ESP_OK) xTaskCreatePinnedToCore(listener_task, "i2s_call", 4096, &s_call, 10, NULL, 1);
     if (b == ESP_OK) xTaskCreatePinnedToCore(listener_task, "i2s_mic", 4096, &s_mic, 10, NULL, 1);
 
-    esp_err_t e = ethernet_init();
-    s_eth_ok = (e == ESP_OK);
-    if (!s_eth_ok) ESP_LOGE(TAG, "ethernet init failed: %s", esp_err_to_name(e));
+    esp_err_t e = net_init();
+    s_eth_ok = (e == ESP_OK);   // the network driver, Wi-Fi or Ethernet; the name stays for the tools
+    if (!s_eth_ok) ESP_LOGE(TAG, "network init failed: %s", esp_err_to_name(e));
 
     esp_err_t u = ctl_uart_init();
     s_uart_err = u;
@@ -650,7 +736,7 @@ void app_main(void)
     s_pins_ok = pins_check();
     if (s_eth_ok) xTaskCreatePinnedToCore(request_task, "tap_req", 4096, NULL, 5, NULL, 0);
     if (u == ESP_OK) xTaskCreatePinnedToCore(ctl_uart_task, "ctl_uart", 4096, NULL, 5, NULL, 0);
-    // The self-test runs without the network too: a new image without Ethernet must roll back.
+    // The self-test runs without the network too: a new image without the network must roll back.
     s3_ota_start(s_eth_ok);
     if (s_eth_ok) s3_log_start();
 
@@ -675,10 +761,11 @@ void app_main(void)
         snprintf(line + n, sizeof(line) - n,
                  " timeouts=%" PRIu32 "/%" PRIu32 " ovf=%" PRIu32 "/%" PRIu32 " send_fail=%" PRIu32 "/%" PRIu32
                  " sent=%" PRIu32 "/%" PRIu32 " streaming=%d pins_ok=%d uart tx=%d rx=%" PRIu32 " frames=%" PRIu32
-                 " bad=%" PRIu32 "/%" PRIu32 " lrelay_lost=%" PRIu32 " selftest=%s",
+                 " bad=%" PRIu32 "/%" PRIu32 " lrelay_lost=%" PRIu32 " selftest=%s net=%s rssi=%d",
                  s_call.timeouts, s_mic.timeouts, s_call.overflows, s_mic.overflows, s_call.send_fail, s_mic.send_fail,
                  s_call.sent, s_mic.sent, streaming, s_pins_ok, s_tx_on, s_ctl_rx_bytes, s_ctl_parser.frames,
-                 s_ctl_parser.bad_header, s_ctl_parser.bad_crc, s3_log_relay_lost(), s3_ota_selftest_name());
+                 s_ctl_parser.bad_header, s_ctl_parser.bad_crc, s3_log_relay_lost(), s3_ota_selftest_name(),
+                 S3_NET_ETH ? "eth" : "wifi", wifi_rssi());
         s3_log_line("%s", line);
     }
 }

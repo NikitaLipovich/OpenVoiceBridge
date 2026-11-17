@@ -52,6 +52,11 @@ third board reached over Wi-Fi uses the same code.
 The bootloader with rollback, the table and `otadata` are written by USB once. `sdkconfig` is generated and not in git:
 an old one keeps the old table, so delete it (or build with `-D SDKCONFIG=<new file>`) before the first build of this
 version. `idf.py flash` then writes bootloader, table, `ota_data_initial.bin` and the app into `ota_0`. NVS stays.
+
+The S3 takes its Wi-Fi network, password and token from `s3_eth_bridge/main/ota_secrets.h` (git ignores it) through
+`__has_include`. ccache does not see a header that appears after an earlier build without it and hands back the old
+object, an image without Wi-Fi and with every update refused: after creating or changing the file, build once with
+`CCACHE_RECACHE=1` (or `idf.py fullclean`).
 `fw.py` checks the hashes of three images; with `otadata` there are four, see goal 091.
 
 ## Rollback and self-test
