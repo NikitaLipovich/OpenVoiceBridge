@@ -55,7 +55,7 @@ MACROS = {"no_pa": ("BENCH_NO_PA", 1), "no_bt": ("BENCH_NO_BT", 1),
           "bredr_p9": ("BENCH_BREDR_POWER", 7), "bredr_p6": ("BENCH_BREDR_POWER", 6), "bredr_p3": ("BENCH_BREDR_POWER", 5),
           "bredr_n12": ("BENCH_BREDR_POWER", 0)}
 MAC_SHIFT = re.compile(r"^mac_b([0-5])p([1-9][0-9]?)$")
-BENCH_NUMBER = re.compile(r"^(afhassess|afh|esco_pkt|esco_lat)_(x?[0-9a-f]+)$")
+BENCH_NUMBER = re.compile(r"^(afhassess|afh|esco_pkt|esco_lat)_(x[0-9a-f]+|[0-9]+)$")   # hex only with x
 BENCH_NUMBER_MACROS = {"afhassess": "BENCH_AFH_ASSESS", "afh": "BENCH_AFH_BLOCK", "esco_pkt": "BENCH_ESCO_PKT", "esco_lat": "BENCH_ESCO_LAT"}
 
 
