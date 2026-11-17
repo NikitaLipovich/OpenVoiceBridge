@@ -72,6 +72,15 @@ only after its self-test; until then any restart, crash or watchdog brings the o
 A failed self-test calls `esp_ota_mark_app_invalid_rollback_and_reboot()`. The LyraT does not restart during a call: when
 the 90 s end with SCO on, it waits for the call to end. An image that was flashed over USB is valid from the start.
 
+Only the first start after an update runs the self-test: the bootloader turns the new image's `NEW` into `PENDING_VERIFY`
+for that start and into `ABORTED` at the next one, and the image it then falls back to is `VALID`, without a self-test.
+After a USB flash the bootloader writes the first slot's entry as `VALID` at the first start, so the first update over the
+network can roll back too. `esp_ota_begin()` refuses while the running image is still `PENDING_VERIFY`, so a repeated
+upload cannot overwrite the image to fall back to. With the router off a working image therefore never rolls back: only
+an image uploaded just before rolls back once (it must, the bench has no USB to rescue an image without a network), and
+the S3 keeps asking for the network: three attempts at once, then one every 5 s (goal 094 #003; a failed attempt scans
+every channel next to the LyraT's Bluetooth).
+
 `FAILTEST` (flag of BEGIN, `ota.py --test-rollback`) stores a mark in NVS of the receiving board (namespace `ota`, key
 `failtest`); the new image finds it at its first start, clears it, and fails its self-test on purpose after 5 s. The board must come back with the old image and report the
 new one as `last_invalid`. This is how 091 checks the rollback on the hardware.
@@ -205,6 +214,9 @@ number (`dbg_ring_push_long`). `udplog.py` joins them back into one line. Withou
 Losses: a gap in the line numbers of one board whose `dropped` grew by the same count was lost on the board; the rest of
 the gap was lost on the way (UDP, or the S3's relay ring, counted in its `stat` line as `lrelay_lost`). A new boot id is a
 restart of that board.
+When the S3 cannot send (no IP while its Wi-Fi is lost) the datagram it packed waits and goes first once sending works;
+the lines behind it wait in the rings (goal 094 #002). Before, the packed lines were dropped: exactly those of the moment
+of the loss.
 
 Control on UDP 5008 of the S3, the answer goes to the source port, the log too:
 

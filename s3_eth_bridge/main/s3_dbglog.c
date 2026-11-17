@@ -31,7 +31,8 @@ static struct sockaddr_in s_peer;
 static volatile int64_t s_lease_until_us;
 static volatile uint8_t s_lyrat_level = DBG_LVL_I;
 static uint8_t s_s3_level = DBG_LVL_I;
-static uint32_t s_datagrams, s_send_fail, s_requests;
+static dbg_udp_t s_udp;           // the datagram whose send failed waits here (goal 094 #002)
+static uint32_t s_requests;
 
 void s3_log_init(uint16_t boot_id)
 {
@@ -99,8 +100,8 @@ static void answer(const struct sockaddr_in *to)
                      "\"relay\":{\"pending\":%lu,\"lost\":%lu,\"sent\":%lu},\"datagrams\":%lu,\"send_fail\":%lu}",
                      listening(), s_s3_level, s_lyrat_level, (unsigned long)dbg_ring_pending(&s_own),
                      (unsigned long)s_own.lost, (unsigned long)s_own.taken, (unsigned long)dbg_ring_pending(&s_relay),
-                     (unsigned long)s_relay.lost, (unsigned long)s_relay.taken, (unsigned long)s_datagrams,
-                     (unsigned long)s_send_fail);
+                     (unsigned long)s_relay.lost, (unsigned long)s_relay.taken, (unsigned long)s_udp.datagrams,
+                     (unsigned long)s_udp.send_fail);
     sendto(s_sock, text, n, MSG_DONTWAIT, (const struct sockaddr *)to, sizeof(*to));
 }
 
@@ -129,24 +130,14 @@ static void on_request(char *text, int n, const struct sockaddr_in *from)
     }
 }
 
-// Packs both rings into one datagram: own lines first, then the LyraT's.
-static size_t pack(uint8_t *buf)
+static int send_to_peer(void *ctx, const uint8_t *data, size_t len)
 {
-    uint32_t a = 0, b = 0;
-    size_t used = DBG_UDP_HDR;
-    used += dbg_ring_pack(&s_own, buf + used, DBG_UDP_MAX - used, &a);
-    used += dbg_ring_pack(&s_relay, buf + used, DBG_UDP_MAX - used, &b);
-    if (a + b == 0) return 0;
-    buf[0] = 'U';
-    buf[1] = 'L';
-    buf[2] = DBG_UDP_VERSION;
-    buf[3] = (uint8_t)(a + b);
-    return used;
+    struct sockaddr_in to = s_peer;
+    return sendto(s_sock, data, len, 0, (struct sockaddr *)&to, sizeof(to)) < 0;
 }
 
 static void log_task(void *arg)
 {
-    static uint8_t buf[DBG_UDP_MAX];
     static char text[64];
     for (;;) {
         struct sockaddr_in from;
@@ -157,13 +148,8 @@ static void log_task(void *arg)
             on_request(text, n, &from);
         }
         if (!listening()) continue;
-        for (int i = 0; i < BURST; i++) {
-            size_t len = pack(buf);
-            if (!len) break;
-            struct sockaddr_in to = s_peer;
-            if (sendto(s_sock, buf, len, 0, (struct sockaddr *)&to, sizeof(to)) < 0) s_send_fail++;
-            else s_datagrams++;
-        }
+        // Without an IP (Wi-Fi lost) the send fails: the lines then wait instead of being taken out and dropped.
+        dbg_udp_round(&s_udp, &s_own, &s_relay, BURST, send_to_peer, NULL);
     }
 }
 

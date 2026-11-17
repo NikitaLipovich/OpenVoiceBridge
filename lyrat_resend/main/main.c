@@ -68,6 +68,7 @@
 #include "es8388_codec.h"
 
 #include "aec.h"
+#include "call_limit.h"
 #include "spectral_ns.h"
 #include "msbc_codec.h"
 #include "plc.h"
@@ -156,9 +157,7 @@ static dsp_cfg_t s_dsp = {
 #define NOISE_GATE_CLOSE  380   // RMS threshold to start hold-down
 #define NOISE_GATE_HOLD   4     // frames (~60ms) below CLOSE to actually close
 
-// Soft limiter parameters
-#define SW_LIMIT_THRESHOLD  16384   // ~0.5 FS: linear zone
-#define SW_LIMIT_MAX        32700   // ceiling
+// Soft limiter: call_limit.h
 
 // ---------------------------------------------------------------------------
 // Global handles
@@ -860,14 +859,7 @@ static void i2s_tx_task(void *arg)
             int32_t s = (int32_t)mono_buf[i] * gain;
 
             if (use_limiter) {
-                int32_t sign = (s < 0) ? -1 : 1;
-                int32_t a = s * sign;
-                if (a > SW_LIMIT_THRESHOLD) {
-                    int32_t excess   = a - SW_LIMIT_THRESHOLD;
-                    int32_t headroom = SW_LIMIT_MAX - SW_LIMIT_THRESHOLD;
-                    a = SW_LIMIT_THRESHOLD + (excess * headroom) / (headroom + excess);
-                }
-                s = sign * a;
+                s = call_soft_limit(s);
             } else {
                 if (s > 32767)  s = 32767;
                 if (s < -32768) s = -32768;

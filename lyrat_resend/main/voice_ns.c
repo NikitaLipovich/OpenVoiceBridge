@@ -271,6 +271,17 @@ void voice_ns_frame(int16_t *samples, size_t n)
 static void inject_make_task(void *arg);
 #endif
 
+// A mode whose handle exists: off and sns always, a WebRTC mode only when ns_pro_create() gave it one.
+static bool mode_available(int mode)
+{
+    if (mode < 0 || mode >= VNS_COUNT) return false;
+    if (mode == VNS_OFF || mode == VNS_SNS) return true;
+#ifdef BENCH_NS_AFE
+    if (mode == VNS_AFE) return s_afe_data != NULL;
+#endif
+    return s_web[mode] != NULL;
+}
+
 void voice_ns_init(void)
 {
     static const int web_level[] = {0, 1, 2};
@@ -284,6 +295,12 @@ void voice_ns_init(void)
     s_web[VNS_WEBO] = ns_create(10);
     afe_init();
 #endif
+    // The default is a WebRTC mode: without its handle web_frame() would call ns_process(NULL) in the mic task on the
+    // first frame. voice_ns_request() refuses such a mode later; the start needs the same rule (goal 094 #006).
+    if (!mode_available(s_cur)) {
+        ESP_LOGE(TAG, "ns=%s not available, ns=off", s_names[s_cur]);
+        s_cur = s_req = VNS_OFF;
+    }
     mode_start(s_cur);
 #ifdef BENCH_NS_INJECT
     xTaskCreatePinnedToCore(inject_make_task, "inj_make", 4096, NULL, 1, NULL, 1);
@@ -312,13 +329,7 @@ const char *voice_ns_names(void)
 
 void voice_ns_request(int mode)
 {
-    if (mode >= 0 && mode < VNS_COUNT && (mode != VNS_OFF ? s_web[mode] || mode == VNS_SNS
-#ifdef BENCH_NS_AFE
-        || (mode == VNS_AFE && s_afe_data)
-#endif
-        : true)) {
-        s_req = mode;
-    }
+    if (mode_available(mode)) s_req = mode;
 }
 
 int voice_ns_requested(void) { return s_req; }

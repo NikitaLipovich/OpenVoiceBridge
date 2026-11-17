@@ -245,6 +245,38 @@ uint32_t dbg_ring_pending(dbg_ring_t *r)
     return c;
 }
 
+size_t dbg_udp_pack(uint8_t *buf, size_t cap, dbg_ring_t *first, dbg_ring_t *second)
+{
+    uint32_t a = 0, b = 0;
+    if (cap <= DBG_UDP_HDR) return 0;
+    size_t used = DBG_UDP_HDR;
+    used += dbg_ring_pack(first, buf + used, cap - used, &a);
+    if (second) used += dbg_ring_pack(second, buf + used, cap - used, &b);
+    if (a + b == 0) return 0;
+    buf[0] = 'U';
+    buf[1] = 'L';
+    buf[2] = DBG_UDP_VERSION;
+    buf[3] = (uint8_t)(a + b);
+    return used;
+}
+
+int dbg_udp_round(dbg_udp_t *u, dbg_ring_t *first, dbg_ring_t *second, int burst, dbg_send_fn send, void *ctx)
+{
+    int sent = 0;
+    while (sent < burst) {
+        if (!u->len) u->len = dbg_udp_pack(u->buf, sizeof(u->buf), first, second);
+        if (!u->len) break;
+        if (send(ctx, u->buf, u->len) != 0) {
+            u->send_fail++;         // kept in u->buf: the next round sends it again
+            break;
+        }
+        u->len = 0;
+        u->datagrams++;
+        sent++;
+    }
+    return sent;
+}
+
 #ifdef ESP_PLATFORM
 static dbg_ring_t *s_hook_ring;
 static vprintf_like_t s_prev_vprintf;

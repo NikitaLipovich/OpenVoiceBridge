@@ -141,5 +141,93 @@ class RepeatedNumbers(unittest.TestCase):
         self.assertEqual((s["lines"], s["duplicates"], s["lost_way"], s["lost_board"]), (10, 5, 0, 0))
 
 
+class SendFailureKeepsLines(unittest.TestCase):
+    """Goal 094 #002: the S3's log task took the lines out of its rings and dropped the datagram when sendto failed (no
+    IP while Wi-Fi is lost, no lwIP buffer), so the lines of the moment of the loss never reached the PC. Now the
+    datagram waits and goes first when sending works again; a gap counts only lines the ring itself had to drop."""
+
+    def setUp(self):
+        self.own, self.relay = H.Ring(16, 0, 7), H.Ring(16, 1, 9)
+        self.udp = H.UdpSender(self.own, self.relay)
+        self.got = []
+
+    def ok(self, data):
+        self.got.append(data)
+        return True
+
+    def recs(self):
+        out = []
+        for d in self.got:
+            recs = udplog.parse_datagram(d)
+            self.assertIsNotNone(recs)
+            out += recs
+        return out
+
+    def test_failed_send_is_sent_again_whole(self):
+        for i in range(3):
+            self.own.log(i, "I (%d) s3eth: line %d" % (i, i))
+        self.relay.log(5, "I (5) BT: relayed")
+        self.assertEqual(self.udp.round(lambda d: False), 0)
+        info = self.udp.info()
+        self.assertEqual((info["send_fail"], info["datagrams"]), (1, 0))
+        self.assertGreater(info["held"], 0)
+        self.own.log(9, "I (9) s3eth: wifi lost (reason 201), reconnecting")     # comes while the network is away
+        self.assertEqual(self.udp.round(lambda d: False), 0)                     # still away: nothing new is taken
+        self.assertEqual(self.own.info()["count"], 1)
+        self.assertEqual(self.udp.round(self.ok), 2)                             # the kept datagram, then the new line
+        recs = self.recs()
+        self.assertEqual([(r["board"], r["seq"]) for r in recs], [(0, 0), (0, 1), (0, 2), (1, 0), (0, 3)])
+        t = udplog.Tracker()
+        for r in recs:
+            t.add(r)
+        s = t.summary()
+        self.assertEqual((s["s3"]["lost_way"], s["s3"]["lost_board"], s["lyrat"]["lost_way"]), (0, 0, 0))
+        self.assertEqual(self.udp.info(), {"held": 0, "datagrams": 2, "send_fail": 2})
+
+    def test_burst_stops_at_the_first_failure(self):
+        self.own = H.Ring(64, 0, 7)
+        self.udp = H.UdpSender(self.own, self.relay)
+        for i in range(60):
+            self.own.log(i, "I (%d) s3eth: %s" % (i, "y" * 120))
+        calls = []
+
+        def second_fails(d):
+            calls.append(d)
+            if len(calls) == 2:
+                return False
+            self.got.append(d)
+            return True
+        self.assertEqual(self.udp.round(second_fails, burst=8), 1)
+        self.assertEqual(len(calls), 2)
+        self.assertGreater(self.udp.info()["held"], 0)
+        while self.udp.round(self.ok):
+            pass
+        self.assertEqual(self.got[1], calls[1])                                  # the failed one went next, unchanged
+        self.assertEqual([r["seq"] for r in self.recs()], list(range(60)))
+
+    def test_full_ring_while_away_counts_on_the_board_not_on_the_way(self):
+        ring = H.Ring(4, 0, 3)
+        udp = H.UdpSender(ring)
+        for i in range(4):
+            ring.log(i, "I (%d) s3eth: before" % i)
+        udp.round(lambda d: False)                     # the 4 lines are in the kept datagram, the ring is empty again
+        for i in range(6):
+            ring.log(10 + i, "I (%d) s3eth: during" % i)   # 4 fit, 2 dropped by the ring
+        while udp.round(self.ok):
+            pass
+        ring.log(20, "I (20) s3eth: wifi ip")          # its counter of lost lines shows the 2 to the PC
+        udp.round(self.ok)
+        t = udplog.Tracker()
+        for r in self.recs():
+            t.add(r)
+        s = t.summary()["s3"]
+        self.assertEqual((s["lines"], s["lost_way"], s["lost_board"]), (9, 0, 2))
+
+    def test_nothing_to_send_is_not_a_datagram(self):
+        self.assertEqual(self.udp.round(self.ok), 0)
+        self.assertEqual(self.got, [])
+        self.assertEqual(self.udp.info()["send_fail"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

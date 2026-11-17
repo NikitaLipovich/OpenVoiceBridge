@@ -149,8 +149,8 @@ typedef struct {
 #define TX_MODE_AUTO    2
 #ifndef CTL_TX_MODE_BOOT
 #define CTL_TX_MODE_BOOT TX_MODE_AUTO
-#define RESTART_DELAY_MS 500
 #endif
+#define RESTART_DELAY_MS 500           // "UX": the reply leaves first
 
 static listener_t s_call = {.name = "dsdin", .stream = 0, .port = PORT_CALL, .slots = SLOT_LR};
 static listener_t s_mic = {.name = "asdout", .stream = 1, .port = PORT_MIC, .slots = SLOT_LR};
@@ -673,6 +673,33 @@ static esp_err_t wifi_set_tx_power(int qdbm) { (void)qdbm; return ESP_ERR_NOT_SU
 
 #else
 
+// Each failed attempt scans every channel at full power next to the LyraT's Bluetooth. With the access point gone (router
+// off) that went on without a break; now the first attempts are at once, then one every WIFI_RETRY_MS. Goal 094 #003.
+#define WIFI_RETRY_AT_ONCE  3
+#define WIFI_RETRY_MS       5000
+
+static esp_timer_handle_t s_wifi_retry;
+static uint32_t s_wifi_fails;           // attempts in a row without an IP; only the event task touches it
+
+static void wifi_retry_now(void *arg)
+{
+    esp_err_t err = esp_wifi_connect();
+    // No attempt started means no event will come either: try again later rather than never.
+    if (err != ESP_OK && esp_timer_start_once(s_wifi_retry, WIFI_RETRY_MS * 1000ULL) != ESP_OK) {
+        ESP_LOGE(TAG, "wifi retry: %s", esp_err_to_name(err));
+    }
+}
+
+static void wifi_retry(void)
+{
+    if (++s_wifi_fails <= WIFI_RETRY_AT_ONCE || !s_wifi_retry) {
+        esp_wifi_connect();
+    } else {
+        esp_timer_stop(s_wifi_retry);
+        esp_timer_start_once(s_wifi_retry, WIFI_RETRY_MS * 1000ULL);
+    }
+}
+
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
@@ -683,14 +710,18 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *d = data;
         if (s_link_up || s_got_ip) ESP_LOGW(TAG, "wifi lost (reason %d), reconnecting", d ? d->reason : -1);
+        if (s_wifi_fails == WIFI_RETRY_AT_ONCE) {
+            ESP_LOGW(TAG, "wifi: no network (reason %d), next attempts every %d ms", d ? d->reason : -1, WIFI_RETRY_MS);
+        }
         s_link_up = false;
         s_got_ip = false;
         strcpy(s_ip, "-");
-        esp_wifi_connect();
+        wifi_retry();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *e = data;
         snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&e->ip_info.ip));
         s_got_ip = true;
+        s_wifi_fails = 0;
         ESP_LOGI(TAG, "wifi ip %s", s_ip);
     }
 }
@@ -700,6 +731,8 @@ static esp_err_t net_init(void)
     ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif");
     ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "event loop");
     ESP_RETURN_ON_FALSE(WIFI_SSID[0], ESP_ERR_NOT_FOUND, TAG, "no WIFI_SSID in main/ota_secrets.h");
+    const esp_timer_create_args_t retry = {.callback = wifi_retry_now, .name = "wifi_retry"};
+    ESP_RETURN_ON_ERROR(esp_timer_create(&retry, &s_wifi_retry), TAG, "retry timer");
     ESP_RETURN_ON_FALSE(esp_netif_create_default_wifi_sta(), ESP_FAIL, TAG, "netif new");
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&init), TAG, "wifi init");

@@ -55,8 +55,12 @@ CHECKS = [
      [PY, str(TOOLS / "android" / "build_apk.py"), "--out", "{run}/apk"], TOOLS / "android", 600, "build", False),
     ("c_ctl_frame", "UART framing in C: limits of the length, CRC and header damage, resync, pauses, repeats",
      unittest_cmd("test_ctl_frame"), TESTS, 120, "base", False),
-    ("c_dbg_log", "log ring in C: long lines in parts and their join, ring full mid-line, repeats; old and new stat line",
+    ("c_dbg_log", "log ring in C: long lines in parts and their join, ring full mid-line, repeats; old and new stat line; "
+                  "a failed UDP send keeps its lines",
      unittest_cmd("test_dbg_log"), TESTS, 120, "base", False),
+    ("fw_review", "findings of the review of goal 094: soft limiter in C, Wi-Fi retry pause, self-test only once, "
+                  "UX delay in any build, noise mode at start",
+     unittest_cmd("test_fw_review"), TESTS, 120, "base", False),
     ("ota_protocol", "OTA protocol C against Python: loss, reorder, bit errors, token, rollback rules, log ring",
      unittest_cmd("test_protocol"), OTA_TEST, 900, "base", True),
     ("ota_tools", "ota.py of both boards (dry run, update, rollback, wrong token and board) and udplog.py vs the emulator",

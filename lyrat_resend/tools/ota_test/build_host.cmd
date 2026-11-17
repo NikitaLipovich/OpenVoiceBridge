@@ -1,5 +1,5 @@
 @echo off
-rem Builds otahost.dll from the firmware's shared sources (ota_link, ota_sha256, dbg_log, ctl_frame) with MSVC.
+rem Builds otahost.dll from the firmware's shared sources (ota_link, ota_sha256, dbg_log, ctl_frame, call_limit) with MSVC.
 rem Needs Visual Studio Build Tools 2022 (cl). Output: tools\ota_test\build\otahost.dll (ignored by git).
 set M=%~dp0..\..\main
 set OUT=%~dp0build

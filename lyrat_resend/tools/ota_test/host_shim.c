@@ -8,6 +8,7 @@
 #include "ctl_frame.h"
 #include "ota_link.h"
 #include "dbg_log.h"
+#include "call_limit.h"
 
 size_t host_ctl_build(uint8_t *out, uint8_t type, uint16_t seq, const uint8_t *payload, size_t len)
 {
@@ -92,3 +93,12 @@ int host_ring_log(dbg_ring_t *r, uint32_t t_ms, const char *line) { return ring_
 
 // count, lost, seq, taken
 void host_ring_info(dbg_ring_t *r, uint32_t *v) { v[0] = r->count; v[1] = r->lost; v[2] = r->seq; v[3] = r->taken; }
+
+// The UDP sender of the log (goal 094 #002): a zeroed dbg_udp_t and its counters for ctypes.
+dbg_udp_t *host_udp_new(void) { return (dbg_udp_t *)calloc(1, sizeof(dbg_udp_t)); }
+
+// held bytes, datagrams, send_fail
+void host_udp_info(const dbg_udp_t *u, uint32_t *v) { v[0] = (uint32_t)u->len; v[1] = u->datagrams; v[2] = u->send_fail; }
+
+// The soft limiter of the LyraT's call audio (goal 094 #004).
+int16_t host_soft_limit(int32_t s) { return call_soft_limit(s); }

@@ -31,6 +31,8 @@ EXPORTS
     dbg_ring_pending
     dbg_rec_encode
     dbg_line_level
+    dbg_udp_pack
+    dbg_udp_round
     host_ctl_build
     host_ctl_parser_new
     host_ctl_parser_free
@@ -51,3 +53,6 @@ EXPORTS
     host_ring_new
     host_ring_log
     host_ring_info
+    host_udp_new
+    host_udp_info
+    host_soft_limit

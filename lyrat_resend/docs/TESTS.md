@@ -22,13 +22,14 @@ if elsewhere), ESP-IDF v5.5.2 (`IDF_PATH`, `IDF_TOOLS_PATH`, as `tools/bench/fw.
 
 | Name | What it proves | Code |
 |---|---|---|
-| `host_dll` | The protocol C code of both firmwares (`ota_link`, `ota_sha256`, `dbg_log`, `ctl_frame.h`) builds with MSVC `/W4 /WX` | `tools/ota_test/build_host.cmd` |
+| `host_dll` | The protocol C code of both firmwares (`ota_link`, `ota_sha256`, `dbg_log`, `ctl_frame.h`, `call_limit.h`) builds with MSVC `/W4 /WX` | `tools/ota_test/build_host.cmd` |
 | `platform_dll` | The ROM loader C code of the platform builds the same way | `tools/platform/build_host.cmd` |
 | `static` | No value of the ignored secret files in any tracked file (values never printed), the secret and local files not tracked and covered by `.gitignore`, the S3 defaults to `S3_NET_ETH 0` | `tools/tests/static_check.py` |
 | `fw_build` | S3 and LyraT built into `bench_runs/tests/builds/<board>` with their own sdkconfig: the partition table of the image = `partitions_ota.csv` = the tables of `OTA.md`, rollback on, image within 85 % of the slot and whole (checksum, hash), Wi-Fi name, password and token in the S3 image (bytes compared, never printed; a ccache trap is rebuilt once with `CCACHE_RECACHE=1`), the working `build/`, `sdkconfig` and git status unchanged | `tools/tests/fw_build_check.py` |
 | `sco_probe` | The Android probe builds; it is not installed | `tools/android/build_apk.py --out <run>/apk` |
 | `c_ctl_frame` | UART framing in C: empty and largest payload, one byte too long, every single bit flip refused, garbage, a frame inside a false header, cut by a pause, clock wrap, repeated seq | `tools/tests/test_ctl_frame.py` |
-| `c_dbg_log` | Log ring in C: a line longer than a slot in parts and joined again, slot boundary, ring full mid-line, a repeated datagram; the stat line of old and new firmware | `tools/tests/test_dbg_log.py` |
+| `c_dbg_log` | Log ring in C: a line longer than a slot in parts and joined again, slot boundary, ring full mid-line, a repeated datagram; the stat line of old and new firmware; the S3's UDP sender keeps a datagram whose send failed (no IP) and sends it first when the network is back, a gap then counts only what the ring dropped (goal 094 #002) | `tools/tests/test_dbg_log.py` |
+| `fw_review` | Findings of the code review of goal 094: the LyraT's soft limiter in C (no sign flip at call gain 8, monotonic), the S3's Wi-Fi retry pause (a few at once, then one per 5 s, reset by an IP), `RESTART_DELAY_MS` in any build, the self-test only for an image in `PENDING_VERIFY` (router off: no rollback loop), the noise mode at start only with its handle | `tools/tests/test_fw_review.py` |
 | `ota_protocol` | OTA protocol, C against the Python model (goal 090) | `tools/ota_test/test_protocol.py` |
 | `ota_tools` | `ota.py` both boards in every mode and `udplog.py` against `s3_emu.py` (goal 090) | `tools/ota_test/test_tools.py` |
 | `s3_sim` | The S3 simulator against the firmware source: numbers, JSON keys of TAP, UQ, LOG and the OTA query, the stream header byte by byte, the stat line, TAP and UC/UT/UB/UW rules, the lease | `tools/tests/test_s3_sim.py` |

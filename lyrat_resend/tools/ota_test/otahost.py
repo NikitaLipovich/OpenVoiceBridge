@@ -338,6 +338,42 @@ class Ring:
         return dict(zip(("count", "lost", "seq", "taken"), v))
 
 
+SEND_FN = C.CFUNCTYPE(C.c_int, C.c_void_p, C.POINTER(C.c_uint8), C.c_size_t)
+lib.host_udp_new.restype = C.c_void_p
+lib.host_udp_info.argtypes = [C.c_void_p, C.c_void_p]
+lib.dbg_udp_pack.restype = C.c_size_t
+lib.dbg_udp_pack.argtypes = [C.c_void_p, C.c_size_t, C.c_void_p, C.c_void_p]
+lib.dbg_udp_round.argtypes = [C.c_void_p, C.c_void_p, C.c_void_p, C.c_int, SEND_FN, C.c_void_p]
+
+
+class UdpSender:
+    """dbg_udp_round() of the S3's log task over two rings; send(bytes) -> True when the datagram went (goal 094 #002)."""
+
+    def __init__(self, first: "Ring", second: "Ring" = None):
+        self.u = lib.host_udp_new()
+        self.first, self.second = first, second
+
+    def round(self, send, burst=8):
+        def cb(ctx, data, n):
+            return 0 if send(C.string_at(data, n)) else 1
+        fn = SEND_FN(cb)
+        return lib.dbg_udp_round(self.u, self.first.r, self.second.r if self.second else None, burst, fn, None)
+
+    def info(self):
+        v = (C.c_uint32 * 3)()
+        lib.host_udp_info(self.u, v)
+        return dict(zip(("held", "datagrams", "send_fail"), v))
+
+
+lib.host_soft_limit.argtypes = [C.c_int32]
+lib.host_soft_limit.restype = C.c_int16
+
+
+def soft_limit(s: int) -> int:
+    """call_soft_limit() of the LyraT (call_limit.h): a sample times the call gain in, the limited sample out."""
+    return lib.host_soft_limit(s)
+
+
 def line_level(text: str):
     b = text.encode()
     return lib.dbg_line_level(b, len(b))

@@ -75,6 +75,19 @@ int dbg_ring_push_record(dbg_ring_t *r, const uint8_t *rec, size_t len, size_t *
 size_t dbg_ring_pack(dbg_ring_t *r, uint8_t *out, size_t cap, uint32_t *count);
 uint32_t dbg_ring_pending(dbg_ring_t *r);
 
+// UDP sender (S3): both rings in one datagram, own lines first. A datagram whose send failed is kept and sent again
+// before anything new is packed, so a network without an IP or without buffers for a while delays the lines instead of
+// dropping them (goal 094 #002). Lines that do not fit then wait in the rings and, when those fill, are counted as lost.
+typedef int (*dbg_send_fn)(void *ctx, const uint8_t *data, size_t len);     // 0 sent, nonzero failed
+typedef struct {
+    uint8_t buf[DBG_UDP_MAX];
+    size_t len;                 // bytes of a packed datagram not sent yet, 0 none
+    uint32_t datagrams, send_fail;
+} dbg_udp_t;
+size_t dbg_udp_pack(uint8_t *buf, size_t cap, dbg_ring_t *first, dbg_ring_t *second);
+// Up to burst datagrams; stops at the first failed send. Returns the datagrams sent.
+int dbg_udp_round(dbg_udp_t *u, dbg_ring_t *first, dbg_ring_t *second, int burst, dbg_send_fn send, void *ctx);
+
 size_t dbg_rec_encode(uint8_t *out, size_t cap, const dbg_slot_t *s);
 // Level of an ESP_LOG line ("E (", "W (", ...) after an optional colour code; 0 when it is not one.
 int dbg_line_level(const char *text, size_t len);

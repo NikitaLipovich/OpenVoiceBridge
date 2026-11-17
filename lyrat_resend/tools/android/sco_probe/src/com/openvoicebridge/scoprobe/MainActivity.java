@@ -375,6 +375,18 @@ public class MainActivity extends Activity {
         return out;
     }
 
+    private void onOutputFailed(OutputLoop loop, String why) {
+        fail(why);
+        if (lastPlay != null) {
+            put(lastPlay, "state", "failed");
+            put(lastPlay, "error", why);
+        }
+        if (output == loop) {
+            output = null;  // the next open starts a new loop; a newer loop stays as it is
+        }
+        writeStatus();
+    }
+
     private void onPlayDone(int written) {
         if (lastPlay != null) {
             put(lastPlay, "state", "done");
@@ -432,9 +444,10 @@ public class MainActivity extends Activity {
         @Override
         public void run() {
             int rate = TRACK_RATE;
-            AudioTrack track = newTrack(rate);
-            short[] silence = new short[rate / 50];
+            AudioTrack track = null;
             try {
+                track = newTrack(rate);
+                short[] silence = new short[rate / 50];
                 while (!stop) {
                     short[] samples = takePending();
                     if (samples == null) {
@@ -444,6 +457,7 @@ public class MainActivity extends Activity {
                     if (pendingRate != rate) {
                         track.stop();
                         track.release();
+                        track = null;       // released: finally must not touch it again
                         rate = pendingRate;
                         track = newTrack(rate);
                         silence = new short[rate / 50];
@@ -464,10 +478,22 @@ public class MainActivity extends Activity {
                         }
                     });
                 }
+            } catch (RuntimeException e) {
+                // A track the system refuses (a rate it cannot play, no audio resources) ended the whole app: an
+                // exception out of this thread is uncaught. Now it is a failed command in status.json (goal 094 #007).
+                final String why = "output: " + e.getClass().getSimpleName() + ": " + e.getMessage();
+                main.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        onOutputFailed(OutputLoop.this, why);
+                    }
+                });
             } finally {
-                track.pause();
-                track.flush();
-                track.release();
+                if (track != null) {
+                    track.pause();
+                    track.flush();
+                    track.release();
+                }
             }
         }
     }
