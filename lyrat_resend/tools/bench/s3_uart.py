@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from benchlib import DEFAULT_PORT, RUNS_ROOT, redact, stamp  # noqa: E402
 from serial_watch import SerialWatch  # noqa: E402
-from udp_record import TAP_REQUEST_PORT, local_addresses, route_address  # noqa: E402
+from udp_record import TAP_REQUEST_PORT, route_address, sender_addresses  # noqa: E402
 
 T_CMD, T_REPLY, T_HB, T_HB_ACK = 1, 2, 3, 4
 ST_OK, ST_UNKNOWN, ST_BAD, ST_NO_TX = 0, 1, 2, 3
@@ -64,7 +64,7 @@ class Channel:
     def __init__(self, board=None):
         self.board = board or os.environ.get("BENCH_S3_ADDR")
         self.socks = []
-        for ip in local_addresses():
+        for ip in sender_addresses(self.board):
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             try:

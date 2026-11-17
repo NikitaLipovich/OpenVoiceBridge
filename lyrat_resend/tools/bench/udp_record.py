@@ -208,6 +208,14 @@ def local_addresses():
     return [a for a in found if not a.startswith("127.")] or ["0.0.0.0"]
 
 
+def sender_addresses(board=None):
+    """Where requests leave from: only the loopback for a board on this PC (the simulator of the tests), else each
+    interface of local_addresses()."""
+    if board and board.startswith("127."):
+        return ["127.0.0.1"]
+    return local_addresses()
+
+
 def route_address(target):
     """The local address the routing table picks for target. UDP connect sends nothing."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -358,7 +366,9 @@ class TapRecorder:
             Path(journal_dir).mkdir(parents=True, exist_ok=True)
             self.journal = open(Path(journal_dir) / JOURNAL_NAME, "ab")
         self.request = ("TAP1 %s %s" % tuple(slots)).encode()
-        self.board = board          # known address, or None to find it by broadcast
+        # Known address (argument or BENCH_S3_ADDR): always unicast to it; None: find the board by broadcast.
+        self.board = board or os.environ.get("BENCH_S3_ADDR") or None
+        self.fixed_board = bool(self.board)
         self.listen_only = listen_only
         self.forward = dict(forward or {})
         self.forwarded = {name: 0 for name in self.forward}
@@ -375,7 +385,7 @@ class TapRecorder:
             s.setblocking(False)
             self.socks[s] = name
         self.senders = []
-        for address in [] if listen_only else local_addresses():
+        for address in [] if listen_only else sender_addresses(self.board):
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             s.bind((address, 0))
@@ -394,7 +404,8 @@ class TapRecorder:
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def _ask(self, now):
-        fresh = self.board and any(st.last_at and now - st.last_at < TAP_SILENT_S for st in self.streams.values())
+        fresh = self.board and (self.fixed_board or
+                                any(st.last_at and now - st.last_at < TAP_SILENT_S for st in self.streams.values()))
         for s in self.senders:
             try:
                 if fresh:

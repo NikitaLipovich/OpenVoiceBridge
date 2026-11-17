@@ -1,6 +1,7 @@
 # Bus capture by the ESP32-S3-ETH
 
-The S3-ETH board listens to the I2S bus of the LyraT and sends both lines to the PC over Ethernet. The LyraT does not
+The S3-ETH board listens to the I2S bus of the LyraT and sends both lines to the PC over the network: Wi-Fi by default,
+the W5500 Ethernet in a build with `S3_NET_ETH=1` (the cable brought the PC's ground into the tap). The LyraT does not
 depend on it: every S3 pin wired to the LyraT is an input, and a restart of the S3 does not reach the call.
 
 ## Wiring
@@ -31,8 +32,10 @@ carries two different channels: the two ADC channels of the codec.
 
 ## Stream
 
-No address or password is built in. The PC sends `TAP1 <call> <mic>` to UDP port 5006, by broadcast until it knows the
-board, and repeats it each second. The streams go to the sender, port 5004 for `DSDIN` and 5005 for `ASDOUT`, for 5 s
+No address of the PC is built in (the Wi-Fi network and its password come from the ignored `main/ota_secrets.h`). The PC
+sends `TAP1 <call> <mic>` to UDP port 5006, by broadcast until it knows the board, and repeats it each second; `TAP1`
+alone means `LR LR`, one slot word only or an unknown one is refused (`"ok":0`). With `BENCH_S3_ADDR` set the tools send
+to that address only. The streams go to the sender, port 5004 for `DSDIN` and 5005 for `ASDOUT`, for 5 s
 after the last request or until `TAP0`. `<call>` and `<mic>` pick the slots: `L`, `R` or `LR`. PCM without compression,
 one packet per 240 frames. Header, little endian:
 
@@ -53,6 +56,7 @@ restart of the S3, and the recorder returns to broadcast by itself.
 - `tools/bench/udp_record.py --tap`: records `call.wav`, `mic.wav`, `tap.json`.
 - `tools/bench/tap_check.py`: sample by sample comparison with the LyraT's own stream; mic liveness.
 - `tools/bench/round.py tap`: the full check.
+- `tools/tests/s3_sim.py`: this board on 127.0.0.1 for the PC tests (`tools/run_tests.py`, `docs/TESTS.md`).
 
 ## What can be proved about `ASDOUT` without playing sound
 

@@ -1,6 +1,6 @@
 # Control channel through the ESP32-S3-ETH
 
-Commands from the PC reach the LyraT over Ethernet and a UART, and a failure of the S3 does not reach the call. The LyraT's
+Commands from the PC reach the LyraT over the network (Wi-Fi by default) and a UART, and a failure of the S3 does not reach the call. The LyraT's
 own console on UART0 stays as it was.
 
 ```
@@ -55,10 +55,10 @@ The answer goes to the source port of the request.
 
 | Request | Meaning | Answer |
 |---|---|---|
-| `UC <seq> <command>` | One console command | `UR <seq> <status>\n<text>`; status 3 with the TX off |
+| `UC <seq> <command>` | One console command | `UR <seq> <status>\n<text>`; status 3 `no_tx` with the TX off; a seq that is no number up to 65535: `UR 0 2\nbad request` |
 | `UQ` | S3 counters of the channel, no stream starts | JSON |
 | `UT 0\|1\|A` | TX off, on, following the LyraT | `UT <mode>`, mode 2 is `A` |
-| `UB <baud>` | Baud rate of the S3's end | `UB <baud>` |
+| `UB <baud>` | Baud rate of the S3's end, 1200 to 921600 | `UB <baud>`, the old one when refused |
 | `UW <hex>` | Raw bytes to the LyraT, for tests | `UW <n>`, -1 with the TX off |
 
 The PC repeats a `UC` on a timeout with the same seq. There is no authentication: anything in the local network can send these,
