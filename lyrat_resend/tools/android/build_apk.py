@@ -113,8 +113,13 @@ def build(args):
         dex.mkdir()
         run([tool(jdk / "bin", "javac"), "-source", "8", "-target", "8", "-Xlint:-options", "-encoding", "UTF-8",
              "-bootclasspath", android_jar, "-d", classes, *sources], env)
-        run([tool(bt, "d8"), "--release", "--lib", android_jar, "--min-api", MIN_SDK, "--output", dex,
-             *sorted(classes.rglob("*.class"))], env)
+        # The classes go to d8 as one jar: a list of every .class file overflows the 8191 characters of a cmd.exe
+        # line (d8.bat) once the app has many classes and the build folder a long path (goal 104).
+        jar = tmp / "classes.jar"
+        with zipfile.ZipFile(jar, "w", zipfile.ZIP_STORED) as z:
+            for c in sorted(classes.rglob("*.class")):
+                z.write(c, c.relative_to(classes).as_posix())
+        run([tool(bt, "d8"), "--release", "--lib", android_jar, "--min-api", MIN_SDK, "--output", dex, jar], env)
         base = tmp / "base.apk"
         run([tool(bt, "aapt2"), "link", "-o", base, "-I", android_jar, "--manifest", APP_DIR / "AndroidManifest.xml",
              "--min-sdk-version", MIN_SDK, "--target-sdk-version", TARGET_SDK,

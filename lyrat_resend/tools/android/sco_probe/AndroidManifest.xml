@@ -6,8 +6,10 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Lets the app read the name of the Bluetooth audio device it is about to route to. -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- The "Стенд" screen (goal 104) talks to benchd on the PC over the home Wi-Fi, plain HTTP with a token. -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
-    <application android:label="SCO Probe" android:allowBackup="false">
+    <application android:label="SCO Probe" android:allowBackup="false" android:usesCleartextTraffic="true">
         <!-- singleTask: a repeated `am start` lands in onNewIntent of the same activity. -->
         <activity
             android:name=".MainActivity"
@@ -20,5 +22,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- Not exported: opened by the button of MainActivity or the probe command "bench" (am start, extra cmd=bench). -->
+        <activity
+            android:name=".BenchActivity"
+            android:exported="false"
+            android:label="Стенд"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|smallestScreenSize|density|fontScale|locale" />
     </application>
 </manifest>

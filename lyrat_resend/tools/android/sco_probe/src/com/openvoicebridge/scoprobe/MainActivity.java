@@ -27,7 +27,11 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
+import android.view.View;
 import android.view.WindowManager;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import org.json.JSONArray;
@@ -55,6 +59,7 @@ import java.util.List;
  *   record --ei seconds 5 [--ei rate 16000] [--es out NAME.wav] [--es source vc|mic|recog|raw] [--ei fx 1]
  *                                        WAV from the headset into the files dir; fx 0 disables AEC, NS, AGC
  *   status                               refresh status.json
+ *   bench                                open the "Стенд" screen (BenchActivity, goal 104): benchd on the PC
  *
  * The result of every command is in status.json in getExternalFilesDir(null) and in logcat, tag ScoProbe.
  * It carries no Bluetooth address. Only the device named in `open` is ever routed to. The SCO port hides
@@ -127,9 +132,27 @@ public class MainActivity extends Activity {
         filesDir = getExternalFilesDir(null);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         view = new TextView(this);
-        view.setPadding(32, 96, 32, 32);
+        view.setPadding(32, 16, 32, 32);
         view.setTextSize(13f);
-        setContentView(view);
+        // The probe's status text, with the button of the bench screen above it (goal 104).
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(0, 80, 0, 0);
+        Button bench = new Button(this);
+        bench.setText("Стенд");
+        bench.setAllCaps(false);
+        bench.setContentDescription("open-bench");
+        bench.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openBench();
+            }
+        });
+        box.addView(bench);
+        box.addView(view);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(box);
+        setContentView(scroll);
         registerReceiver(scoReceiver, new IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED));
         am.addOnCommunicationDeviceChangedListener(getMainExecutor(), routeListener);
         BluetoothManager bt = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
@@ -178,6 +201,11 @@ public class MainActivity extends Activity {
             writeStatus();
             return;
         }
+        if ("bench".equals(cmd)) {         // not a probe command: status.json and its counters stay as they are
+            intent.removeExtra("cmd");
+            openBench();
+            return;
+        }
         // The proxy arrives a moment after onCreate and `open` needs it; commands keep their order.
         if (headset == null) {
             waitingForHeadset.add(intent);
@@ -213,6 +241,10 @@ public class MainActivity extends Activity {
             fail(e.getClass().getSimpleName() + ": " + e.getMessage());
         }
         writeStatus();
+    }
+
+    private void openBench() {
+        startActivity(new Intent(this, BenchActivity.class));
     }
 
     private void fail(String message) {

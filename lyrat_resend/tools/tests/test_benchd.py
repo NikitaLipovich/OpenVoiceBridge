@@ -476,7 +476,7 @@ class Service(unittest.TestCase):
         self.assertEqual(code, 200)
         html = page.decode("utf-8")
         for word in ("Перезапуск LyraT", "Перезапуск S3", "Прошить обе платы", "call_check --probe 1", "confirm(",
-                     "X-Bench", "События за час", "Лог"):
+                     "X-Bench", "События", "Лог"):          # the page is generated from bench_ui_spec.json (goal 104)
             self.assertIn(word, html)
         self.assertIsNone(re.search(r"""(src|href)\s*=\s*["']?(https?:)?//""", html))   # nothing from outside
         self.assertNotIn("@import", html)

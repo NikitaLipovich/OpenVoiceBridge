@@ -13,6 +13,9 @@
   bench.py lock acquire --owner G [--ttl S] [--wait S] [--note TEXT]    prints the token
   bench.py lock renew|release --owner G [--token T]
   bench.py lock run --owner G [--ttl S] [--wait S] [--note TEXT] -- COMMAND...   take the lock, run, give it back
+  bench.py phone-link [--host IP:PORT] [--serial S]   hand the PC's address and the LAN token to the phone app
+                                                   (sco_probe, screen "Стенд") over adb and open the screen (goal 104)
+  bench.py lan-token                               print the LAN token (benchd --lan --lan-control makes it)
 Time: ISO, HH:MM[:SS] today, or -30s/-10m/-2h. --owner defaults to BENCH_LOCK_OWNER, --token to BENCH_LOCK_TOKEN.
 "lock run" renews the lock while COMMAND runs and gives the child BENCH_LOCK_OWNER/BENCH_LOCK_TOKEN, so its bench
 tools see the bench as theirs (owner_common.bench_busy); when bench.py dies the lock goes with its pid.
@@ -22,6 +25,7 @@ lock run: the exit code of COMMAND, or 1 when the lock could not be had.
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -135,6 +139,65 @@ def cmd_lock(args):
     return rc
 
 
+SCO_APP = "com.openvoicebridge.scoprobe"
+LINK_PATH = "/sdcard/Android/data/%s/files/bench_link.json" % SCO_APP
+
+
+def adb_cmd(serial, *args, timeout=30):
+    cmd = ["adb"] + (["-s", serial] if serial else []) + list(args)
+    return subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout)
+
+
+def pc_address_for(phone_ip):
+    """The address of this PC on the way to the phone (no packet is sent)."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((phone_ip, 9))
+        return s.getsockname()[0]
+    finally:
+        s.close()
+
+
+def cmd_phone_link(args):
+    """The PC's address and the LAN token into the app's own files dir (adb push; the app reads it once and deletes it),
+    then the "Стенд" screen opens. Reads the phone's Wi-Fi address only; no setting of the phone is touched (R4)."""
+    import tempfile
+    token_file = bc.home() / "lan_token.txt"
+    try:
+        token = token_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        print("no LAN token yet: start benchd with --lan --lan-control once (it makes %s)" % token_file, file=sys.stderr)
+        return 1
+    host = args.host
+    if not host:
+        r = adb_cmd(args.serial, "shell", "ip -4 addr show wlan0")
+        m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", r.stdout)
+        if r.returncode != 0 or not m:
+            print("the phone's Wi-Fi address is not known (adb: %s); give --host IP:PORT" % (r.stderr.strip() or "no wlan0"),
+                  file=sys.stderr)
+            return 1
+        port = bc.bench_port(bc.HTTP_PORT)
+        try:
+            port = json.loads(bc.run_file().read_text(encoding="utf-8")).get("http_port", port)
+        except (OSError, ValueError):
+            pass
+        host = "%s:%d" % (pc_address_for(m.group(1)), port)
+    with tempfile.TemporaryDirectory() as tmp:
+        f = Path(tmp) / "bench_link.json"
+        f.write_text(json.dumps({"host": host, "token": token}), encoding="utf-8")
+        r = adb_cmd(args.serial, "push", str(f), LINK_PATH)
+    if r.returncode != 0:
+        print("adb push failed: %s" % (r.stderr.strip() or r.stdout.strip()), file=sys.stderr)
+        return 1
+    r = adb_cmd(args.serial, "shell", "am", "start", "-n", SCO_APP + "/.MainActivity", "--es", "cmd", "bench")
+    if r.returncode != 0:
+        print("am start failed: %s" % r.stderr.strip(), file=sys.stderr)
+        return 1
+    print("phone linked to benchd at %s (the token is on the phone, not printed)" % host)
+    return 0
+
+
 def main(argv=None):
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -183,6 +246,10 @@ def main(argv=None):
     p.add_argument("--wait", type=float, default=0.0)
     p.add_argument("--timeout", type=float, default=600.0)
     p.add_argument("--note", default="")
+    p = sub.add_parser("phone-link")
+    p.add_argument("--host", help="IP:PORT of benchd as the phone sees it (default: this PC's address towards the phone)")
+    p.add_argument("--serial", help="adb serial of the phone")
+    sub.add_parser("lan-token")
     argv = list(sys.argv[1:] if argv is None else argv)
     command = []
     if "--" in argv:                 # lock run ... -- COMMAND: everything after "--" is the child's
@@ -194,6 +261,15 @@ def main(argv=None):
     args = ap.parse_args([a for a in argv if a != ""])
     args.command = command
 
+    if args.cmd == "phone-link":
+        return cmd_phone_link(args)
+    if args.cmd == "lan-token":
+        try:
+            print((bc.home() / "lan_token.txt").read_text(encoding="utf-8").strip())
+            return 0
+        except OSError:
+            print("no LAN token yet: start benchd with --lan --lan-control once", file=sys.stderr)
+            return 1
     if args.cmd == "status":
         st = api("GET", "/status")[1]
         print(json.dumps(st, ensure_ascii=False, indent=1) if args.json else brief(st))

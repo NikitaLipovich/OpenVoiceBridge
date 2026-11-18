@@ -26,6 +26,7 @@ from benchlib import RUNS_ROOT, bench_port  # noqa: E402
 
 HTTP_PORT = 5080
 RELAY_PORT = 5081
+DISCOVERY_PORT = 5082       # benchd --lan answers 'BENCHD?' here (goal 104)
 CACHE_S = 10.0
 _cache = {"at": None, "info": None, "key": None}
 

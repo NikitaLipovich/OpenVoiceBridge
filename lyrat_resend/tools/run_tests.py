@@ -102,6 +102,14 @@ CHECKS = [
                "admin page and its POST rules, --lan read only; tools without the service; two simulators on two port "
                "offsets",
      unittest_cmd("test_benchd"), TESTS, 900, "base", True),
+    ("bench_ui_check", "the bench UI spec, its generated web page and phone screen, and benchd's routes agree "
+                       "(gen_bench_ui.py --check --strict: (a) generated files, (b) routes and parameters, (c) status paths "
+                       "against benchd + the simulator, (d) every control route has a button; goal 104)",
+     [PY, str(TOOLS / "bench" / "gen_bench_ui.py"), "--check", "--strict"], TOOLS / "bench", 300, "base", True),
+    ("bench_ui", "the bench UI generator (goal 104): deterministic, --check catches (a)-(d) on broken copies, the template "
+                 "language the same in Python, the page's JS (node) and the phone's Java (JVM), the page renders against "
+                 "benchd + simulator, the LAN token, UDP discovery",
+     unittest_cmd("test_bench_ui"), TESTS, 900, "base", True),
     ("platform_rom", "platform: ROM loader in C against the esptool protocol model",
      [PY, "test_rom.py"], PLATFORM, 900, "base", False),
     ("platform_tools", "platform: platform_ota.py and udplog.py against the U3 emulator",

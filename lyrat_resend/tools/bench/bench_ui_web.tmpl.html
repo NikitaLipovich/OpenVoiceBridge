@@ -1,0 +1,350 @@
+<!doctype html>
+<!--@GENERATED@-->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Стенд — benchd</title>
+<!-- The owner's page of benchd (goals 103, 104). Served by benchd.py at "/"; no external file, font or script.
+     Hand-written part: bench_ui_web.tmpl.html (style, runtime). Panels, fields, actions and feeds: bench_ui_spec.json. -->
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1d232b; --mute:#66707c; --line:#dde2e8; --ok:#18794e; --bad:#c2410c;
+          --warn:#a16207; --accent:#2563eb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171b; --card:#1d2127; --fg:#e6e9ee; --mute:#9aa4b0; --line:#2e343c; --ok:#4ade80; --bad:#fb923c;
+            --warn:#facc15; --accent:#60a5fa; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 system-ui, "Segoe UI", sans-serif; }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; }
+  header .mute { color:var(--mute); font-size:12px; }
+  main { padding:12px 16px; display:grid; gap:12px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 12px; min-width:0; }
+  section.wide { grid-column: 1 / -1; }
+  h2 { font-size:14px; margin:0 0 8px; color:var(--mute); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+  .row { display:flex; justify-content:space-between; gap:8px; padding:2px 0; border-bottom:1px dashed var(--line); }
+  .row:last-child { border-bottom:0; }
+  .k { color:var(--mute); }
+  .ok { color:var(--ok); font-weight:600; } .bad { color:var(--bad); font-weight:600; } .warn { color:var(--warn); font-weight:600; }
+  .acts { margin-top:4px; }
+  .act { display:inline-flex; gap:4px; align-items:center; }
+  button { font:inherit; padding:6px 10px; border-radius:6px; border:1px solid var(--line); background:var(--bg); color:var(--fg); cursor:pointer; margin:3px 4px 3px 0; }
+  button:hover { border-color:var(--accent); }
+  button.danger { border-color:var(--bad); color:var(--bad); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  input, select { font:inherit; padding:4px 6px; border-radius:6px; border:1px solid var(--line); background:var(--bg); color:var(--fg); }
+  pre { margin:0; max-height:420px; overflow:auto; font:12px/1.35 Consolas, "Cascadia Mono", monospace; white-space:pre-wrap; word-break:break-all; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  td, th { text-align:left; padding:3px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--mute); font-weight:600; }
+  .events { max-height:340px; overflow:auto; }
+  #msg { min-height:1.4em; color:var(--accent); }
+  .filters { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:6px; }
+</style>
+</head>
+<body>
+<!--@MARKUP@-->
+<script>
+"use strict";
+const SPEC = /*@SPEC@*/null;
+
+// @ENGINE-BEGIN  the template language; the same rules as gen_bench_ui.py (reference) and BenchTemplate.java
+const T = (() => {
+  const MISSING = "—";
+  const NUMERIC = /^-?\d+(\.\d+)?$/;
+  const PH = /\{([^{}|]+)(?:\|([a-z_0-9]+))?\}/g;
+  const isNum = (v) => typeof v === "number";
+  const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  const toNum = (v) => isNum(v) ? v : (typeof v === "string" && NUMERIC.test(v) ? parseFloat(v) : null);
+  function fixed(x, d) {
+    let s = x.toFixed(d);
+    if (s[0] === "-" && !/[1-9]/.test(s)) s = s.slice(1);
+    return s;
+  }
+  function numStr(x) {
+    if (Number.isInteger(x) && Math.abs(x) < 1e15) return String(x === 0 ? 0 : x);
+    return fixed(x, 3).replace(/0+$/, "").replace(/\.$/, "");
+  }
+  function jsonStr(v) {
+    if (v === null || v === undefined) return "null";
+    if (v === true) return "true";
+    if (v === false) return "false";
+    if (isNum(v)) return numStr(v);
+    if (typeof v === "string") return JSON.stringify(v);
+    if (Array.isArray(v)) return "[" + v.map(jsonStr).join(",") + "]";
+    return "{" + Object.keys(v).map((k) => JSON.stringify(k) + ":" + jsonStr(v[k])).join(",") + "}";
+  }
+  function valueStr(v) {
+    if (v === null || v === undefined) return MISSING;
+    if (v === true) return "да";
+    if (v === false) return "нет";
+    if (isNum(v)) return numStr(v);
+    if (typeof v === "object") return jsonStr(v);
+    return String(v);
+  }
+  const isEmpty = (v) => v === null || v === undefined || v === "" || (Array.isArray(v) && !v.length) ||
+                         (isObj(v) && !Object.keys(v).length);
+  function truthy(v) {
+    if (v === null || v === undefined || v === false || v === "") return false;
+    if (isNum(v)) return v !== 0 && !Number.isNaN(v);
+    if (typeof v === "object") return !isEmpty(v);
+    return true;
+  }
+  function resolve(path, ctx, vars) {
+    const parts = path.trim().split(".");
+    let cur;
+    if (parts[0][0] === "$") { cur = vars ? vars[parts[0].slice(1)] : undefined; parts.shift(); } else cur = ctx;
+    for (const p of parts) {
+      if (isObj(cur)) cur = Object.prototype.hasOwnProperty.call(cur, p) ? cur[p] : undefined;
+      else if (Array.isArray(cur) && /^\d+$/.test(p) && +p < cur.length) cur = cur[+p];
+      else return null;
+    }
+    return cur === undefined ? null : cur;
+  }
+  function fmt(v, name) {
+    if (!name) return valueStr(v);
+    if (name === "int") { const n = toNum(v); return n === null ? MISSING : numStr(Math.floor(n + 0.5)); }
+    if (name === "mb1" || name === "mb0") { const n = toNum(v); return n === null ? MISSING : fixed(n / 1048576, name === "mb1" ? 1 : 0); }
+    if (name === "hhmm" || name === "hms") {
+      const end = name === "hhmm" ? 16 : 19;
+      return typeof v === "string" && v.length >= end ? v.slice(11, end) : MISSING;
+    }
+    if (name === "opt_comma") return isEmpty(v) || !truthy(v) ? "" : ", " + valueStr(v);
+    if (name === "owners") return Array.isArray(v) ? v.filter(isObj).map((x) => valueStr(x.owner === undefined ? null : x.owner)).join(", ") : "";
+    if (name === "json") return jsonStr(v);
+    throw new Error("unknown format " + name);
+  }
+  function render(tpl, ctx, vars) {
+    if (tpl === null || tpl === undefined) return "";
+    return String(tpl).replace(PH, (m, path, f) => fmt(resolve(path, ctx, vars), f));
+  }
+  function eq(a, b) {
+    if (typeof a === "boolean" || typeof b === "boolean") return a === b;
+    const na = toNum(a), nb = toNum(b);
+    if (na !== null && nb !== null) return na === nb;
+    if (a === null || b === null || a === undefined || b === undefined) return (a === null || a === undefined) && (b === null || b === undefined);
+    return typeof a === typeof b && a === b;
+  }
+  function holds(conds, ctx, vars) {
+    for (const c of conds || []) {
+      const v = resolve(c.path, ctx, vars), want = c.value === undefined ? null : c.value;
+      let ok;
+      switch (c.op) {
+        case "truthy": ok = truthy(v); break;
+        case "falsy": ok = !truthy(v); break;
+        case "empty": ok = isEmpty(v); break;
+        case "nonempty": ok = !isEmpty(v); break;
+        case "eq": ok = eq(v, want); break;
+        case "ne": ok = !eq(v, want); break;
+        default: {
+          const a = toNum(v), b = toNum(want);
+          ok = a !== null && b !== null && ({lt: a < b, le: a <= b, gt: a > b, ge: a >= b})[c.op];
+        }
+      }
+      if (!ok) return false;
+    }
+    return true;
+  }
+  function pick(cases, ctx, vars) {
+    for (const c of cases || []) if (holds(c.if, ctx, vars)) return [render(c.text || "", ctx, vars), c.color || ""];
+    return ["", ""];
+  }
+  function renderBody(body, ctx, vars) {
+    const out = {};
+    for (const k of Object.keys(body || {})) out[k] = typeof body[k] === "string" ? render(body[k], ctx, vars) : body[k];
+    return out;
+  }
+  return {render, holds, pick, valueStr, jsonStr, renderBody, resolve};
+})();
+// @ENGINE-END
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const LOCAL = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(location.hostname);
+const VARS = {device: "страница", owner: SPEC.owner};
+const TX = SPEC.texts;
+let status = null, lastJob = null, routes = null;
+let token = "";
+try { token = localStorage.getItem("benchd_token") || ""; } catch (e) {}
+
+async function get(path) {
+  const r = await fetch(path, {cache: "no-store"});
+  return r.json();
+}
+async function post(path, body) {
+  const headers = {"Content-Type": "application/json", "X-Bench": "1"};
+  if (!LOCAL && token) headers["X-Bench-Token"] = token;
+  const r = await fetch(path, {method: "POST", headers, body: JSON.stringify(body || {})});
+  let data = {};
+  try { data = await r.json(); } catch (e) {}
+  return {code: r.status, data};
+}
+function say(text) { const m = $("msg"); if (m) m.textContent = text; }
+function setRow(el, text, color) {
+  const v = el.querySelector(".v");
+  v.textContent = text;
+  v.className = "v " + (color || "");
+}
+
+function renderStatus(st) {
+  status = st;
+  $("svc").textContent = T.render(SPEC.header, st, VARS);
+  $("updated").textContent = T.render(TX.updated, st, Object.assign({time: new Date().toLocaleTimeString()}, VARS));
+  for (const panel of SPEC.panels) {
+    for (const f of panel.fields) {
+      if (f.list) {
+        const items = T.resolve(f.list, st, VARS);
+        $("l-" + f.id).innerHTML = (Array.isArray(items) ? items : []).map((it) => {
+          const [text, color] = T.pick(f.cases, it, VARS);
+          return `<div class="row"><span class="k">${esc(T.render(f.label, it, VARS))}</span><span class="${esc(color)}">${esc(text)}</span></div>`;
+        }).join("");
+      } else {
+        const [text, color] = T.pick(f.cases, st, VARS);
+        setRow($("f-" + f.id), text, color);
+      }
+    }
+  }
+  for (const a of SPEC.actions) {
+    const w = $("w-" + a.id);
+    if (w) w.hidden = !T.holds(a.visible_if, st, VARS) || (!LOCAL && !a.lan_control);
+  }
+}
+
+function paramValues(prefix, params) {
+  const out = {};
+  for (const p of params || []) {
+    const el = $(prefix + "-" + p.name);
+    let v = el ? el.value : (p.default || "");
+    if (p.type === "int" && v !== "") v = parseInt(v, 10);
+    out[p.name] = v;
+  }
+  return out;
+}
+
+async function act(id) {
+  const a = SPEC.actions.find((x) => x.id === id);
+  if (!a || !status) return;
+  const param = paramValues("a-" + a.id, a.params);
+  const vars = Object.assign({param}, VARS);
+  if (!T.holds(a.available_if, status, vars)) { say(T.render(a.unavailable_text || "", status, vars)); return; }
+  if (a.confirm && !confirm(T.render(a.confirm, status, vars))) return;
+  if (a.confirm2 && !confirm(T.render(a.confirm2, status, vars))) return;
+  const body = Object.assign(T.renderBody(a.body, status, vars), param, {owner: SPEC.owner});
+  const h = status.lock && status.lock.holder;
+  if (a.requires_lock && h && h.owner !== SPEC.owner) {
+    if (!confirm(T.render(TX.lock_other, status, vars))) return;
+    body.force = true;
+  }
+  say(TX.busy);
+  let res;
+  try { res = await post(a.endpoint, body); } catch (e) { say(TX.no_service); return; }
+  const {code, data} = res;
+  const rvars = Object.assign({code, json: T.jsonStr(data)}, vars);
+  if (code === 202 && data.id) { lastJob = data.id; refreshJob(); }
+  if (a.result) {
+    const ok = code === 200 || code === 202;
+    say(T.pick(ok ? a.result.ok : a.result.fail, data, rvars)[0]);
+  } else if (code === 202) say(T.render(TX.job_started, data, rvars));
+  else say(T.render(code === 200 ? TX.done : TX.refused, data, rvars));
+  refreshStatus(); refreshFeeds();
+}
+
+async function refreshStatus() {
+  try { renderStatus(await get("/status")); } catch (e) { $("svc").textContent = TX.no_service; }
+}
+async function refreshJob() {
+  if (!lastJob) return;
+  try {
+    const j = await get("/jobs/" + encodeURIComponent(lastJob));
+    const state = j.ended ? T.render(TX.job_ended, j, VARS) : TX.job_running;
+    $("jobout").textContent = T.render(TX.job_state, j, Object.assign({state}, VARS)) + "\n" + (j.tail || "");
+    if (j.ended) lastJob = null;
+  } catch (e) {}
+}
+async function checkRoutes() {
+  try {
+    const ans = await get("/api/routes");
+    const have = new Set(ans.routes.map((r) => r.method + " " + r.path));
+    for (const a of SPEC.actions) {
+      if (!have.has(a.method + " " + a.endpoint) || (a.body && a.body.name && !(a.body.name in ans.actions))) {
+        const b = $("a-" + a.id);
+        b.disabled = true;
+        b.title = T.render(TX.unknown_route, {}, {route: a.method + " " + a.endpoint});
+      }
+    }
+  } catch (e) {}
+}
+
+// --- feeds ---------------------------------------------------------------------------------------------------------
+const feedState = {};
+function feedQuery(fd, extra) {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(fd.fixed || {})) q.set(k, v);
+  for (const [k, v] of Object.entries(paramValues("q-" + fd.id, fd.params))) if (v !== "" && v !== null) q.set(k, v);
+  for (const [k, v] of Object.entries(extra || {})) q.set(k, v);
+  return fd.endpoint + "?" + q;
+}
+async function refreshFeed(fd) {
+  const s = feedState[fd.id];
+  if (fd.kind === "events") {
+    try {
+      const ans = await get(feedQuery(fd));
+      if (ans.error) { say(ans.error); return; }
+      const bad = new RegExp(fd.bad || "^$");
+      $("rows-" + fd.id).innerHTML = (ans.events || []).slice().reverse().map((e) => {
+        const rest = Object.entries(e).filter(([k]) => !fd.hide_keys.includes(k)).map(([k, v]) => `${k}=${T.valueStr(v)}`).join(" ");
+        const cls = bad.test(String(e.type) + (e.action || "")) ? "bad" : "";
+        return `<tr><td>${esc(String(e.t || "").slice(11, 19))}</td><td class="${cls}">${esc(e.type)}</td><td>${esc(e.board || "")}</td><td>${esc(rest)}</td></tr>`;
+      }).join("");
+    } catch (e) {}
+    return;
+  }
+  if ($("pause-" + fd.id).checked) return;
+  const extra = {};
+  extra[fd.cursor] = s.after;
+  extra[fd.limit_param] = s.after ? fd.limit : fd.first_limit;
+  try {
+    const ans = await get(feedQuery(fd, extra));
+    if (ans.error) { say("фильтр: " + ans.error); return; }
+    s.after = ans.last_id;
+    if (ans.lines.length) {
+      const pre = $("rows-" + fd.id), atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+      s.lines = s.lines.concat(ans.lines).slice(-fd.keep);
+      pre.textContent = s.lines.join("\n");
+      if (atEnd) pre.scrollTop = pre.scrollHeight;
+    }
+  } catch (e) {}
+}
+function refreshFeeds() { for (const fd of SPEC.feeds) if (fd.kind === "events") refreshFeed(fd); }
+function resetFeed(fd) {
+  feedState[fd.id] = {after: 0, lines: []};
+  if (fd.kind === "tail") $("rows-" + fd.id).textContent = "";
+  refreshFeed(fd);
+}
+
+// --- start ----------------------------------------------------------------------------------------------------------
+document.querySelectorAll("button[data-act]").forEach((b) => b.addEventListener("click", () => act(b.dataset.act)));
+for (const fd of SPEC.feeds) {
+  feedState[fd.id] = {after: 0, lines: []};
+  for (const p of fd.params || []) $("q-" + fd.id + "-" + p.name).addEventListener("change", () => resetFeed(fd));
+  if (fd.kind === "tail") $("clear-" + fd.id).addEventListener("click", () => { feedState[fd.id].lines = []; $("rows-" + fd.id).textContent = ""; });
+  refreshFeed(fd);
+  setInterval(() => refreshFeed(fd), fd.poll_ms);
+}
+if (!LOCAL) {
+  $("tokenbox").hidden = false;
+  $("token").value = token;
+  $("tokensave").addEventListener("click", () => {
+    token = $("token").value.trim();
+    try { localStorage.setItem("benchd_token", token); } catch (e) {}
+    say(token ? "токен запомнен" : "токен стёрт");
+  });
+}
+checkRoutes();
+refreshStatus();
+setInterval(refreshStatus, SPEC.poll_ms.status);
+setInterval(refreshJob, SPEC.poll_ms.job);
+</script>
+</body>
+</html>
