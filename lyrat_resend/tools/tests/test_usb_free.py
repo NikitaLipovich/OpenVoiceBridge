@@ -448,6 +448,58 @@ class LossyCall(unittest.TestCase):
         self.assertTrue((out / "serial.log").read_text(encoding="utf-8"))
 
 
+class QueryWaitsForLyratStatus(unittest.TestCase):
+    """Goal 095 #004: first_flash.py queried once right after the LyraT showed up; the S3 asks for its status only every
+    10 s, so the text was empty and the run failed with "образ LyraT не прочитан" on a good bench."""
+
+    def setUp(self):
+        import first_flash
+        self.ff = first_flash
+        self.t = [0.0]
+
+    def reply(self, age):
+        return 0, json.dumps({"token": 1, "img": "valid", "lyrat": {"status": "img=valid" if age >= 0 else "",
+                                                                   "status_age_ms": age}}), ""
+
+    def call(self, replies, wait_s=30.0):
+        it = iter(replies)
+        calls = []
+
+        def run():
+            calls.append(self.t[0])
+            return next(it)
+
+        def sleep(s):
+            self.t[0] += s
+        rc, q = self.ff.query_with_lyrat_status(wait_s, run=run, sleep=sleep, clock=lambda: self.t[0])
+        return rc, q, calls
+
+    def test_waits_until_the_status_comes(self):
+        rc, q, calls = self.call([self.reply(-1)] * 5 + [self.reply(300)])
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(q["lyrat"]["status_age_ms"], 300)
+
+    def test_first_answer_used_when_present(self):
+        rc, q, calls = self.call([self.reply(10)])
+        self.assertEqual(len(calls), 1)
+
+    def test_gives_up_after_the_wait(self):
+        rc, q, calls = self.call([self.reply(-1)] * 100, wait_s=30.0)
+        self.assertEqual(q["lyrat"]["status_age_ms"], -1)
+        self.assertLessEqual(calls[-1], 30.0 + self.ff.QUERY_POLL_S)
+        self.assertGreater(len(calls), 10)
+
+    def test_no_answer_retried_then_reported(self):
+        rc, q, calls = self.call([(4, "", "")] * 100, wait_s=10.0)
+        self.assertIsNone(q)
+        self.assertEqual(rc, 4)
+
+    def test_wait_covers_three_status_periods(self):
+        src = (HERE.parents[2] / "s3_eth_bridge" / "main" / "s3_ota.c").read_text(encoding="utf-8")
+        period = int(re.search(r"#define STATUS_EVERY_MS\s+(\d+)", src).group(1)) / 1000
+        self.assertGreaterEqual(self.ff.QUERY_WAIT_S, 3 * period)
+
+
 class Static(unittest.TestCase):
     """No bench tool opens a COM port unless asked: USB comes from --usb, --port or BENCH_USB=1 only."""
 

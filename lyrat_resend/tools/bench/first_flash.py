@@ -48,6 +48,8 @@ PLACEHOLDERS = {"YOUR_SSID", "YOUR_PASSWORD", "your-2.4-GHz-network", "your-pass
 TOKEN_MIN = 16
 FLASH_IMAGES = 4            # bootloader, partition table, otadata, app
 LYRAT_FRESH_MS = 3000       # a heartbeat younger than this: the LyraT is alive behind the S3
+QUERY_WAIT_S = 30.0         # the S3 asks the LyraT for its status every 10 s (s3_ota.c STATUS_EVERY_MS)
+QUERY_POLL_S = 2.0
 PROJECTS = {"s3": (S3_DIR, "s3_eth_bridge"), "lyrat": (FW_DIR, "lyrat_resend")}
 
 
@@ -177,6 +179,24 @@ def tool(args, timeout):
 
 def lyrat_fields(status_text):
     return dict(kv.split("=", 1) for kv in (status_text or "").split() if "=" in kv)
+
+
+def query_with_lyrat_status(wait_s=QUERY_WAIT_S, run=None, sleep=time.sleep, clock=time.monotonic):
+    """ota.py query, repeated until the S3 holds a status text of the LyraT. The S3 asks for it every 10 s and only
+    once its TX is on, so right after the LyraT showed up the text is still empty (goal 095, incident 004).
+    Returns (rc, the parsed reply or None) of the last try."""
+    run = run or (lambda: tool([HERE / "ota.py", "query"], 60))
+    end = clock() + wait_s
+    while True:
+        rc, text, _ = run()
+        q = None
+        try:
+            q = json.loads(text) if rc == 0 else None
+        except ValueError:
+            pass
+        if (q and ((q.get("lyrat") or {}).get("status_age_ms", -1)) >= 0) or clock() >= end:
+            return rc, q
+        sleep(QUERY_POLL_S)
 
 
 # --- the run -----------------------------------------------------------------------------------------------------------
@@ -311,12 +331,7 @@ def main(argv=None):
     run.step("сеть", True, "S3 ответила по Wi-Fi через %.0f с, LyraT жива за ней через %.0f с" % (s3_at, lyrat_at))
 
     # 7 ota.py query
-    rc, text, err = tool([HERE / "ota.py", "query"], 60)
-    q = None
-    try:
-        q = json.loads(text) if rc == 0 else None
-    except ValueError:
-        pass
+    rc, q = query_with_lyrat_status()
     ly = lyrat_fields(((q or {}).get("lyrat") or {}).get("status"))
     got = {"s3": (q or {}).get("elf"), "lyrat": ly.get("elf")}
     record["query"] = {"rc": rc, "token": (q or {}).get("token"), "s3_img": (q or {}).get("img"), "lyrat_img": ly.get("img"),
