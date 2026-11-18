@@ -125,6 +125,7 @@ class S3View(threading.Thread):
         self.status_text = None
         self.want_pkt = threading.Event()
         self.pkt_text = None
+        self.pkt_log = []               # [(monotonic time of the reply, text)]: call_check --compare asks once a second
 
     def run(self):
         while not self.halt.is_set():
@@ -156,6 +157,8 @@ class S3View(threading.Thread):
                     reply = self.channel.command(name, timeout=0.5, retries=3)
                     if reply["status"] == 0:
                         setattr(self, name + "_text", reply["text"])
+                        if name == "pkt":
+                            self.pkt_log.append((time.monotonic(), reply["text"]))
             self.halt.wait(QUERY_PERIOD_S)
         self.channel.close()
 

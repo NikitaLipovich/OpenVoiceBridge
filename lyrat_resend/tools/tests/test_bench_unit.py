@@ -216,7 +216,7 @@ class BtlossModes(unittest.TestCase):    # goal 098
 
 class Imports(unittest.TestCase):
     MODULES = ("audio_check", "benchlib", "btlog", "call_check", "call_quality", "call_record", "call_stream", "console", "first_flash", "fw", "ota", "owner_check", "owner_common", "phone",
-               "phone_mic", "round", "s3", "s3_uart", "serial_watch", "tap_check", "tone_blocks", "udp_record",
+               "phone_compare", "phone_mic", "round", "s3", "s3_uart", "serial_watch", "tap_check", "tone_blocks", "udp_record",
                "udplog", "voice_check")
 
     def test_every_bench_module_loads(self):

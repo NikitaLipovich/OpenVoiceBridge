@@ -5,6 +5,9 @@
   python lyrat_resend/tools/bench/call_check.py --probe 3 [--seconds 20]  the same path without a call: sco_probe opens
                                                                    the channel, the phone plays tones (the LyraT at vol 0)
   python lyrat_resend/tools/bench/call_check.py --report DIR       remake the files and the report of a run folder
+  python lyrat_resend/tools/bench/call_check.py --compare [--seconds 20]   no call: the owner speaks into the LyraT, the
+                                                                   phone records what it gets; the two are aligned and
+                                                                   each defect marked (phone_compare.py, goal 099)
 
 Before the call: the S3 answers over Wi-Fi, versions of both boards, the LyraT alive behind it with the phone connected
 (HFP), the S3 stream on (TAP1) with both lines coming, the clocks of the S3 and the PC brought together (round trip, the
@@ -305,6 +308,7 @@ class CallCheck:
 
     def finish(self, s, tap, consumer=None):
         files = build_files(self.out, self.prefix, tap, self.rec.intervals, keep_raw=self.args.keep_raw)
+        self.files = files      # start_at: the PC time of sample 0 of the files (call_check --compare needs it)
         closed = [iv for iv in self.rec.intervals if iv[1] is not None]
         latency = self.latency.summary(within=closed) if closed else self.latency.summary()
         latency["all_blocks"] = self.latency.summary()
@@ -693,6 +697,219 @@ def probe_one(step, out, args, tag, guard_state=None):
             "dropouts": [report["lines"]["down"]["dropouts"], report["lines"]["up"]["dropouts"]]}
 
 
+# --- compare: what left the LyraT mic against what the phone got (goal 099) ----------------------------------------------------
+
+COMPARE_S = 20
+COMPARE_SAY = ("ГОВОРИТЕ в микрофон LyraT %d с: считайте вслух от 1 до 20, не спеша, обычным голосом "
+               "(можно читать любой текст). Телефон пишет то, что получает по Bluetooth.")
+
+
+class CompareDriver:
+    """sco_probe opens the channel and records what the phone gets for `seconds`; the owner speaks into the LyraT. No call
+    (R3), nothing is played by the phone or the PC (R15). The LyraT's packet counters are asked for once a second."""
+
+    def __init__(self, cc, step, seconds, tag):
+        import round as rnd
+        self.rnd, self.cc, self.step, self.seconds, self.tag = rnd, cc, step, seconds, tag
+        self.wav = "compare_%s.wav" % tag
+        self.rec_id = tag + "-rec"
+        self.started = self.opened_at = self.record_at = self.closed_at = None
+        self.record = None
+        self.next_pkt = self.next_poll = self.next_say = 0.0
+        self.error = None
+
+    def begin(self):
+        self.started = time.monotonic()
+        self.rnd.app_command("open", self.tag + "-open")
+        end = time.monotonic() + 15.0
+        route = False
+        while time.monotonic() < end:
+            st = self.rnd.app_status()
+            if st and st.get("id") == self.tag + "-open" and (st.get("route_confirmed") or not st.get("ok")):
+                route = bool(st.get("ok") and st.get("route_confirmed"))
+                break
+            time.sleep(0.3)
+        if not route:
+            self.error = "приложение не открыло канал"
+            self.step.say(self.error)
+            self.closed_at = time.monotonic()
+            return
+        self.opened_at = time.monotonic()
+        self.rnd.app_command("record", self.rec_id, "--ei", "seconds", str(self.seconds), "--es", "out", self.wav,
+                             "--es", "source", "raw")
+        self.record_at = time.monotonic()
+        self.step.say(">>> " + COMPARE_SAY % self.seconds)
+        self.next_say = self.record_at + 5.0
+
+    def tick(self, now):
+        if not self.opened_at or self.closed_at:
+            return
+        if now >= self.next_pkt:
+            self.next_pkt = now + 1.0
+            self.cc.rec.s3.want_pkt.set()
+        left = self.seconds - (now - self.record_at)
+        if left > 0.5 and now >= self.next_say:
+            self.next_say = now + 5.0
+            self.step.say(">>> говорите, осталось %d с" % round(left))
+        if now - self.record_at >= self.seconds + 0.5 and now >= self.next_poll:
+            self.next_poll = now + 0.5
+            rec = (self.rnd.app_status() or {}).get("record") or {}
+            if rec.get("id") == self.rec_id and rec.get("state") not in (None, "recording"):
+                self.record = rec
+                self.step.say(">>> СТОП, можно молчать. Сравниваю...")
+                self._close(now)
+                return
+        if now - self.record_at > self.seconds + 15.0:
+            self.error = "телефон не закончил запись за %d с" % (self.seconds + 15)
+            self._close(now)
+
+    def _close(self, now):
+        self.rnd.app_command("close", self.tag + "-close")
+        self.closed_at = now
+
+    def timed_out(self, now):
+        return now - self.started > self.seconds + 60.0
+
+    def end(self):
+        if not self.closed_at:
+            self._close(time.monotonic())
+
+
+def bench_without_call(step, need_vol0=True):
+    """The common start of a run without a call: the probe app, no call on the phone, the S3, the LyraT at vol 0 (R15).
+    Returns the open S3 channel, or the step's finish dict when the bench is not ready."""
+    import round as rnd
+    import s3_uart
+    if rnd.SCO_APP not in rnd.adb("shell", "pm", "path", rnd.SCO_APP):
+        return step.finish(NOT_CHECKED, "приложение sco_probe не найдено на телефоне или телефон недоступен по adb",
+                           "python lyrat_resend/tools/android/build_apk.py --install")
+    calls = rnd.telecom_state()
+    if calls is None or calls["calls_now"] or calls["telephony_busy"]:
+        return step.finish(NOT_CHECKED, "на телефоне идёт звонок или состояние не читается", "Запустить после разговора.")
+    ch = s3_uart.Channel()
+    if not ch.find(timeout=5.0):
+        ch.close()
+        return step.finish(NOT_CHECKED, "S3 не отвечает", "Включить стенд.")
+    rnd.app_ready()
+    if need_vol0 and ch.command("vol 0", timeout=0.5, retries=5)["status"] != 0:
+        ch.close()
+        return step.finish(NOT_CHECKED, "LyraT не приняла vol 0 через S3", "owner_check.py uart")
+    return ch
+
+
+def pkt_rows(log):
+    """The S3View's timed replies of `pkt` as counter rows {t, rx_total, ..., tx_discarded}."""
+    rows = []
+    for t, text in log:
+        m = call_record.SCO_PKT.search(text or "")
+        if m:
+            rows.append({"t": t, **dict(zip(call_record.SCO_PKT_KEYS, map(int, m.groups())))})
+    return rows
+
+
+def pkt_rows_console(path, t0):
+    """The same rows from the LyraT console log (serial.log, first column seconds since t0 of its watch): the board prints
+    its `pkt` reply there, the S3 relays only the status."""
+    rows = []
+    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+        m = call_record.SCO_PKT.search(line)
+        if m:
+            try:
+                at = float(line.split()[0])
+            except (ValueError, IndexError):
+                continue
+            rows.append({"t": t0 + at, **dict(zip(call_record.SCO_PKT_KEYS, map(int, m.groups())))})
+    return rows
+
+
+def run_compare(args):
+    import phone_compare
+    import round as rnd
+    out = Path(args.out) if args.out else RUNS_ROOT / "calls" / ("%s-compare" % stamp())
+    step = oc.Step("call_compare", "Сравнение: микрофон LyraT до Bluetooth и что получил телефон", out=out)
+    ch = bench_without_call(step)
+    if isinstance(ch, dict):
+        return ch
+    keep_awake()
+    args.grace = min(args.grace, 3.0)
+    tag = time.strftime("%H%M%S")
+    cc = CallCheck(out, step, args)
+    guard = oc.RealCallGuard().start()
+    driver = None
+    reason = None
+    try:
+        if guard.tripped:
+            return step.finish(NOT_CHECKED, guard.tripped, "Повторить, когда на телефоне нет звонка.")
+        if not cc.prechecks():
+            if cc.rec:
+                cc.rec.stop("проверка стенда не прошла")
+                cc.pipe.stop()
+            bad = [c for c in cc.checks if not c["ok"] and c["hard"]]
+            return step.finish(NOT_CHECKED, "стенд не готов: " + "; ".join(c["text"] for c in bad),
+                               "; ".join(c["fix"] for c in bad if c["fix"]) or "см. строки выше")
+        driver = CompareDriver(cc, step, args.compare_seconds, tag)
+        reason = cc.run(driver, guard=guard)
+        s, tap = cc.stop(reason)
+    finally:
+        ch.command("vol 100", timeout=0.5, retries=5)
+        ch.close()
+        real_call = guard.stop()
+        rnd.adb("shell", "am", "force-stop", rnd.SCO_APP)
+    phone_raw = out / "phone_raw.wav"
+    if driver.record and driver.record.get("state") == "done":
+        rnd.adb("pull", rnd.SCO_DIR + "/" + driver.wav, str(phone_raw), timeout=120.0)
+    rnd.adb("shell", "rm", "-f", rnd.SCO_DIR + "/" + driver.wav)
+    if real_call:
+        gone = oc.discard_audio(out)
+        write_json(out / "discarded.json", {"reason": real_call, "removed": gone, "stop_reason": reason})
+        return step.finish(NOT_CHECKED, "прогон отброшен: %s; звук удалён, не анализируется" % real_call,
+                           "Повторить, когда на телефоне нет звонка.")
+    stream = cc.finish(s, tap)
+    for name in ("report.json", "report.md"):
+        if (out / name).exists():
+            (out / name).replace(out / ("stream_" + name))
+    files = stream["files"]
+    up_full = out / "up_full.wav"
+    Path(files["up"]).replace(up_full)
+    for key in ("down", "both"):
+        Path(files[key]).unlink(missing_ok=True)
+    files = {**files, "start_at": cc.files.get("start_at")}
+    if driver.error or not phone_raw.exists():
+        if not args.keep:
+            oc.discard_audio(out)
+        return step.finish(NOT_CHECKED, driver.error or "запись телефона не пришла", "Повторить; телефон разблокирован?")
+    start_at = files.get("start_at")
+    expected = None if start_at is None else (driver.record_at - start_at) * RATE
+    watch = cc.rec.watch
+    pkt = pkt_rows(cc.rec.s3.pkt_log)
+    if not pkt and watch is not None and (out / "serial.log").exists():
+        pkt = pkt_rows_console(out / "serial.log", watch.t0)
+    meta = {"run": {"tag": tag, "seconds": driver.seconds, "stop": reason, "sco": stream["sco"],
+                    "stream_loss_pct": {k: stream["stream"][k]["loss_pct"] for k in ("down", "up")},
+                    "stream_gaps_up_s": stream["stream"]["up"].get("gaps_s"), "versions": stream.get("versions"),
+                    "phone_record": {k: (driver.record or {}).get(k) for k in ("frames", "peak", "rms", "error")}},
+            "expected": expected, "start_at": start_at, "pkt_log": pkt}
+    write_json(out / "compare.json", meta)
+    rep = phone_compare.analyse(out, phone_compare.read_wav(up_full), phone_compare.read_wav(phone_raw), expected,
+                                start_at, pkt, {"run": meta["run"]})
+    if not args.keep:
+        up_full.unlink(missing_ok=True)
+        phone_raw.unlink(missing_ok=True)
+    if args.drop_audio:
+        gone = oc.discard_audio(out)
+        step.say("Звук удалён после оценки (%d файлов): остаются числа." % len(gone))
+    step.say("")
+    step.say("Итог: " + rep["summary"])
+    step.say("Папка: %s" % out)
+    step.say("  compare_both.wav: слева до Bluetooth, справа телефон; report.md: таблица дефектов; cut_*.wav: вырезки.")
+    step.say("ПК ничего не проигрывает: откройте файлы плеером.")
+    if rep["events"] is None:
+        return step.finish(NOT_CHECKED, rep["summary"], "Повторить и говорить ближе к микрофону LyraT.",
+                           extra={"report": "report.json"})
+    return step.finish(PASS, rep["summary"], extra={"report": "report.json", "events": len(rep["events"]),
+                                                     "alignment": rep["alignment"]})
+
+
 # --- main ------------------------------------------------------------------------------------------------------------------
 
 def run_owner(args):
@@ -752,11 +969,19 @@ def main(argv=None):
     ap.add_argument("--probe", type=int, metavar="N", help="N runs without a call, the channel from sco_probe")
     ap.add_argument("--keep", action="store_true", help="--probe: keep the mic and stereo files")
     ap.add_argument("--report", metavar="DIR", help="remake files and report of a run folder kept with --keep-raw")
+    ap.add_argument("--compare", action="store_true", help="no call: the LyraT mic before Bluetooth against the phone's "
+                    "recording (--seconds, default 20); --keep keeps the raw pair for phone_compare.py DIR")
+    ap.add_argument("--drop-audio", action="store_true", help="--compare: delete every sound file once judged (bench runs)")
     args = ap.parse_args(argv)
     oc.console_utf8()
     oc.adb_on_path()
     if args.report:
         return remake(args.report)
+    if args.compare:
+        # As in a probe, --seconds is how long the phone records, not a stop of the recording.
+        args.compare_seconds = int(args.seconds or COMPARE_S)
+        args.seconds = None
+        return oc.EXIT[run_compare(args)["result"]]
     if args.probe:
         # In a probe --seconds is how long the channel stays open, not a stop of the recording.
         args.probe_seconds = int(args.seconds or PROBE_S)

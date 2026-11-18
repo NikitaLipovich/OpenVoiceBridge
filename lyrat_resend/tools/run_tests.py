@@ -82,6 +82,10 @@ CHECKS = [
                    "on synthetic lines (tone, silence, cut pieces, clipping, noise, shifted lines); live pipeline, PCM output "
                    "and its latency (goal 097)",
      unittest_cmd("test_call_check"), TESTS, 900, "base", True),
+    ("phone_compare", "the LyraT mic before Bluetooth against the phone's recording: alignment (offset, clock drift, a jump of "
+                      "the time line, no convergence), lost frames knocked out at known times found within 7.5 ms with "
+                      "their type, files and report, the check against tone_blocks, call_check --compare plumbing (goal 099)",
+     unittest_cmd("test_phone_compare"), TESTS, 300, "base", False),
     ("updater", "the LyraT through its updater vs the simulator: image over Wi-Fi, a bad image kept out, no network "
                 "then the UART way, fw.py --via auto, every start through the updater (goal 096)",
      unittest_cmd("test_updater"), TESTS, 1500, "base", True),
