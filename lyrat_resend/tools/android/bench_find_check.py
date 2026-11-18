@@ -287,8 +287,10 @@ def main():
             ok, nodes = wait(lambda n: (text(n, "msg-bar") or "").startswith(("готово", "S3 не ответила", "ПК снова")), 25)
             check("3 %s directly (confirmed: %s)" % (desc, bool(asked)), bool(asked) and ok and
                   text(nodes, "msg-bar").startswith(want), (text(nodes, "msg-bar") or "")[:120])
-        ok, nodes = wait(lambda n: text(n, "f-s3") == "на связи", 30)
-        check("3 the S3 (simulator) back after its restart", ok, text(nodes, "f-s3_addr"))
+        top()
+        ok, nodes = wait(lambda n: text(n, "f-s3") == "на связи" and (text(n, "mode") or "").startswith("напрямую"), 30)
+        check("3 the S3 (simulator) back after its restart, still direct", ok, "%s | %s" % (text(nodes, "f-s3_addr"),
+                                                                                           text(nodes, "mode")))
         top()
         nodes = reach("a-ota")
         if check("3 'Прошить плату' is visible in direct mode", nodes is not None):
@@ -321,6 +323,10 @@ def main():
         # 5 benchd back on another HTTP port (same home: same token and id)
         ok, nodes = wait(lambda n: (text(n, "mode") or "").startswith("напрямую"), 60)
         check("5 without any PC: direct mode again", ok, text(nodes, "mode"))
+        time.sleep(12)          # two searches of direct mode: the line must keep saying "напрямую"
+        nodes = dump()
+        check("5 the mode line stays during the searches of direct mode", (text(nodes, "mode") or "").startswith("напрямую"),
+              text(nodes, "mode"))
         a = Service(home_a, http_a + 10, disc, pc, "pc-a")
         ok, nodes = wait(lambda n: (text(n, "mode") or "").startswith("через службу"), 30)
         check("5 benchd on another port found anew", ok and "%s:%d" % (pc, http_a + 10) in text(nodes, "mode"),

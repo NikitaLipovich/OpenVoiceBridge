@@ -493,7 +493,7 @@ public class BenchActivity extends Activity implements BenchUi {
         if (!searching.compareAndSet(false, true)) {
             return;
         }
-        if (mode != MODE_SERVICE) {
+        if (mode == MODE_NONE) {           // in direct mode the line keeps saying so: searches run every 5 s there
             show(modeView, "ищу ПК… (" + why + ")", COLOR_MUTE);
         }
         final BenchFind.Config cfg = config(skipHints);
