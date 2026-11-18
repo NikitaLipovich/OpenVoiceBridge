@@ -422,6 +422,10 @@ def stage_link(args):
         return 2
     watch = open_watch(args.port, out, False, echo=args.echo)
     watch.pump(time.monotonic() + 15, until=lambda: watch.sp is not None)
+    if watch.sp is not None and is_net(watch):
+        # A record of the running start first: a reset is a new boot id, and a first trial sent before any record came
+        # would make the first start the watch sees its baseline, the reset unseen (goal 096, incident 006).
+        watch.pump(time.monotonic() + 10, until=lambda: watch.boot is not None)
     if watch.sp is None:
         watch.finish(0)
         result = {"stage": "link", "label": args.label, "power": args.power, "verdict": "NO_DATA",
