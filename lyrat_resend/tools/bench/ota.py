@@ -2,7 +2,9 @@
 """Firmware over the network: the S3-ETH itself, and the LyraT through the S3. Protocol: docs/OTA.md.
 
   ota.py s3 IMAGE [options]       image to the S3 over UDP 5007
-  ota.py lyrat IMAGE [options]    image to the LyraT: staged and checked on the S3, then sent over the control UART
+  ota.py lyrat IMAGE [options]    image to the LyraT through its updater (goal 096): --via wifi (default) sends it
+                                  straight to the updater's own address, --via uart stages it on the S3, which sends it
+                                  over the control UART as before
   ota.py query                    state of both boards, JSON
   ota.py info IMAGE               what the file is: chip, project, version, ELF SHA-256, size
 
@@ -11,10 +13,18 @@ Options: --host ADDR (else BENCH_S3_ADDR, else found by broadcast like s3_uart.p
 activated), --test-rollback (the new image fails its self-test once on purpose: success is the old image running again),
 --force (LyraT: also with SLC up or SCO on), --baud N (LyraT: UART baud of the transfer, both ends agree, 115200 after),
 --window N, --timeout S, --label NAME, --quiet.
+LyraT (goal 096, docs/OTA.md "Updater of the LyraT"): the console command "upd" (through the S3) restarts the headset
+firmware into the updater in factory; the tool waits for "mode=updater" in the LyraT's "ota" line, then with --via wifi
+for "wifi=up ip=" and sends the image to that address (target 0, the same protocol and token as to the S3); with
+--via uart through the S3's relay. Then it waits for "mode=app" with the new ELF and img=valid, or for the updater keeping
+the image out (inv= the new ELF: "rolled_back"). --test-no-wifi: "upd 8", the updater joins with a wrong password; the
+tool must end with exit code 5 (wifi_failed) and leave the updater waiting for the UART way. A LyraT without "mode=" in its
+status is an old firmware with two slots: the relay as before. Times of the phases are in the record ("times").
 
 The image is checked before sending: chip, project and size. After the transfer the tool waits for the restart, compares
 the ELF SHA-256 of the running image with the file and waits until the board confirmed it (self-test passed).
-Exit code: 0 done, 1 refused or failed, 2 S3 not found, 3 rolled back (0 with --test-rollback), 4 timeout.
+Exit code: 0 done, 1 refused or failed, 2 S3 not found, 3 rolled back (0 with --test-rollback), 4 timeout,
+5 the LyraT's updater found no Wi-Fi (use --via uart; with --test-no-wifi this is the expected end).
 
 As a module: Image, Sender and Receiver (the protocol model the PC tests run against the C code), Link (UDP),
 upload(), wait_s3(), wait_lyrat(). The token never goes over the network; it is not written into the run record.
@@ -56,11 +66,11 @@ ST = {name: i for i, name in enumerate(STATUS)}
 CHIP_ESP32, CHIP_ESP32S3 = 0x0000, 0x0009
 BOARDS = {
     "s3": {"target": TARGET_SELF, "chip": CHIP_ESP32S3, "project": "s3_eth_bridge", "slot": 0x300000},
-    "lyrat": {"target": TARGET_LYRAT, "chip": CHIP_ESP32, "project": "lyrat_resend", "slot": 0x1F0000},
+    "lyrat": {"target": TARGET_LYRAT, "chip": CHIP_ESP32, "project": "lyrat_resend", "slot": 0x2E0000},   # ota_0
 }
 TOKEN_FILE = REPO_DIR / "s3_eth_bridge" / "main" / "ota_secrets.h"
 
-EXIT_OK, EXIT_FAIL, EXIT_NOT_FOUND, EXIT_ROLLED_BACK, EXIT_TIMEOUT = 0, 1, 2, 3, 4
+EXIT_OK, EXIT_FAIL, EXIT_NOT_FOUND, EXIT_ROLLED_BACK, EXIT_TIMEOUT, EXIT_WIFI = 0, 1, 2, 3, 4, 5
 
 
 def status_name(code):
@@ -475,11 +485,20 @@ class Link:
                     return got[1]
         return None
 
-    def hello(self, target):
+    def hello(self, target, settle=0.6):
+        """A fresh nonce. The receiver keeps only the nonce of the last HELLO it answered: when a slow first answer made
+        ask() send HELLO again, the later answers win, so they are read for `settle` seconds (goal 096, incident 003)."""
         rep = self.ask(target, build_short(OP_HELLO, 0), OP_HELLO)
         r = parse_reply(rep) if rep else None
         if not r or r["status"] != ST["ok"] or len(r["text"]) != 2 * NONCE_BYTES:
             return None
+        end = time.monotonic() + settle
+        while time.monotonic() < end:
+            got = self.recv(end - time.monotonic())
+            if got and got[0] == target and got[1][:1] == bytes([OP_HELLO]):
+                later = parse_reply(got[1])
+                if later and later["status"] == ST["ok"] and len(later["text"]) == 2 * NONCE_BYTES:
+                    r = later
         return bytes.fromhex(r["text"])
 
     def query(self, tries=3):
@@ -541,9 +560,10 @@ def upload(link, target, img, token, flags=0, baud=0, window=4, timeout=600.0, q
                                                                    tx.busy_replies))
         result = {"status": "ok" if tx.state == "done" else status_name(tx.fail), "seconds": round(time.monotonic() - t0, 2),
                   "sent": tx.sent, "resent": tx.resent, "stalls": tx.stalls, "busy": tx.busy_replies, "attempt": attempt}
-        # A receiver that restarted midway lost the session: one more try with a fresh nonce.
-        if tx.state == "failed" and tx.fail == ST["no_session"] and attempt == 0:
-            log(quiet, "  session lost, starting again")
+        # A receiver that restarted midway lost the session, or a crossed HELLO left it another nonce: one more try with
+        # a fresh nonce. A wrong token fails again the same way.
+        if tx.state == "failed" and tx.fail in (ST["no_session"], ST["auth"]) and attempt == 0:
+            log(quiet, "  %s, starting again with a fresh nonce" % status_name(tx.fail))
             continue
         return result
     return result
@@ -600,6 +620,135 @@ def wait_lyrat(link, img, timeout=900.0, quiet=False):
     return "timeout", q
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# The LyraT's updater (goal 096)
+
+def status_fields(text):
+    """key=value words of a status line ("ota state=... run=... mode=updater ip=...")."""
+    return dict(w.split("=", 1) for w in (text or "").split() if "=" in w)
+
+
+class LyratConsole:
+    """The LyraT's console through the S3 (s3_uart.Channel): "ota" for its status, "upd" into the updater."""
+
+    def __init__(self, host):
+        import s3_uart
+        self.ch = s3_uart.Channel(host)
+
+    def close(self):
+        self.ch.close()
+
+    def cmd(self, text):
+        r = self.ch.command(text)
+        return r["text"] if r["status"] == 0 else None
+
+    def status(self):
+        text = self.cmd("ota")
+        return status_fields(text) if text else None
+
+
+def poll(fn, until, timeout, every=0.5):
+    """Calls fn() until until(value) or the time is up; returns the last value."""
+    end = time.monotonic() + timeout
+    v = None
+    while True:
+        got = fn()
+        if got is not None:
+            v = got
+            if until(v):
+                return v
+        if time.monotonic() >= end:
+            return v
+        time.sleep(every)
+
+
+def lyrat_to_updater(con, no_wifi=False, timeout=30.0, quiet=False):
+    """("updater"|"legacy"|"no_answer"|"refused"|"timeout", fields or reply). Restarts the headset firmware into the
+    updater with "upd" (or "upd 8") unless it is there already."""
+    st = poll(con.status, lambda v: True, 3.0)
+    if st is None:
+        return "no_answer", None
+    if "mode" not in st:
+        return "legacy", st
+    if st["mode"] == "updater":
+        return "updater", st
+    reply = con.cmd("upd 8" if no_wifi else "upd")
+    if not reply or not reply.startswith("upd ok"):
+        log(quiet, "  upd: %s" % reply)
+        return "refused", reply
+    log(quiet, "  %s" % reply)
+    time.sleep(1.0)
+    st = poll(con.status, lambda v: v.get("mode") == "updater", timeout)
+    return ("updater" if st and st.get("mode") == "updater" else "timeout"), st
+
+
+def wait_updater_ip(con, timeout=45.0, fail_for=10.0, quiet=False):
+    """(ip, port) of the updater once its Wi-Fi is up, else (None, last fields): it reported a failure for fail_for
+    seconds, left the updater, or the time was up."""
+    end = time.monotonic() + timeout
+    fail_since = None
+    st = None
+    while time.monotonic() < end:
+        got = con.status()
+        if got:
+            st = got
+            if st.get("mode") != "updater":
+                return None, st
+            if st.get("wifi") == "up" and st.get("ip", "-") != "-":
+                return (st["ip"], int(st.get("port", OTA_PORT))), st
+            if st.get("wifi", "").startswith("fail"):
+                fail_since = fail_since or time.monotonic()
+                if time.monotonic() - fail_since >= fail_for:
+                    log(quiet, "  updater: %s" % st.get("wifi"))
+                    return None, st
+        time.sleep(0.5)
+    return None, st
+
+
+def wait_lyrat_app(con, img, timeout=180.0, quiet=False):
+    """After the image went in: ("done"|"rolled_back"|"timeout", fields). done: the headset firmware runs the image and
+    passed its self-test; rolled_back: the updater keeps the image out (inv= its ELF)."""
+    end = time.monotonic() + timeout
+    st = None
+    shown = 0.0
+    ran = False         # the new image was seen running: only then is the updater's verdict about it (incident 005)
+    while time.monotonic() < end:
+        got = con.status()
+        if got:
+            st = got
+            if st.get("mode") == "app" and st.get("elf") == img.elf[:16]:
+                ran = True
+                if st.get("img") == "valid":
+                    return "done", st
+            if ran and st.get("mode") == "updater" and st.get("inv") == img.elf[:16]:
+                return "rolled_back", st
+            if time.monotonic() - shown > 2.0:
+                shown = time.monotonic()
+                log(quiet, "  lyrat mode=%s elf=%s img=%s app_st=%s" % (st.get("mode"), st.get("elf"), st.get("img"),
+                                                                    st.get("app_st")))
+        time.sleep(0.5)
+    return "timeout", st
+
+
+def wait_relay_free(link, timeout=200.0, quiet=False):
+    """The S3's relay to the LyraT is not sending or verifying (goal 096: an update through the relay must not start
+    while the S3 still follows the previous one; it answers BEGIN for the LyraT with refused). Returns its state."""
+    end = time.monotonic() + timeout
+    state = None
+    shown = 0.0
+    while time.monotonic() < end:
+        q = link.query(tries=1)
+        if q:
+            state = (q.get("lyrat") or {}).get("relay")
+            if state not in ("send", "verify"):
+                return state
+            if time.monotonic() - shown > 5.0:
+                shown = time.monotonic()
+                log(quiet, "  the S3's relay is still %s, waiting" % state)
+        time.sleep(1.0)
+    return state
+
+
 def find_host(args):
     if args.host:
         return args.host
@@ -643,6 +792,10 @@ def run_update(args, board):
         flags = (F_DRYRUN if args.dry_run else 0) | (F_FAILTEST if args.test_rollback else 0) | \
             (F_FORCE if args.force else 0)
         log(args.quiet, "%s: %s %s, %d bytes, elf %s" % (board, img.project, img.version, img.size, img.elf[:16]))
+        if board == "lyrat":
+            code = run_lyrat_updater(args, img, token, host, link, flags, record)
+            if code is not None:
+                return code, record
         up = upload(link, BOARDS[board]["target"], img, token, flags, args.baud if board == "lyrat" else 0,
                     args.window, args.timeout, args.quiet)
         record["upload"] = up
@@ -670,6 +823,69 @@ def run_update(args, board):
         link.close()
 
 
+def run_lyrat_updater(args, img, token, host, link, flags, record):
+    """The LyraT through its updater (goal 096). None: an old firmware without one, the caller goes the old way."""
+    t0 = time.monotonic()
+    times = record.setdefault("times", {})
+    record["via"] = args.via
+    con = LyratConsole(host)
+    try:
+        state, st = lyrat_to_updater(con, args.test_no_wifi, quiet=args.quiet)
+        times["to_updater"] = round(time.monotonic() - t0, 1)
+        record["updater"] = st
+        if state in ("legacy", "no_answer"):
+            record["via"] = "relay_legacy"
+            log(args.quiet, "  no updater (old firmware): the relay as before")
+            return None
+        if state != "updater":
+            record["result"] = "upd_" + state
+            return EXIT_FAIL
+        log(args.quiet, "  in the updater after %.1f s: app=%s app_st=%s" % (times["to_updater"], st.get("app"),
+                                                                             st.get("app_st")))
+        if args.via == "wifi":
+            addr, st = wait_updater_ip(con, quiet=args.quiet)
+            times["wifi_up"] = round(time.monotonic() - t0, 1)
+            if not addr:
+                record["updater"] = st
+                record["result"] = "wifi_failed"
+                log(args.quiet, "  the updater found no Wi-Fi (%s): the UART way is next (--via uart)" %
+                    (st or {}).get("wifi"))
+                return EXIT_WIFI
+            log(args.quiet, "  updater at %s:%d" % addr)
+            ulink = Link(addr[0], addr[1])
+            try:
+                up = upload(ulink, TARGET_SELF, img, token, flags, 0, args.window, args.timeout, args.quiet)
+            finally:
+                ulink.close()
+        else:
+            record["relay_before"] = wait_relay_free(link, quiet=args.quiet)
+            up = upload(link, TARGET_LYRAT, img, token, flags, args.baud, args.window, args.timeout, args.quiet)
+        record["upload"] = up
+        times["upload"] = up["seconds"]
+        log(args.quiet, "upload (%s): %s in %.1f s" % (args.via, up["status"], up["seconds"]))
+        if up["status"] != "ok":
+            record["result"] = up["status"]
+            return EXIT_TIMEOUT if up["status"] == "timeout" else EXIT_FAIL
+        if args.dry_run:
+            record["result"] = "dry_run_ok"
+            return EXIT_OK
+        state, st = wait_lyrat_app(con, img, quiet=args.quiet)
+        times["running"] = round(time.monotonic() - t0, 1)
+        if args.via == "uart":
+            # The S3 reads the LyraT's status every 2 s: let its relay end too, the next update needs it free.
+            record["relay_after"] = wait_relay_free(link, timeout=30.0, quiet=args.quiet)
+        record["after_lyrat"] = st
+        record["result"] = state
+        log(args.quiet, "lyrat: %s after %.1f s in all" % (state, times["running"]))
+        if state == "done":
+            return EXIT_FAIL if args.test_rollback else EXIT_OK
+        if state == "rolled_back":
+            return EXIT_OK if args.test_rollback else EXIT_ROLLED_BACK
+        return EXIT_TIMEOUT
+    finally:
+        con.close()
+
+
 def main(argv=None):
     # Board lines carry non-ASCII ("—"): a cp1252 console must not stop the tool.
     for stream in (sys.stdout, sys.stderr):
@@ -687,6 +903,10 @@ def main(argv=None):
     ap.add_argument("--test-rollback", action="store_true")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--baud", type=int, default=0)
+    ap.add_argument("--via", choices=["wifi", "uart"], default="wifi",
+                    help="LyraT: straight to its updater over Wi-Fi, or through the S3's UART relay (goal 096)")
+    ap.add_argument("--test-no-wifi", action="store_true",
+                    help="LyraT: the updater joins with a wrong password; expected exit code 5")
     ap.add_argument("--window", type=int, default=4)
     ap.add_argument("--timeout", type=float, default=600.0)
     ap.add_argument("--label", default="")

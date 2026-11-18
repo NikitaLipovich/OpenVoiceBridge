@@ -1,8 +1,9 @@
 # Updates over the network and the debug log over UDP
 
-After one flash over USB both boards of the bench take new firmware without USB, roll back by themselves when the new
-image does not come up, and send their log to the PC. The LyraT has no Wi-Fi (R13): its image and its log go through the
-ESP32-S3-ETH over the control UART of `S3_UART.md`.
+After one flash over USB both boards of the bench take new firmware without USB, recover by themselves when the new
+image does not come up, and send their log to the PC. The LyraT's headset firmware has no Wi-Fi (R13): its log goes
+through the ESP32-S3-ETH over the control UART of `S3_UART.md`; its images go to its updater in factory, over Wi-Fi or
+over that UART (goal 096, "Updater of the LyraT" below).
 
 ```
 PC --UDP 5007 (image)----> S3 --UART1 frames 6/7 (image)--> LyraT
@@ -27,12 +28,14 @@ third board reached over Wi-Fi uses the same code.
 | nvs | data/nvs | 0x9000 | 0x6000 |
 | otadata | data/ota | 0xF000 | 0x2000 |
 | phy_init | data/phy | 0x11000 | 0x1000 |
-| ota_0 | app | 0x20000 | 0x1F0000 (1984 KB) |
-| ota_1 | app | 0x210000 | 0x1F0000 |
+| factory | app | 0x20000 | 0x100000 (1 MB): the updater |
+| ota_0 | app | 0x120000 | 0x2E0000 (2944 KB): the headset firmware |
 
-`nvs` keeps its place and size, so pairings and the radio calibration survive the change of the table. File:
-`partitions_ota.csv`, chosen in `sdkconfig.defaults`. The image was 1.25 MB at goal 090, 63 % of a slot; the limit is
-85 %, 1.69 MB.
+Since goal 096: `factory` holds the updater (`lyrat_resend/updater`, Wi-Fi, no Bluetooth), `ota_0` the headset firmware
+(no Wi-Fi); there is no second copy, see "Updater of the LyraT" below. `nvs` keeps its place and size, so pairings and
+the radio calibration survive the change of the table. File: `partitions_ota.csv`, chosen in `sdkconfig.defaults` of
+both projects. Sizes at goal 096: updater 612 608 bytes (58 % of factory), headset firmware 1 274 736 bytes (42 % of
+ota_0); the limit is 85 % of the slot for both (`tools/tests/fw_build_check.py`).
 
 ### S3-ETH, 16 MB
 
@@ -59,7 +62,58 @@ object, an image without Wi-Fi and with every update refused: after creating or 
 `CCACHE_RECACHE=1` (or `idf.py fullclean`).
 `fw.py` checks the hashes of three images; with `otadata` there are four, see goal 091.
 
+## Updater of the LyraT (goal 096)
+
+The owner's design of 2026-11-18: the LyraT has two firmwares. **factory** holds the updater (`lyrat_resend/updater`,
+project `lyrat_updater`): Wi-Fi STA, the image over UDP 5007 with the network hop above (the same HELLO, token proof,
+go-back-N, SHA-256 as the S3), the image over the control UART from the S3 as the second way, the log and the console
+over the UART as in the headset firmware; no Bluetooth, no sound. **ota_0** holds the headset firmware (`lyrat_resend`),
+which has no Wi-Fi at all, not even linked (R13; `fw_build_check.py` reads the link map). There is no second copy.
+
+```
+power, reset, crash, "reboot", "upd" ──> bootloader: otadata empty ──> updater (factory)
+    updater: log "updater: app ver=<git> elf=<ELF SHA> state=ok|fresh|bad|none", Wi-Fi, UDP 5007, UART receiver
+    window 10 s (120 s after "upd"), longer while a session runs, then esp_ota_set_boot_partition(ota_0), restart
+──> headset firmware (ota_0): at once esp_ota_set_boot_partition(factory) = otadata erased, then Bluetooth and sound
+```
+
+| Event | What happens |
+|---|---|
+| any start | updater first; it starts the headset firmware after its window |
+| `upd` (console of the headset firmware, through the S3) | NVS `upd/stay=1`, restart; the updater waits 120 s. Refused only during a call (`upd refused: call`) |
+| `upd 8` | the same, and the updater joins with a wrong password: the test without network (`ota.py --test-no-wifi`, exit code 5) |
+| image in (Wi-Fi or UART), END ok | `ota_0` set to boot, NVS `upd/fresh=1`, `upd/tries=1`, restart into it at once |
+| headset firmware passes its self-test | NVS `tries=0`, `fresh=0`; `img=valid` in its status |
+| fresh image fails its self-test (Bluetooth and a frame of the S3 within 90 s; FAILTEST fails on purpose after 5 s) | restart; the updater sees `fresh` with `tries>=1`: `app_st=bad`, the image is kept out, `inv=<its ELF>` (the S3's relay and `ota.py` read "rolled_back") |
+| an old firmware fails 3 starts in a row before Bluetooth | `app_st=bad` too |
+| `app_st=bad` | the updater waits for an image; after 10 min without one it tries the firmware once more with clean marks; console `app` does it now |
+| no firmware in ota_0 | the updater waits for ever (looks again every 60 s) |
+
+A firmware that is not fresh never restarts for its self-test: a dead S3 must not take the headset (R13). The rules are
+plain C in `main/upd_mode.[ch]`, built into both firmwares and into `otahost.dll` (`tools/tests/test_upd_mode.py`); the
+simulator `tools/tests/upd_sim.py` runs the same C rules for `tools/tests/test_updater.py`.
+
+Status of the LyraT (`s3_uart.py cmd ota`, and the S3's QUERY `lyrat.status`): the keys of the S3 first, then the mode.
+Headset firmware: `run=ota_0 ver= elf= img=valid|pending|invalid inv=- selftest= baud= mode=app wifi=none`. Updater:
+`run=factory ver=<updater> elf=<updater> img=valid inv=<ELF of a bad firmware or -> selftest=off baud= mode=updater
+app=<ver> app_elf=<16 hex> app_st=ok|fresh|bad|none tries=N wifi=up|connecting|fail:<reason> ip=<a.b.c.d> port=5007
+left=<s>`. The updater's console: `s`, `ota`, `ulog`, `ustat`, `reboot`, `app`, `help`.
+
+`ota.py lyrat IMAGE [--via wifi|uart]`: `upd`, wait for `mode=updater`, then over Wi-Fi straight to `ip:port` (target 0)
+or through the S3's relay (target 1), then wait for `mode=app` with the new ELF and `img=valid`. `fw.py flash --board
+lyrat` uses `--via auto`: Wi-Fi, and the UART way at once when the updater found no Wi-Fi (exit code 5).
+
+Limits: every start erases one otadata sector in the updater and both in the headset firmware; at 100 000 erase cycles
+per sector that is tens of thousands of starts. The updater itself is written only over USB (`fw.py flash --usb` writes
+both images, `first_flash.py`). The bootloader keeps `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`: a headset firmware that hangs
+before it erased otadata is `ABORTED` at the next start and the bootloader takes factory. Power lost between the install
+of an image and its first start makes the updater see `fresh` with `tries=1`: the image counts as bad until the 10 min
+retry or `app` (the safe side).
+
 ## Rollback and self-test
+
+For the LyraT since goal 096 this section holds for its updater's UART receiver only; its headset firmware follows
+"Updater of the LyraT" above (one slot, no rollback by the bootloader).
 
 Both boards build with `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`. A new image starts in `PENDING_VERIFY`. It confirms itself
 only after its self-test; until then any restart, crash or watchdog brings the old image back, done by the bootloader.
@@ -234,8 +288,9 @@ its log and at which level. The LyraT then drains its ring in frames of type 5, 
 ## Commands
 
 - `python tools/bench/ota.py s3 build/.../s3_eth_bridge.bin [--dry-run] [--test-rollback]`: image to the S3.
-- `python tools/bench/ota.py lyrat build/.../lyrat_resend.bin [--force] [--baud N] [--dry-run] [--test-rollback]`: image to
-  the LyraT through the S3.
+- `python tools/bench/ota.py lyrat build/.../lyrat_resend.bin [--via wifi|uart] [--test-no-wifi] [--baud N] [--dry-run]
+  [--test-rollback]`: image to the LyraT through its updater (goal 096); exit code 5: the updater found no Wi-Fi.
+- `python tools/bench/fw.py flash --board lyrat [--via auto|wifi|uart]`: build and that, Wi-Fi first (goal 096).
 - `python tools/bench/ota.py query`: state of both boards.
 - `python tools/bench/udplog.py [--seconds N] [--board s3|lyrat] [--level W] [--grep RE]`: log of both boards to
   `goals_harness/bench_runs/udplog/<stamp>/`.
@@ -250,7 +305,8 @@ running image with the file, waits for `valid`. Exit code: 0 done, 1 refused or 
 
 ## When everything is broken: back over USB
 
-Over USB, as before: `s3.py flash --usb` (S3, its own USB) or `fw.py flash --usb` (LyraT, COM15); both boards at once with
-the first flash of `FIRST_FLASH.md`. A board that rolls
-back has its old image and needs nothing. A board whose both slots fail: `idf.py erase-otadata` then `flash`; `nvs` stays.
+Over USB, as before: `s3.py flash --usb` (S3, its own USB) or `fw.py flash --usb` (LyraT, COM15: bootloader, table,
+otadata, updater into factory, headset firmware into ota_0; never `idf.py flash` of the headset firmware alone, it would
+go into factory over the updater); both boards at once with the first flash of `FIRST_FLASH.md`. A board that rolls
+back has its old image and needs nothing. An S3 whose both slots fail: `idf.py erase-otadata` then `flash`; `nvs` stays.
 `erase_flash` is never needed and would take the pairings.

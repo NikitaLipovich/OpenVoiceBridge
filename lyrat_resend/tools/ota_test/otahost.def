@@ -56,3 +56,12 @@ EXPORTS
     host_udp_new
     host_udp_info
     host_soft_limit
+    upd_app_state
+    upd_app_name
+    upd_watch_init
+    upd_watch_step
+    upd_watch_set_app
+    upd_step_name
+    upd_watch_left_s
+    upd_command
+    host_watch_new

@@ -479,10 +479,14 @@ static void selftest_task(void *arg)
         bool lyrat_silent = h.uart_rx_bytes == 0;
         bool i2s = h.i2s_call_ok && h.i2s_mic_ok && (!lyrat_alive || (h.call_frames > 0 && h.mic_frames > 0));
         bool ok = h.eth_ok && h.got_ip && h.uart_ok && i2s && (lyrat_alive || lyrat_silent);
-        if (fail_on_purpose && (uint32_t)(now_ms() - start) > 5000) {
-            ESP_LOGW(TAG, "self-test fails on purpose (failtest), back to the old image");
+        if (fail_on_purpose) {
+            // Never a pass: Bluetooth and the S3's frame (or the S3's network) can be there within a second, before the
+            // 5 s, and the image would confirm itself (goal 096, incident 002).
             ok = false;
-            start -= SELFTEST_MS;
+            if ((uint32_t)(now_ms() - start) > 5000) {
+                ESP_LOGW(TAG, "self-test fails on purpose (failtest), back to the old image");
+                start -= SELFTEST_MS;
+            }
         }
         if (ok) {
             esp_ota_mark_app_valid_cancel_rollback();

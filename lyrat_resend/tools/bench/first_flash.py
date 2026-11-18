@@ -13,10 +13,13 @@ With both boards on USB, in this order:
   4 build     both firmwares with a fresh sdkconfig and CCACHE_RECACHE=1 (the ccache trap of docs/OTA.md); the LyraT keeps
               the variant it was built with (bench_variant.h; mac_b1 is the address the phone is paired with), --variant
               changes it; the images are checked: OTA table, rollback, whole image, the S3 holds the Wi-Fi secrets
-  5 flash     over USB, S3 first: bootloader, partition table, otadata, app; four hashes confirmed by esptool. NVS is
-              never written, so the LyraT keeps its pairing with the phone (and the S3 its own NVS)
+  5 flash     over USB, S3 first: bootloader, partition table, otadata, app; four hashes confirmed by esptool. The
+              LyraT (goal 096): bootloader, table, otadata, the updater (lyrat_resend/updater) into factory and the
+              headset firmware into ota_0, five hashes (fw.lyrat_usb_command). NVS is never written, so the LyraT keeps
+              its pairing with the phone (and the S3 its own NVS)
   6 network   the S3 answers over Wi-Fi, the LyraT is alive behind it (a fresh heartbeat on the UART)
-  7 query     ota.py query: token present, both images valid, and the running images are the ones just built (ELF SHA)
+  7 query     ota.py query: token present, both images valid, and the running images are the ones just built (ELF SHA);
+              the LyraT first starts its updater for 10 s, the query waits for its headset firmware (mode=app)
   8 log       udplog.py for --log-seconds: lines of both boards over the network
 and prints a summary in Russian that ends with "USB можно отключать" only when every step passed.
 
@@ -48,9 +51,11 @@ PLACEHOLDERS = {"YOUR_SSID", "YOUR_PASSWORD", "your-2.4-GHz-network", "your-pass
 TOKEN_MIN = 16
 FLASH_IMAGES = 4            # bootloader, partition table, otadata, app
 LYRAT_FRESH_MS = 3000       # a heartbeat younger than this: the LyraT is alive behind the S3
-QUERY_WAIT_S = 30.0         # the S3 asks the LyraT for its status every 10 s (s3_ota.c STATUS_EVERY_MS)
 QUERY_POLL_S = 2.0
-PROJECTS = {"s3": (S3_DIR, "s3_eth_bridge"), "lyrat": (FW_DIR, "lyrat_resend")}
+PROJECTS = {"s3": (S3_DIR, "s3_eth_bridge"), "lyrat": (FW_DIR, "lyrat_resend"),
+            "lyrat_updater": (FW_DIR / "updater", "lyrat_updater")}
+QUERY_WAIT_S = 45.0         # the S3 asks the LyraT for its status every 10 s (s3_ota.c STATUS_EVERY_MS), and since goal
+                            # 096 the LyraT's updater waits 10 s before its headset firmware starts
 
 
 # --- secrets ---------------------------------------------------------------------------------------------------------
@@ -112,22 +117,28 @@ def backup_sdkconfig(project: Path, dest: Path, dry):
 
 
 def image_checks(board):
-    """What the built image of a board must be: the OTA table, rollback on, a whole image; S3: the secrets inside."""
+    """What the built image of a board must be: the OTA table, rollback on, a whole image; the S3 and the LyraT's
+    updater: the secrets inside; the LyraT's headset firmware: no Wi-Fi linked (goal 096). The rules of
+    tests/fw_build_check.py BOARDS."""
     sys.path.insert(0, str(HERE.parent / "tests"))
     import fw_build_check as fbc
     project, name = PROJECTS[board]
+    b = fbc.BOARDS[board]
     build = project / "build"
     out = {}
     built = fbc.table_from_bin((build / "partition_table" / "partition-table.bin").read_bytes())
-    out["table"] = built == fbc.table_from_csv(project / "partitions_ota.csv")
+    out["table"] = built == fbc.table_from_csv(b["csv"])
     sdk = (project / "sdkconfig").read_text(encoding="utf-8")
     out["rollback"] = ("CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y" in sdk
-                       and 'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_ota.csv"' in sdk)
+                       and 'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="%s"' % b["csv_conf"] in sdk)
     image = (build / (name + ".bin")).read_bytes()
     out["image"] = fbc.images.check(image) is None
-    if board == "s3":
-        values = fbc.secret_values(OTA_SECRETS, ("OTA_TOKEN", "WIFI_SSID", "WIFI_PASS"))
-        out["secrets"] = bool(values) and all(fbc.secrets_check(image, {k: v for k, v in values.items() if v}).values())
+    for path, keys in b["secrets"] or ():
+        values = fbc.secret_values(path, keys)
+        ok = bool(values) and all(fbc.secrets_check(image, {k: v for k, v in values.items() if v}).values())
+        out["secrets"] = out.get("secrets", True) and ok
+    if b["wifi"] is not None:
+        out["wifi"] = fbc.wifi_linked(build / (name + ".map")) == b["wifi"]
     return out
 
 
@@ -194,7 +205,11 @@ def query_with_lyrat_status(wait_s=QUERY_WAIT_S, run=None, sleep=time.sleep, clo
             q = json.loads(text) if rc == 0 else None
         except ValueError:
             pass
-        if (q and ((q.get("lyrat") or {}).get("status_age_ms", -1)) >= 0) or clock() >= end:
+        ly = (q or {}).get("lyrat") or {}
+        status = ly.get("status") or ""
+        # Goal 096: the status of the updater is not the end; its headset firmware follows within its window.
+        ready = ly.get("status_age_ms", -1) >= 0 and ("mode=" not in status or "mode=app" in status)
+        if (q and ready) or clock() >= end:
             return rc, q
         sleep(QUERY_POLL_S)
 
@@ -290,31 +305,35 @@ def main(argv=None):
         ", ".join("%s %s" % (b, "+".join(m) or "нет") for b, m in moved.items())))
     if args.dry_run:
         run.step("сборка", None, "S3 и LyraT (вариант %s) со свежим sdkconfig и CCACHE_RECACHE=1" % variant)
-        run.step("прошивка USB", None, "S3, затем LyraT: загрузчик, таблица, otadata, приложение; NVS не пишется")
+        run.step("прошивка USB", None, "S3, затем LyraT: загрузчик, таблица, otadata, обновлятор в factory, прошивка в ota_0; NVS не пишется")
         expect = {"s3": None, "lyrat": None}
     else:
         os.environ["CCACHE_RECACHE"] = "1"
         rc_s3 = fw.idf("idf.py -C '%s' build" % S3_DIR, "first-s3-build").returncode
         rc_ly = fw.build(variant) if rc_s3 == 0 else None
-        checks = {b: image_checks(b) for b, rc in (("s3", rc_s3), ("lyrat", rc_ly)) if rc == 0}
-        record["build"] = {"s3_rc": rc_s3, "lyrat_rc": rc_ly, "checks": checks}
+        rc_up = fw.build_updater() if rc_ly == 0 else None
+        checks = {b: image_checks(b) for b, rc in (("s3", rc_s3), ("lyrat", rc_ly), ("lyrat_updater", rc_up)) if rc == 0}
+        record["build"] = {"s3_rc": rc_s3, "lyrat_rc": rc_ly, "updater_rc": rc_up, "checks": checks}
         bad = ["%s.%s" % (b, k) for b, c in checks.items() for k, v in c.items() if not v]
-        if rc_s3 != 0 or rc_ly != 0 or bad:
-            run.step("сборка", False, "код сборки S3 %s, LyraT %s; не прошли: %s (логи: bench_runs/fw/)" % (
-                rc_s3, rc_ly, ", ".join(bad) or "-"))
+        if rc_s3 != 0 or rc_ly != 0 or rc_up != 0 or bad:
+            run.step("сборка", False, "код сборки S3 %s, LyraT %s, обновлятор %s; не прошли: %s (логи: bench_runs/fw/)" % (
+                rc_s3, rc_ly, rc_up, ", ".join(bad) or "-"))
             return finish(1)
-        run.step("сборка", True, "S3 и LyraT (вариант %s): таблица OTA, откат, образ целый, секреты в образе S3" % variant)
+        run.step("сборка", True, "S3, LyraT (вариант %s) и её обновлятор: таблица, откат, образ целый, секреты в S3 и "
+                 "обновляторе, в прошивке LyraT нет Wi-Fi" % variant)
         expect = {"s3": build_elf("s3"), "lyrat": build_elf("lyrat")}
         # 5 flash: the S3 first, so it joins Wi-Fi while the LyraT is written
-        for board, project in (("s3", S3_DIR), ("lyrat", FW_DIR)):
-            rc = fw.with_retries("first-flash-" + board, "idf.py -C '%s' -p %s flash" % (project, ports[board]),
-                                 args.retries, verify_images=FLASH_IMAGES)
+        for board, command, images in (
+                ("s3", "idf.py -C '%s' -p %s flash" % (S3_DIR, ports["s3"]), FLASH_IMAGES),
+                ("lyrat", fw.lyrat_usb_command(ports["lyrat"]), fw.LYRAT_USB_IMAGES)):
+            rc = fw.with_retries("first-flash-" + board, command, args.retries, verify_images=images)
             record.setdefault("flash", {})[board] = rc
             if rc != 0:
                 run.step("прошивка USB", False, "%s: код %d (3: не все %d хэша подтверждены; логи bench_runs/fw/)" % (
-                    board, rc, FLASH_IMAGES))
+                    board, rc, images))
                 return finish(1)
-        run.step("прошивка USB", True, "S3 и LyraT: %d образа каждой подтверждены, NVS не тронут" % FLASH_IMAGES)
+        run.step("прошивка USB", True, "S3: %d образа, LyraT: %d (обновлятор в factory, прошивка в ota_0) подтверждены, "
+                 "NVS не тронут" % (FLASH_IMAGES, fw.LYRAT_USB_IMAGES))
     record["expect_elf"] = expect
 
     # 6 network

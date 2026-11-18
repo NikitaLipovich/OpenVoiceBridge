@@ -102,3 +102,7 @@ void host_udp_info(const dbg_udp_t *u, uint32_t *v) { v[0] = (uint32_t)u->len; v
 
 // The soft limiter of the LyraT's call audio (goal 094 #004).
 int16_t host_soft_limit(int32_t s) { return call_soft_limit(s); }
+
+// Goal 096: the rules of the LyraT's updater (upd_mode.c) as an opaque object.
+#include "upd_mode.h"
+upd_watch_t *host_watch_new(void) { return (upd_watch_t *)calloc(1, sizeof(upd_watch_t)); }

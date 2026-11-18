@@ -19,6 +19,9 @@ Goal 093: UX <boot> (restart of the S3 with a new boot id) and UP [qdbm] (Wi-Fi 
 knows s (print_status of the firmware: bonds, SLC, peers by their last two bytes, heap), reboot [1] (restart after
 REBOOT_DELAY_MS with a new boot id and the boot line "BOOT reset_reason=SW code=3", then "SLC CONNECTED" while it has a
 bond), unpair and ota; its log lines carry the uptime since its own start.
+Goal 096: the LyraT is the updater in factory plus the headset firmware in ota_0 (upd_sim.py): every start goes
+through the updater (C rules of upd_mode.c, clock sped up by --upd-scale), "upd [8]" goes there, the updater takes
+images on its own UDP port (--lyrat-port, printed as lyrat_port) and from the relay, the headset firmware has no slot.
 """
 import argparse
 import json
@@ -42,6 +45,7 @@ sys.path.insert(0, str(HERE))
 import otahost as H  # noqa: E402
 import s3_emu  # noqa: E402
 import images  # noqa: E402
+import upd_sim  # noqa: E402
 
 S3_MAIN = REPO / "s3_eth_bridge" / "main" / "main.c"
 S3_DBGLOG = REPO / "s3_eth_bridge" / "main" / "s3_dbglog.c"
@@ -148,6 +152,10 @@ class LyratConsole:
 
     def run(self, text):
         word, _, arg = text.partition(" ")
+        if self.sim:
+            got = self.sim.lyrat.command(word, arg, self.sco)
+            if got is not None:
+                return got
         if word == "tone":
             self.tone = 1 if arg.strip() == "1" else 0
             return ST_OK, "tone = %d" % self.tone
@@ -301,6 +309,16 @@ class Sim(s3_emu.Emulator):
         self.next_stat = time.monotonic() + STATUS_S
         self.started = time.monotonic()
         self.log_requests = 0
+        # Goal 096: the LyraT with its updater (upd_sim.py).
+        self.lyrat = upd_sim.UpdBoard(Path(args.lyrat_image).read_bytes(), scale=args.upd_scale)
+        self.lyrat.log = lambda text, tag="LyraT": self.lyrat_log(text, tag=tag)
+        self.ly_rx = upd_sim.V2Rx(0, s3_emu.ota.CHIP_ESP32, "lyrat_resend")
+        self.ly_rx.board, self.ly_rx.sim, self.ly_rx.slc = self.lyrat, self, args.lyrat_slc
+        self.ly_net = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.ly_net.bind((args.host, args.lyrat_port))
+        self.ly_net_rx = upd_sim.NetRx(self)
+        self.lyrat.active = lambda: (self.ly_rx.info()["state_name"] == "recv" or
+                                     self.ly_net_rx.rx.info()["state_name"] == "recv")
 
     # --- UART relay ---------------------------------------------------------------------------------------------------
     def tx_on(self):
@@ -474,11 +492,16 @@ class Sim(s3_emu.Emulator):
                             s.send_fail += 1
 
     # --- the LyraT's heartbeat and the S3's stat line -------------------------------------------------------------------
-    def lyrat_ota_text(self):
+    def lyrat_status_text(self):
+        """port_status_text() of lyrat_ota.c: the keys of the S3 first, then lyrat_mode_text() (goal 096)."""
         b = self.lyrat
         inv = b.last_invalid.elf[:16] if b.last_invalid else "-"
-        return ("ota state=idle run=%s ver=%s elf=%s img=%s inv=%s selftest=%s baud=115200"
-                % (b.slot, b.run.version.replace(" ", "_")[:23], b.run.elf[:16], b.img, inv, b.selftest))
+        return ("run=%s ver=%s elf=%s img=%s inv=%s selftest=%s baud=115200 %s"
+                % (b.slot, b.run.version.replace(" ", "_")[:23], b.run.elf[:16], b.img, inv, b.selftest,
+                   b.mode_text(self.host, self.ly_net.getsockname()[1])))
+
+    def lyrat_ota_text(self):
+        return "ota state=idle " + self.lyrat_status_text()
 
     def lyrat_log(self, text, level="I", tag="LyraT"):
         up = int((time.monotonic() - self.lyrat_t0) * 1000)
@@ -498,6 +521,11 @@ class Sim(s3_emu.Emulator):
         if c.bonds:
             self.lyrat_log("peer[0] = 11:22:33:44:3c:7a", tag="BT")
         self.slc_at = time.monotonic() + SLC_AFTER_BOOT_S if c.bonds else None
+        if self.lyrat.mode == "updater":
+            b = self.lyrat
+            self.slc_at = None                  # no Bluetooth in the updater
+            self.lyrat_log("updater: app ver=%s elf=%s state=%s tries=%d" % (
+                b.app.version if b.app else "-", b.app.elf[:16] if b.app else "-", b.app_st, b.tries), tag="updater")
 
     def s3_booted(self, new_boot=True):
         """esp_restart() of the S3 (UX, or an update): new boot id, a new log ring, the relay's state back to its start."""
@@ -517,10 +545,9 @@ class Sim(s3_emu.Emulator):
         t = time.monotonic()
         if self.lyrat_reboot_at and t >= self.lyrat_reboot_at:
             self.lyrat_reboot_at = None
-            self.lyrat.boot = random.randrange(65536)
-            self.lyrat.restarts += 1
-            self.lyrat.down_until = t + 0.4
+            self.lyrat._boot("updater", 0)         # every start goes through the updater (goal 096)
             self.ly_rx.reset()
+            self.ly_net_rx.new()
             self.lyrat_booted("SW", 3)
         if self.s3_restart_at and t >= self.s3_restart_at:
             self.s3_restart_at = None
@@ -594,13 +621,15 @@ class Sim(s3_emu.Emulator):
 
     def serve(self):
         while True:
-            ready, _, _ = select.select([self.sock, self.log, self.tap], [], [], 0.002)
+            ready, _, _ = select.select([self.sock, self.log, self.tap, self.ly_net], [], [], 0.002)
             for s in ready:
                 try:
                     data, peer = s.recvfrom(4096)
                 except OSError:         # Windows: an ICMP "port unreachable" of an earlier send
                     continue
-                if s is self.sock:
+                if s is self.ly_net:
+                    self.ly_net_rx.handle(data, peer, self.ly_net)
+                elif s is self.sock:
                     self.handle_ota(data, peer)
                 elif s is self.log:
                     self.handle_log(data, peer)
@@ -614,6 +643,7 @@ class Sim(s3_emu.Emulator):
                            H.CReceiver(0x1F0000, s3_emu.ota.CHIP_ESP32, "lyrat_resend", token=self.token or b"")]
             if self.lyrat.step():
                 self.ly_rx.reset()
+                self.ly_net_rx.new()
                 self.lyrat_booted("SW", 3)     # an update activated (or rolled back): esp_restart()
             self.relay_step()
             self.log_step()
@@ -637,6 +667,9 @@ def main(argv=None):
     ap.add_argument("--log-loss", type=float, default=0.0)
     ap.add_argument("--stream-loss", type=float, default=0.0)
     ap.add_argument("--stream-dup", type=float, default=0.0)
+    ap.add_argument("--lyrat-port", type=int, default=0, help="UDP port of the LyraT's updater, 0: any (goal 096)")
+    ap.add_argument("--upd-scale", type=float, default=20.0,
+                    help="the updater's clock runs this much faster: 10 s window in 0.5 s (goal 096)")
     ap.add_argument("--lyrat-silent", action="store_true", help="no frames from the LyraT: the S3 keeps its TX off")
     args = ap.parse_args(argv)
     tmp = None
@@ -649,7 +682,8 @@ def main(argv=None):
     sim = Sim(args)
     print(json.dumps({"host": args.host, "tap_port": sim.tap.getsockname()[1], "port": sim.sock.getsockname()[1],
                       "log_port": sim.log.getsockname()[1], "call_port": args.stream_port_call,
-                      "mic_port": args.stream_port_mic, "pid": os.getpid()}), flush=True)
+                      "mic_port": args.stream_port_mic, "lyrat_port": sim.ly_net.getsockname()[1],
+                      "pid": os.getpid()}), flush=True)
     sim.serve()
 
 

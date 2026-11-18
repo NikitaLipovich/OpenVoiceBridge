@@ -49,7 +49,8 @@ CHECKS = [
      ["cmd", "/c", str(PLATFORM / "build_host.cmd")], PLATFORM, 300, "base", False),
     ("static", "no secret in git, .gitignore covers the secret files, the S3 builds for Wi-Fi by default",
      [PY, str(TESTS / "static_check.py")], TESTS, 120, "base", False),
-    ("fw_build", "S3 and LyraT built in their own folders: table, rollback, size, whole image, secrets; working build untouched",
+    ("fw_build", "S3, LyraT and its updater built in their own folders: table, rollback, size in the slot, whole image, "
+                 "secrets, Wi-Fi only in the updater; working build untouched",
      [PY, str(TESTS / "fw_build_check.py"), "--out", str(BUILDS)], TESTS, 7200, "build", False),
     ("sco_probe", "the Android probe app builds with the plain SDK tools (never installed here)",
      [PY, str(TOOLS / "android" / "build_apk.py"), "--out", "{run}/apk"], TOOLS / "android", 600, "build", False),
@@ -61,6 +62,9 @@ CHECKS = [
     ("fw_review", "findings of the review of goal 094: soft limiter in C, Wi-Fi retry pause, self-test only once, "
                   "UX delay in any build, noise mode at start",
      unittest_cmd("test_fw_review"), TESTS, 120, "base", False),
+    ("upd_rules", "the LyraT's updater in C (upd_mode.c): firmware state from the NVS marks, the 10/120 s window, a new "
+                  "image at once, a bad one kept out and retried, the command upd; no Wi-Fi call in the headset firmware",
+     unittest_cmd("test_upd_mode"), TESTS, 120, "base", False),
     ("ota_protocol", "OTA protocol C against Python: loss, reorder, bit errors, token, rollback rules, log ring",
      unittest_cmd("test_protocol"), OTA_TEST, 900, "base", True),
     ("ota_tools", "ota.py of both boards (dry run, update, rollback, wrong token and board) and udplog.py vs the emulator",
@@ -74,6 +78,9 @@ CHECKS = [
     ("usb_free", "the bench without USB vs the simulator: first_flash --dry-run, NetWatch, link trials, round power, "
                  "fw.py/s3.py/s3_uart.py over the network, Wi-Fi power in stat, WAV silence by frame, call_record",
      unittest_cmd("test_usb_free"), TESTS, 1500, "base", True),
+    ("updater", "the LyraT through its updater vs the simulator: image over Wi-Fi, a bad image kept out, no network "
+                "then the UART way, fw.py --via auto, every start through the updater (goal 096)",
+     unittest_cmd("test_updater"), TESTS, 1500, "base", True),
     ("platform_rom", "platform: ROM loader in C against the esptool protocol model",
      [PY, "test_rom.py"], PLATFORM, 900, "base", False),
     ("platform_tools", "platform: platform_ota.py and udplog.py against the U3 emulator",

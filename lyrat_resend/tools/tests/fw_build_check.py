@@ -6,10 +6,12 @@ For each board: idf.py -B DIR/<board> -D SDKCONFIG=DIR/<board>.sdkconfig build (
 they are, and the check proves it), then
   table      the partition table in the built partition-table.bin = partitions_ota.csv = the table of docs/OTA.md
   rollback   CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y in the sdkconfig of this build
-  size       the app image within 85 % of the ota_0 slot (docs/OTA.md)
+  size       the app image within 85 % of its slot (docs/OTA.md): ota_0 for the LyraT's headset firmware, factory for
+             its updater (goal 096), ota_0 for the S3
+  wifi       LyraT (goal 096): the headset firmware links no Wi-Fi (R13), the updater does; read from the link map
   image      the app image is whole: segments, checksum, appended SHA-256 (tests/images.py)
-  secrets    S3 only: the Wi-Fi name, password and OTA token of main/ota_secrets.h are in the image, compared as bytes, never
-             printed. A hit of the ccache trap of docs/OTA.md (old object without the header) is rebuilt once with
+  secrets    S3 and the LyraT's updater: the Wi-Fi name, password and OTA token (main/ota_secrets.h of the S3; the updater
+             takes the network from lyrat_resend/main/wifi_secrets.h) are in the image, compared as bytes, never printed. A hit of the ccache trap of docs/OTA.md (old object without the header) is rebuilt once with
              CCACHE_RECACHE=1 and said so
   untouched  the working sdkconfig, sdkconfig.old and build/ of both projects and git status are the same as before
 Output: DIR/fw_build.json and the build logs; DIR defaults to goals_harness/bench_runs/tests/builds (outside git, kept
@@ -38,10 +40,18 @@ DEFAULT_OUT = RUNS / "tests" / "builds"
 IDF_PATH = os.environ.get("IDF_PATH", r"C:\esp\v5.5.2\esp-idf")
 IDF_TOOLS = os.environ.get("IDF_TOOLS_PATH", r"C:\Espressif")
 SLOT_LIMIT = 0.85
+S3_SECRETS = REPO / "s3_eth_bridge" / "main" / "ota_secrets.h"
+WIFI_SECRETS = LYRAT / "main" / "wifi_secrets.h"
+# csv: the table file; slot: the partition the image goes to; wifi: True links Wi-Fi, False must not, None not checked.
 BOARDS = {
-    "s3": {"dir": REPO / "s3_eth_bridge", "bin": "s3_eth_bridge.bin", "doc": "S3-ETH",
-           "secrets": REPO / "s3_eth_bridge" / "main" / "ota_secrets.h", "keys": ("OTA_TOKEN", "WIFI_SSID", "WIFI_PASS")},
-    "lyrat": {"dir": LYRAT, "bin": "lyrat_resend.bin", "doc": "LyraT", "secrets": None, "keys": ()},
+    "s3": {"dir": REPO / "s3_eth_bridge", "bin": "s3_eth_bridge.bin", "doc": "S3-ETH", "slot": "ota_0", "wifi": None,
+           "csv": REPO / "s3_eth_bridge" / "partitions_ota.csv", "csv_conf": "partitions_ota.csv",
+           "secrets": [(S3_SECRETS, ("OTA_TOKEN", "WIFI_SSID", "WIFI_PASS"))]},
+    "lyrat": {"dir": LYRAT, "bin": "lyrat_resend.bin", "doc": "LyraT", "slot": "ota_0", "wifi": False,
+              "csv": LYRAT / "partitions_ota.csv", "csv_conf": "partitions_ota.csv", "secrets": None},
+    "lyrat_updater": {"dir": LYRAT / "updater", "bin": "lyrat_updater.bin", "doc": "LyraT", "slot": "factory", "wifi": True,
+                      "csv": LYRAT / "partitions_ota.csv", "csv_conf": "../partitions_ota.csv",
+                      "secrets": [(S3_SECRETS, ("OTA_TOKEN",)), (WIFI_SECRETS, ("WIFI_SSID", "WIFI_PASS"))]},
 }
 OTA_DOC = LYRAT / "docs" / "OTA.md"
 TYPES = {0: "app", 1: "data"}
@@ -153,6 +163,14 @@ def secret_values(path: Path, keys):
     return out
 
 
+def wifi_linked(map_path: Path):
+    """True when the memory map of the link defines esp_wifi_init: the driver is in the image. The part before
+    "Linker script and memory map" lists the discarded sections, which name it in every ESP-IDF build."""
+    text = map_path.read_text(encoding="utf-8", errors="replace")
+    text = text[text.find("Linker script and memory map"):]
+    return re.search(r"^\s+0x[0-9a-f]+\s+esp_wifi_init\s*$", text, re.M) is not None
+
+
 def secrets_check(image: bytes, values):
     """Per key: True when its value is in the image (an empty or absent value: False)."""
     return {k: bool(v) and v in image for k, v in values.items()}
@@ -162,30 +180,38 @@ def check_board(board, out: Path):
     b = BOARDS[board]
     build_dir = out / board
     res = {}
-    csv = table_from_csv(b["dir"] / "partitions_ota.csv")
+    csv = table_from_csv(b["csv"])
     built = table_from_bin((build_dir / "partition_table" / "partition-table.bin").read_bytes())
     doc = table_from_doc(b["doc"])
     res["table"] = {"pass": built == csv == doc, "built": built, "csv_same": built == csv, "doc_same": built == doc}
     sdk = (out / (board + ".sdkconfig")).read_text(encoding="utf-8")
     res["rollback"] = {"pass": "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y" in sdk and
-                       'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_ota.csv"' in sdk}
+                       'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="%s"' % b["csv_conf"] in sdk}
     image = (build_dir / b["bin"]).read_bytes()
-    slot = next(e[4] for e in built if e[0] == "ota_0")
-    res["size"] = {"pass": len(image) <= SLOT_LIMIT * slot, "bytes": len(image), "slot": slot,
-                   "use_pct": round(100.0 * len(image) / slot, 1)}
+    slot = next(e[4] for e in built if e[0] == b["slot"])
+    res["size"] = {"pass": len(image) <= SLOT_LIMIT * slot, "bytes": len(image), "slot": slot, "slot_name": b["slot"],
+                   "limit": int(SLOT_LIMIT * slot), "use_pct": round(100.0 * len(image) / slot, 1)}
+    if b["wifi"] is not None:
+        linked = wifi_linked(build_dir / (b["bin"][:-4] + ".map"))
+        res["wifi"] = {"pass": linked == b["wifi"], "linked": linked, "want": b["wifi"]}
     why = images.check(image)
     res["image"] = {"pass": why is None, "problem": why}
     if b["secrets"] is not None:
-        values = secret_values(b["secrets"], b["keys"])
-        if values is None:
-            res["secrets"] = {"pass": False, "problem": "no %s" % b["secrets"].name}
+        found, missing = {}, []
+        for path, keys in b["secrets"]:
+            values = secret_values(path, keys)
+            if values is None:
+                missing.append(path.name)
+            else:
+                found.update(secrets_check(image, values))
+        if missing:
+            res["secrets"] = {"pass": False, "problem": "no " + ", ".join(missing)}
         else:
-            found = secrets_check(image, values)
             res["secrets"] = {"pass": all(found.values()), "found": found}
     return res
 
 
-def run(out: Path, boards=("s3", "lyrat"), build=True):
+def run(out: Path, boards=tuple(BOARDS), build=True):
     out.mkdir(parents=True, exist_ok=True)
     before = working_state()
     report = {"boards": {}, "out": str(out)}

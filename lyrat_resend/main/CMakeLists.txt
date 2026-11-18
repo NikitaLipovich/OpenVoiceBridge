@@ -1,5 +1,5 @@
 idf_component_register(SRCS "voice_ns.c" "main.c" "aec.c" "spectral_ns.c" "msbc_codec.c" "plc.c" "link_power.c" "voice_ns.c"
-                         "ota_link.c" "ota_sha256.c" "dbg_log.c" "lyrat_ota.c" "lyrat_dbglog.c"
+                         "ota_link.c" "ota_sha256.c" "dbg_log.c" "lyrat_ota.c" "lyrat_dbglog.c" "upd_mode.c"
                     INCLUDE_DIRS "."
                     REQUIRES
                         nvs_flash

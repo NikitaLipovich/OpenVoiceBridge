@@ -2,14 +2,18 @@
 """Build and flash the bench firmwares, and erase the bond memory only. Over the network by default (goal 093).
 
   fw.py build [--variant NAME] [--board lyrat|s3|both]
-  fw.py flash [--variant NAME] [--board lyrat|s3|both]   builds first, then ota.py over Wi-Fi through the S3
+  fw.py flash [--variant NAME] [--board lyrat|s3|both] [--via auto|wifi|uart]   builds first, then ota.py
   fw.py flash --image FILE [--board lyrat|s3]           a ready image over the network, no build
   fw.py erase-bonds                                      the LyraT forgets its bonds and peer list, then restarts
   ... --usb [--port COM15] [--retries N]                 the same over USB as before: idf.py flash, esptool erase_region
 
-Over the network: flash runs `ota.py lyrat|s3 build/<image>` (the LyraT with --force: the update is taken during a link
-to the phone, its restart still waits for the end of a call), result and exit code are those of ota.py (0 done, 1 refused
-or failed, 2 S3 not found, 3 rolled back, 4 timeout); erase-bonds sends the console commands "unpair" and "reboot" through
+Over the network: flash runs `ota.py lyrat|s3 build/<image>`, result and exit code are those of ota.py (0 done, 1 refused
+or failed, 2 S3 not found, 3 rolled back, 4 timeout, 5 the LyraT's updater found no Wi-Fi). The LyraT (goal 096) goes
+through its updater: --via auto (default) sends the image over Wi-Fi straight to the updater and, when the updater finds
+no Wi-Fi (5), at once again through the S3's UART relay; --via wifi|uart only that way. Over USB the LyraT gets both of
+its images: bootloader, table and otadata of the headset firmware, the updater (lyrat_resend/updater) into factory, the
+headset firmware into ota_0 (offsets from partitions_ota.csv; idf.py flash of the firmware alone would put it into
+factory, over the updater); erase-bonds sends the console commands "unpair" and "reboot" through
 the S3 and waits for the LyraT to come back. Over USB (--usb or --port, or BENCH_USB=1): idf.py flash with retries,
 esptool erase_region of the nvs partition, as before goal 093.
 
@@ -108,7 +112,9 @@ PORT_ERRORS = ("could not open port", "serial port", "Failed to connect", "Write
 # Variants that need a Kconfig option off; the option goes back on as soon as they are not asked for.
 KCONFIG_OFF = {"no_wbs": "CONFIG_BT_HFP_WBS_ENABLE"}
 SDKCONFIG = FW_DIR / "sdkconfig"
-FLASH_IMAGES = 3   # bootloader, partition table, app
+FLASH_IMAGES = 3   # bootloader, partition table, app (the S3)
+LYRAT_USB_IMAGES = 5    # bootloader, partition table, otadata, updater, headset firmware (goal 096)
+UPDATER_DIR = FW_DIR / "updater"
 
 
 def idf(args: str, log_name: str, timeout: float = 900.0):
@@ -162,6 +168,42 @@ def build(variant: str) -> int:
     return res.returncode
 
 
+def build_updater() -> int:
+    """The LyraT's updater (factory, goal 096): needed for the USB flash only, the network never writes it."""
+    res = idf("idf.py -C '%s' build" % UPDATER_DIR, "build-updater")
+    if res.returncode != 0:
+        print((res.stdout + res.stderr)[-3000:])
+    print("build updater rc=%d" % res.returncode, flush=True)
+    return res.returncode
+
+
+def app_offsets(csv_path: Path = None):
+    """{"factory": offset, "ota_0": offset} of the LyraT's partitions_ota.csv."""
+    out = {}
+    with (csv_path or FW_DIR / "partitions_ota.csv").open(encoding="utf-8") as fh:
+        for row in csv.reader(line for line in fh if line.strip() and not line.lstrip().startswith("#")):
+            if len(row) >= 5 and row[1].strip() == "app":
+                out[row[2].strip()] = int(row[3].strip(), 0)
+    return out
+
+
+def lyrat_usb_command(port: str) -> str:
+    """esptool write_flash of the LyraT's five images; NVS is not written, pairings stay."""
+    off = app_offsets()
+    if "factory" not in off or "ota_0" not in off:
+        raise SystemExit("partitions_ota.csv: factory and ota_0 needed")
+    b, u = FW_DIR / "build", UPDATER_DIR / "build"
+    files = [(0x1000, b / "bootloader" / "bootloader.bin"), (0x8000, b / "partition_table" / "partition-table.bin"),
+             (0xF000, b / "ota_data_initial.bin"), (off["factory"], u / "lyrat_updater.bin"),
+             (off["ota_0"], b / "lyrat_resend.bin")]
+    missing = [str(f) for _, f in files if not f.exists()]
+    if missing:
+        raise SystemExit("not built: " + ", ".join(missing))
+    return ("python -m esptool --chip esp32 -p %s -b 460800 --before default_reset --after hard_reset write_flash "
+            "--flash_mode dio --flash_size 4MB --flash_freq 80m %s" % (
+                port, " ".join("0x%x '%s'" % (o, f) for o, f in files)))
+
+
 def with_retries(name: str, command: str, retries: int, verify_images: int = 0) -> int:
     rc = 1
     for attempt in range(1, retries + 1):
@@ -201,21 +243,29 @@ def build_board(board: str, variant: str) -> int:
     return s3.build()
 
 
-def ota_flash(board: str, variant: str, image=None) -> int:
+def ota_flash(board: str, variant: str, image=None, via="auto") -> int:
     """ota.py with the image just built (or the one given); its JSON line is printed, its whole output kept in
-    bench_runs/fw/."""
+    bench_runs/fw/. The LyraT with --via auto: Wi-Fi first, the UART relay when its updater found no Wi-Fi."""
+    if board == "lyrat" and via == "auto":
+        rc = ota_flash(board, variant, image, "wifi")
+        if rc != 5:
+            return rc
+        print("the updater found no Wi-Fi: again through the S3's UART", flush=True)
+        return ota_flash(board, variant, image, "uart")
     import subprocess
     args = [sys.executable, str(Path(__file__).resolve().parent / "ota.py"), board, str(image or IMAGES[board]),
             "--label", "fw-" + (variant.replace("+", "_") if board == "lyrat" else "s3")]
     if board == "lyrat":
-        args.append("--force")
+        args += ["--force", "--via", via]
+    t0 = time.monotonic()
     res = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800,
                          env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     log_dir = RUNS_ROOT / "fw"
     log_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / ("%s-ota-%s.txt" % (stamp(), board))).write_text(res.stdout + res.stderr, encoding="utf-8")
     last = (res.stdout.strip().splitlines() or [""])[-1]
-    print("flash %s over the network: %s rc=%d" % (board, last, res.returncode), flush=True)
+    print("flash %s over the network%s: %s rc=%d in %.0f s" % (board, " (%s)" % via if board == "lyrat" else "", last,
+                                                                res.returncode, time.monotonic() - t0), flush=True)
     return res.returncode
 
 
@@ -279,6 +329,8 @@ def main():
     ap.add_argument("--port", default=None, help="LyraT USB port (implies --usb); default BENCH_PORT or COM15")
     ap.add_argument("--retries", type=int, default=12)   # "Wrong boot mode" came 8 times in a row
     ap.add_argument("--image", help="flash: this app image over the network, no build (one --board)")
+    ap.add_argument("--via", choices=["auto", "wifi", "uart"], default="auto",
+                    help="LyraT over the network: its updater over Wi-Fi, the S3's UART relay, or Wi-Fi then UART")
     args = ap.parse_args()
     usb = args.usb or bool(args.port) or os.environ.get("BENCH_USB") == "1"
     port = args.port or DEFAULT_PORT
@@ -292,17 +344,17 @@ def main():
     if args.action == "flash" and args.image:
         if usb or len(boards) != 1:
             ap.error("--image goes over the network to one board")
-        return ota_flash(boards[0], args.variant, args.image)
+        return ota_flash(boards[0], args.variant, args.image, args.via)
     if args.action == "flash":
         for board in boards:
             rc = build_board(board, args.variant)
             if rc != 0:
                 return rc
             if not usb:
-                rc = ota_flash(board, args.variant)
+                rc = ota_flash(board, args.variant, via=args.via)
             elif board == "lyrat":
-                rc = with_retries("flash", "idf.py -C '%s' -p %s flash" % (FW_DIR, port), args.retries,
-                                  verify_images=FLASH_IMAGES)
+                rc = build_updater() or with_retries("flash", lyrat_usb_command(port), args.retries,
+                                                     verify_images=LYRAT_USB_IMAGES)
             else:
                 import s3
                 rc = s3.flash_usb(args.retries)

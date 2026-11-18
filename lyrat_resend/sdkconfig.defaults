@@ -56,8 +56,9 @@ CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 # ── Flash и таблица разделов ─────────────────────────────────────────────────
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 
-# Partitions: nvs (24K, same place as before), otadata, phy, two app slots of 1984K for updates through the S3 with
-# rollback (docs/OTA.md). The old table with one factory slot is partitions_bt_sink_example.csv.
+# Partitions (goal 096): nvs (24K, same place as before), otadata, phy, factory = the updater (lyrat_resend/updater),
+# ota_0 = this firmware. Every start goes through the updater, which takes new images over Wi-Fi (docs/OTA.md).
+# The old table with one factory slot is partitions_bt_sink_example.csv.
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_ota.csv"
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

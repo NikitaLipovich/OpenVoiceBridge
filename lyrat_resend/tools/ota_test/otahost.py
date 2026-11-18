@@ -377,3 +377,55 @@ def soft_limit(s: int) -> int:
 def line_level(text: str):
     b = text.encode()
     return lib.dbg_line_level(b, len(b))
+
+
+# --- the LyraT's updater: the rules of upd_mode.c (goal 096) -----------------------------------------------------------
+
+lib.upd_app_state.argtypes = [C.c_int, C.c_int, C.c_uint32]
+lib.upd_app_name.argtypes = [C.c_int]
+lib.upd_app_name.restype = C.c_char_p
+lib.host_watch_new.restype = C.c_void_p
+lib.upd_watch_init.argtypes = [C.c_void_p, C.c_uint32, C.c_int, C.c_uint8]
+lib.upd_watch_step.argtypes = [C.c_void_p, C.c_uint32, C.c_int, C.c_uint32]
+lib.upd_watch_set_app.argtypes = [C.c_void_p, C.c_int]
+lib.upd_step_name.argtypes = [C.c_int]
+lib.upd_step_name.restype = C.c_char_p
+lib.upd_watch_left_s.argtypes = [C.c_void_p, C.c_uint32]
+lib.upd_watch_left_s.restype = C.c_int32
+lib.upd_command.argtypes = [C.c_char_p, C.c_int, C.c_void_p, C.c_size_t]
+lib.upd_command.restype = C.c_uint8
+
+UPD_APPS = ("none", "ok", "fresh", "bad")
+UPD_STEPS = ("stay", "boot_app", "boot_retry", "boot_new")
+
+
+def upd_app_state(image_ok, fresh, tries):
+    return lib.upd_app_name(lib.upd_app_state(int(image_ok), int(fresh), tries)).decode()
+
+
+def upd_command(args, sco_on=False):
+    """(stay value 0/1/2, reply text) of the firmware's "upd" rules."""
+    out = C.create_string_buffer(120)
+    stay = lib.upd_command(args.encode(), int(sco_on), out, 120)
+    return stay, out.value.decode()
+
+
+class CUpdWatch:
+    """The updater's window (upd_watch_*) with the clock given by the caller, in ms."""
+
+    def __init__(self, now_ms, app="ok", stay=0):
+        self.w = lib.host_watch_new()
+        lib.upd_watch_init(self.w, now_ms & 0xFFFFFFFF, UPD_APPS.index(app), stay)
+
+    def __del__(self):
+        if getattr(self, "w", None):
+            lib.host_free(self.w)
+
+    def step(self, now_ms, active=False, done=0):
+        return UPD_STEPS[lib.upd_watch_step(self.w, now_ms & 0xFFFFFFFF, int(active), done)]
+
+    def set_app(self, app):
+        lib.upd_watch_set_app(self.w, UPD_APPS.index(app))
+
+    def left_s(self, now_ms):
+        return lib.upd_watch_left_s(self.w, now_ms & 0xFFFFFFFF)

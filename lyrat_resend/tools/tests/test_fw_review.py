@@ -137,6 +137,24 @@ class SelfTestOnlyOnce(unittest.TestCase):
         self.assertNotIn("esp_restart", block(src, "static void wifi_retry_now", "\n}\n"))
 
 
+class FailtestNeverPasses(unittest.TestCase):
+    """Goal 096, incident 002: with FAILTEST the self-test must fail. Its conditions (Bluetooth and a frame of the S3, or
+    the S3's network) can hold within a second, before the 5 s of the planned failure, so "ok" is forced false from the
+    first round on, on both boards; the old code let the image confirm itself on the hardware."""
+
+    def check(self, src):
+        task = block(strip_comments(src), "static void selftest_task", "\n}\n")
+        fail = re.search(r"if \(fail_on_purpose\) \{\s*ok = false;", task)
+        self.assertIsNotNone(fail, "ok must be false at once with fail_on_purpose")
+        self.assertLess(fail.start(), task.index("if (ok)"))
+
+    def test_lyrat(self):
+        self.check(read(LYRAT / "lyrat_ota.c"))
+
+    def test_s3(self):
+        self.check(read(S3_OTA))
+
+
 class NoiseModeAtStart(unittest.TestCase):
     """#006: the default noise mode (web2) was started without checking that ns_pro_create() gave it a handle;
     ns_process(NULL) then ran in the mic task. The start and voice_ns_request() share one rule now."""

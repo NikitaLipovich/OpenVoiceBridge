@@ -27,6 +27,10 @@ from benchlib import DEFAULT_PORT, redact, write_json  # noqa: E402
 
 ROM_RST = re.compile(r"rst:0x([0-9a-f]+) \(([A-Z0-9_]+)\)")
 FW_RST = re.compile(r"BOOT reset_reason=([A-Z0-9_]+)")
+# Goal 096: the LyraT's updater hands over to the headset firmware with a restart. Its line before that restart marks
+# the next start as a handover, not a reset: one reset of the board is one start of the updater. A handover line lost on
+# the way makes one reset too many, never one too few.
+HANDOVER = re.compile(r"updater: (starting the firmware|new image in ota_0)")
 UPTIME = re.compile(r"^[IWED] \((\d+)\) ")
 SLC_UP = re.compile(r"SLC CONNECTED")
 HFP_DOWN = re.compile(r"HFP conn state=0\b")
@@ -48,6 +52,9 @@ class SerialWatch:
         self.last_uptime = None
         self.max_uptime = 0
         self.boot_seen = False      # a ROM banner was seen and no uptime line followed yet
+        self.handover = False       # the updater said it starts the firmware: the next banner is no reset
+        self.handovers = 0
+        self.handover_boot = False
         self.slc_ups = self.slc_drops = 0
         self.slc_up = False
         self.sp = None
@@ -76,13 +83,24 @@ class SerialWatch:
         self.log.flush()
         self.recent.append((self.now(), line))
         del self.recent[:-4000]
+        if HANDOVER.search(line):
+            self.handover = True
         m = ROM_RST.search(line)
-        if m:
+        if m and self.handover:
+            self.handover = False
+            self.handovers += 1
+            self.event("updater_handover", reason=m.group(2))
+            self.boot_seen = True
+            self.handover_boot = True      # its BOOT line is the firmware's start, not a reason of its own
+            self.slc_up = False
+        elif m:
             self.rom_reasons[m.group(2)] += 1
             self.add_reset("rom_banner", m.group(2))
             self.boot_seen = True
         m = FW_RST.search(line)
-        if m:
+        if m and self.handover_boot:
+            self.handover_boot = False
+        elif m:
             self.fw_reasons[m.group(1)] += 1
             self.event("fw_reset_reason", reason=m.group(1))
         m = UPTIME.match(line)
@@ -196,6 +214,7 @@ class SerialWatch:
             "open_denied": self.open_denied,
             "lines": self.lines,
             "board_resets": None if closed else len(self.resets),
+            "updater_handovers": self.handovers,
             "rom_reset_reasons": None if closed else dict(self.rom_reasons),
             "fw_reset_reasons": None if closed else dict(self.fw_reasons),
             "uptime_before_reset_ms": None if closed else [r["uptime_before_ms"] for r in self.resets],
