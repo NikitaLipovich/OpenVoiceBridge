@@ -4,6 +4,8 @@
   python lyrat_resend/tools/run_tests.py            all checks, firmware builds included
   python lyrat_resend/tools/run_tests.py --quick    without the builds of the firmwares and of the Android probe
   python lyrat_resend/tools/run_tests.py --only s3_sim,bench_tools    some checks (names: --list)
+  python lyrat_resend/tools/run_tests.py --quick --port-offset 100     on ports 5104..5110 (BENCH_PORT_OFFSET): another
+                                                                      worktree's run on the default ports is not met
 
 Prints PASS / FAIL / SKIP per check and writes goals_harness/bench_runs/tests/<stamp>/summary.json with each check's
 status, time, log file and notes, and the log of each check beside it. Exit code 0 only when every check that ran passed
@@ -94,6 +96,12 @@ CHECKS = [
     ("updater", "the LyraT through its updater vs the simulator: image over Wi-Fi, a bad image kept out, no network "
                 "then the UART way, fw.py --via auto, every start through the updater (goal 096)",
      unittest_cmd("test_updater"), TESTS, 1500, "base", True),
+    ("benchd", "the bench service vs the simulator (goal 103): log of both boards in rotated files, event index (start "
+               "and reason, SLC, SCO, commands, a lost S3), API and CLI, the log relay to two udplog.py and NetWatch at "
+               "once, the bench lock (refusal, queue, expiry, dead pid, lock run, bench_busy), an update as a job, the "
+               "admin page and its POST rules, --lan read only; tools without the service; two simulators on two port "
+               "offsets",
+     unittest_cmd("test_benchd"), TESTS, 900, "base", True),
     ("platform_rom", "platform: ROM loader in C against the esptool protocol model",
      [PY, "test_rom.py"], PLATFORM, 900, "base", False),
     ("platform_tools", "platform: platform_ota.py and udplog.py against the U3 emulator",
@@ -163,6 +171,8 @@ def main():
     ap.add_argument("--only", help="comma separated names of checks, see --list")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--out", help="folder instead of goals_harness/bench_runs/tests/<stamp>")
+    ap.add_argument("--port-offset", type=int, default=None,
+                    help="BENCH_PORT_OFFSET for the whole run: parallel runs (worktrees) on different offsets do not meet")
     args = ap.parse_args()
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -184,9 +194,14 @@ def main():
     env = {k: v for k, v in os.environ.items() if k not in ("MSYSTEM", "BENCH_S3_ADDR", "BENCH_U3_ADDR")}
     env["PYTHONIOENCODING"] = "utf-8"
     env["BENCH_NO_ADB"] = "1"       # the phone is never touched by a test (goal 093)
+    env["BENCH_NO_BENCHD"] = "1"    # a bench service running on this PC is not used by the tests (test_benchd starts its own)
+    env.pop("BENCHD_URL", None)
+    if args.port_offset is not None:
+        env["BENCH_PORT_OFFSET"] = str(args.port_offset)
     env.pop("BENCH_USB", None)
     env["OTA_TEST_OUT"] = str(run_dir / "ota_test_runs")
     summary = {"stamp": stamp, "mode": "quick" if args.quick else "full", "only": only, "out": str(run_dir),
+               "port_offset": int(env.get("BENCH_PORT_OFFSET", "0") or 0),
                "python": sys.version.split()[0], "checks": []}
     t_all = time.monotonic()
     image_kinds = None

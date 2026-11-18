@@ -64,6 +64,7 @@ def env():
     e = dict(os.environ)
     e["BENCH_S3_ADDR"] = "127.0.0.1"
     e["BENCH_NO_ADB"] = "1"          # no test touches the phone (goal 093)
+    e["BENCH_NO_BENCHD"] = "1"       # nor a bench service running for the real bench (goal 103)
     e.pop("BENCH_USB", None)
     e["PYTHONIOENCODING"] = "utf-8"
     return e

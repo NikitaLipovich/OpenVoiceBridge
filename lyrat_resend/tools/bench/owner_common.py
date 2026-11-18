@@ -20,7 +20,7 @@ import serial
 from serial.tools import list_ports
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from benchlib import REPO_DIR, RUNS_ROOT, redact, stamp, write_json  # noqa: E402
+from benchlib import REPO_DIR, RUNS_ROOT, bench_port, redact, stamp, write_json  # noqa: E402
 
 PASS, FAIL, NOT_CHECKED = "PASS", "FAIL", "НЕ ПРОВЕРЕНО"
 EXIT = {PASS: 0, FAIL: 1, NOT_CHECKED: 2}
@@ -192,10 +192,10 @@ def port_state(port):
     return "free"
 
 
-def udp_state(ports=(5004, 5005)):
+def udp_state(ports=None):
     """The stream ports this PC receives on; a second recorder cannot share them."""
     busy = []
-    for port in ports:
+    for port in ports or (bench_port(5004), bench_port(5005)):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             s.bind(("0.0.0.0", port))
@@ -243,8 +243,23 @@ def simulated_bench():
 
 
 def bench_busy(step, need_lyrat=True, need_udp=True):
-    """A message if something else holds the bench, otherwise None. Nothing here stops anything."""
-    procs = [] if simulated_bench() else other_bench_processes()
+    """A message if something else holds the bench, otherwise None. Nothing here stops anything.
+    While benchd runs (goal 103) its lock decides, not the list of processes: held by another owner is busy, free or
+    held by this goal (BENCH_LOCK_OWNER / BENCH_LOCK_TOKEN, set by "bench.py lock run") is not."""
+    procs = [] if simulated_bench() else None
+    if procs is None:
+        import benchd_client
+        lock = benchd_client.lock_state()
+        if lock is not None:
+            holder = lock.get("holder")
+            if holder and not benchd_client.my_lock(lock):
+                return ("стенд занят: замок службы стенда у «%s» до %s%s. Я его не трогаю. Дождитесь освобождения "
+                        "(bench.py lock wait) или возьмите замок в очередь: bench.py lock run --owner <гоал> --wait N -- ..."
+                        % (holder.get("owner"), (holder.get("until") or "?")[11:16],
+                           (", %s" % holder["note"]) if holder.get("note") else ""))
+            procs = []
+        else:
+            procs = other_bench_processes()
     if procs is None:
         return "список процессов не читается, занятость стенда неизвестна"
     if procs:

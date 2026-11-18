@@ -65,6 +65,9 @@ def parse_ustat(line):
 
 class Channel:
     def __init__(self, board=None):
+        if not board and not os.environ.get("BENCH_S3_ADDR"):
+            import benchd_client         # benchd knows the S3: no broadcast while it runs (goal 103)
+            board = benchd_client.s3_addr()
         self.board = board or os.environ.get("BENCH_S3_ADDR")
         self.socks = []
         for ip in sender_addresses(self.board):

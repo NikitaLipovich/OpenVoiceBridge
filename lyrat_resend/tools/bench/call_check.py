@@ -145,7 +145,7 @@ class CallCheck:
             return False
         self.check(bool(q.get("pins_ok")), "выводы S3 к LyraT только входы (pins_ok)", "прошивка S3 не та: lyrat_resend/docs/S3_TAP.md")
         try:
-            link = ota.Link(ch.board, 5007)
+            link = ota.Link(ch.board, ota.OTA_PORT)
             info = link.query() or {}
             link.close()
         except OSError:

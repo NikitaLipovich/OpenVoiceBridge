@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Стенд — benchd</title>
+<!-- The owner's page of benchd (goal 103). Served by benchd.py at "/"; no external file, font or script. -->
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1d232b; --mute:#66707c; --line:#dde2e8; --ok:#18794e; --bad:#c2410c;
+          --warn:#a16207; --accent:#2563eb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171b; --card:#1d2127; --fg:#e6e9ee; --mute:#9aa4b0; --line:#2e343c; --ok:#4ade80; --bad:#fb923c;
+            --warn:#facc15; --accent:#60a5fa; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 system-ui, "Segoe UI", sans-serif; }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; }
+  header .mute { color:var(--mute); font-size:12px; }
+  main { padding:12px 16px; display:grid; gap:12px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 12px; min-width:0; }
+  section.wide { grid-column: 1 / -1; }
+  h2 { font-size:14px; margin:0 0 8px; color:var(--mute); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+  .row { display:flex; justify-content:space-between; gap:8px; padding:2px 0; border-bottom:1px dashed var(--line); }
+  .row:last-child { border-bottom:0; }
+  .k { color:var(--mute); }
+  .ok { color:var(--ok); font-weight:600; } .bad { color:var(--bad); font-weight:600; } .warn { color:var(--warn); font-weight:600; }
+  button { font:inherit; padding:6px 10px; border-radius:6px; border:1px solid var(--line); background:var(--bg); color:var(--fg); cursor:pointer; margin:3px 4px 3px 0; }
+  button:hover { border-color:var(--accent); }
+  button.danger { border-color:var(--bad); color:var(--bad); }
+  input, select { font:inherit; padding:4px 6px; border-radius:6px; border:1px solid var(--line); background:var(--bg); color:var(--fg); }
+  pre { margin:0; max-height:420px; overflow:auto; font:12px/1.35 Consolas, "Cascadia Mono", monospace; white-space:pre-wrap; word-break:break-all; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  td, th { text-align:left; padding:3px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--mute); font-weight:600; }
+  .events { max-height:340px; overflow:auto; }
+  #msg { min-height:1.4em; color:var(--accent); }
+  .filters { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Стенд</h1>
+  <span class="mute" id="svc">служба: …</span>
+  <span class="mute" id="updated"></span>
+</header>
+<main>
+  <section>
+    <h2>Платы</h2>
+    <div id="boards">…</div>
+  </section>
+  <section>
+    <h2>Замок и задания</h2>
+    <div id="lock">…</div>
+    <div>
+      <button id="take">Взять стенд себе (1 ч)</button>
+      <button id="give">Отдать мой замок</button>
+      <button class="danger" id="steal">Снять чужой замок</button>
+    </div>
+    <div id="jobs"></div>
+  </section>
+  <section>
+    <h2>Действия</h2>
+    <div>
+      <button class="danger" data-act="reboot_lyrat">Перезапуск LyraT</button>
+      <button class="danger" data-act="restart_s3">Перезапуск S3</button>
+      <span id="btmode" hidden><input id="mode" size="8" placeholder="режим"><button class="danger" data-act="bt_mode">Режим BT</button></span>
+    </div>
+    <div>
+      <button class="danger" data-act="flash_both">Прошить обе платы</button>
+      <button class="danger" data-act="call_probe">call_check --probe 1</button>
+    </div>
+    <div id="msg"></div>
+    <pre id="jobout"></pre>
+  </section>
+  <section class="wide">
+    <h2>События за час</h2>
+    <div class="events"><table><thead><tr><th>время</th><th>тип</th><th>плата</th><th>подробности</th></tr></thead><tbody id="events"></tbody></table></div>
+  </section>
+  <section class="wide">
+    <h2>Лог</h2>
+    <div class="filters">
+      <select id="board"><option value="">обе платы</option><option value="lyrat">LyraT</option><option value="s3">S3</option></select>
+      <input id="grep" placeholder="фильтр (регулярное выражение)" size="32">
+      <label><input type="checkbox" id="pause"> пауза</label>
+      <button id="clear">очистить</button>
+    </div>
+    <pre id="log"></pre>
+  </section>
+</main>
+<script>
+"use strict";
+const OWNER = "owner";            // the lock name of the owner's page
+let lastId = 0, logLines = [], status = null, lastJob = null;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+
+async function get(path) {
+  const r = await fetch(path, {cache: "no-store"});
+  return r.json();
+}
+async function post(path, body) {
+  const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json", "X-Bench": "1"},
+                               body: JSON.stringify(body || {})});
+  let data = {};
+  try { data = await r.json(); } catch (e) {}
+  return {code: r.status, data};
+}
+function row(k, v, cls) { return `<div class="row"><span class="k">${esc(k)}</span><span class="${cls || ""}">${esc(v)}</span></div>`; }
+function say(text) { $("msg").textContent = text; }
+
+function renderStatus(st) {
+  status = st;
+  $("svc").textContent = `служба: pid ${st.benchd.pid}, работает ${Math.round(st.benchd.up_s)} с, строк ${st.benchd.counts.lines}, ` +
+    `диск ${(st.benchd.disk.log_bytes / 1048576).toFixed(1)} МБ из ${(st.benchd.disk.limit_bytes / 1048576).toFixed(0)}`;
+  $("updated").textContent = "обновлено " + new Date().toLocaleTimeString();
+  const s3 = st.s3, ly = st.lyrat, ph = st.phone || {};
+  $("boards").innerHTML =
+    row("S3", s3.found ? (s3.lost ? "ПРОПАЛА" : "на связи") : "не найдена", s3.found && !s3.lost ? "ok" : "bad") +
+    row("S3 адрес / boot / аптайм", `${s3.addr ?? "—"} / ${s3.boot ?? "—"} / ${s3.up_s ?? "—"} с`) +
+    row("S3 Wi-Fi rssi / txp / версия", `${s3.rssi ?? "—"} дБм / ${s3.txp ?? "—"} / ${s3.ver ?? "—"}`) +
+    row("LyraT", ly.lost ? "ПРОПАЛА" : "на связи", ly.lost ? "bad" : "ok") +
+    row("LyraT аптайм / последний кадр", `${ly.up_s ?? "—"} с / ${ly.last_frame_ms ?? "—"} мс`) +
+    row("Канал гарнитуры (SCO)", ly.sco_open ? "открыт" : "закрыт", ly.sco_open ? "warn" : "") +
+    row("LyraT версия", ly.ver ?? "—") +
+    row("Телефон (только чтение)", [ph.state, ph.model].filter(Boolean).join(", ") || "—");
+  const h = st.lock.holder;
+  $("lock").innerHTML = row("Замок", h ? `у «${h.owner}» до ${h.until.slice(11, 16)} (${Math.round(h.left_s)} с)${h.note ? ", " + h.note : ""}` : "свободен",
+                            h ? "warn" : "ok") +
+    row("Очередь", st.lock.queue.map((q) => q.owner).join(", ") || "пусто");
+  $("jobs").innerHTML = (st.jobs || []).map((j) => row(`задание ${j.id}`, `${j.kind} (${j.owner || ""}) идёт`, "warn")).join("");
+  $("btmode").hidden = !st.bt_mode;
+}
+
+function renderEvents(evs) {
+  $("events").innerHTML = evs.slice().reverse().map((e) => {
+    const rest = Object.entries(e).filter(([k]) => !["t", "type", "board", "board_t_s"].includes(k))
+      .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" ");
+    const bad = /lost|down|panic|fail|rollback|bod|gap|expired|overridden/.test(e.type + (e.action || ""));
+    return `<tr><td>${esc(e.t.slice(11, 19))}</td><td class="${bad ? "bad" : ""}">${esc(e.type)}</td><td>${esc(e.board || "")}</td><td>${esc(rest)}</td></tr>`;
+  }).join("");
+}
+
+async function refreshStatus() { try { renderStatus(await get("/status")); } catch (e) { $("svc").textContent = "служба не отвечает"; } }
+async function refreshEvents() { try { renderEvents((await get("/events?from=-1h&limit=500")).events); } catch (e) {} }
+async function refreshLog() {
+  if ($("pause").checked) return;
+  const q = new URLSearchParams({after: lastId, limit: lastId ? 500 : 200});
+  if ($("board").value) q.set("board", $("board").value);
+  if ($("grep").value) q.set("grep", $("grep").value);
+  try {
+    const ans = await get("/tail?" + q);
+    if (ans.error) { say("фильтр: " + ans.error); return; }
+    lastId = ans.last_id;
+    if (ans.lines.length) {
+      const pre = $("log"), atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+      logLines = logLines.concat(ans.lines).slice(-2000);
+      pre.textContent = logLines.join("\n");
+      if (atEnd) pre.scrollTop = pre.scrollHeight;
+    }
+  } catch (e) {}
+}
+async function refreshJob() {
+  if (!lastJob) return;
+  try {
+    const j = await get("/jobs/" + encodeURIComponent(lastJob));
+    $("jobout").textContent = `задание ${j.id} ${j.kind}: ${j.ended ? "закончено, код " + j.exit : "идёт"}\n` + (j.tail || "");
+    if (j.ended) lastJob = null;
+  } catch (e) {}
+}
+
+const LABELS = {reboot_lyrat: "перезапустить LyraT", restart_s3: "перезапустить S3", bt_mode: "сменить режим Bluetooth",
+                flash_both: "прошить обе платы (fw.py flash --board both)", call_probe: "запустить call_check --probe 1 (без звонка)"};
+
+async function act(name) {
+  if (!confirm(`Точно ${LABELS[name]}?`)) return;
+  const body = {name, owner: OWNER};
+  if (name === "bt_mode") body.mode = $("mode").value;
+  const h = status && status.lock.holder;
+  if (h && h.owner !== OWNER) {
+    if (!confirm(`Стенд сейчас держит «${h.owner}». Сделать это поверх его замка? Это может испортить его измерение.`)) return;
+    body.force = true;
+  }
+  say("…");
+  const {code, data} = await post("/action", body);
+  if (code === 202) { lastJob = data.id; say(`задание ${data.id} запущено`); refreshJob(); }
+  else say(code === 200 ? `готово: ${JSON.stringify(data)}` : `отказ (${code}): ${data.error || JSON.stringify(data)}`);
+  refreshStatus(); refreshEvents();
+}
+
+document.querySelectorAll("button[data-act]").forEach((b) => b.addEventListener("click", () => act(b.dataset.act)));
+$("take").addEventListener("click", async () => {
+  if (!confirm("Взять стенд себе на 1 час? Гоалы будут ждать.")) return;
+  const {code, data} = await post("/lock", {owner: OWNER, ttl_s: 3600, note: "владелец (страница)"});
+  say(code === 200 ? "стенд ваш на 1 час" : `не взят: ${data.error}`); refreshStatus();
+});
+$("give").addEventListener("click", async () => {
+  const {code, data} = await post("/lock/release", {owner: OWNER});
+  say(code === 200 ? (data.released ? "замок отдан" : "замок и так был свободен") : `нет: ${data.error}`); refreshStatus();
+});
+$("steal").addEventListener("click", async () => {
+  const h = status && status.lock.holder;
+  if (!h) { say("замок свободен"); return; }
+  if (!confirm(`Снять замок «${h.owner}»?`) || !confirm("Его окно или прошивка могут сломаться. Точно снять?")) return;
+  const {code, data} = await post("/lock/release", {owner: OWNER, force: true});
+  say(code === 200 ? "замок снят" : `нет: ${data.error}`); refreshStatus(); refreshEvents();
+});
+$("clear").addEventListener("click", () => { logLines = []; $("log").textContent = ""; });
+["board", "grep"].forEach((id) => $(id).addEventListener("change", () => { lastId = 0; logLines = []; $("log").textContent = ""; refreshLog(); }));
+
+refreshStatus(); refreshEvents(); refreshLog();
+setInterval(refreshStatus, 2000);
+setInterval(refreshEvents, 5000);
+setInterval(refreshLog, 1000);
+setInterval(refreshJob, 2000);
+</script>
+</body>
+</html>

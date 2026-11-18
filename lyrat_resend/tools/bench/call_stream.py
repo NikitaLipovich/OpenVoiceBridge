@@ -35,6 +35,7 @@ import argparse
 import collections
 import json
 import math
+import os
 import queue
 import socket
 import struct
@@ -58,7 +59,7 @@ RELOCK_S = 0.5                  # ... for this long: re-align, with a break flag
 JUMP_S = 2.0                    # a frame jump beyond this is a new segment, not a loss
 PAST_S = 0.5                    # a packet this far behind the output is a stopped bus that came back: new segment
 RING_S = 8
-PCM_PORT = 5010
+PCM_PORT = 5010 + int(os.environ.get("BENCH_PORT_OFFSET", "0") or 0)   # benchlib.bench_port (goal 103)
 CLIENT_QUEUE = 100              # blocks: 2 s
 TICK_S = 0.005
 HEADER = struct.Struct("<4sIQHHd")

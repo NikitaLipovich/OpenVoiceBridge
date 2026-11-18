@@ -12,6 +12,8 @@ and --lyrat-level. The address: --host, else BENCH_S3_ADDR / BENCH_U3_ADDR, else
 the counters of all lines go to summary.json: per board lines, restarts (a new boot id), lost on the board (its own
 counter) and lost on the way (the rest of the gaps in the line numbers), duplicates. Levels: 0 none, 1 E, 2 W, 3 I, 4 D, 5 V.
 Exit code: 0 lines came, 1 none came, 2 S3 not found.
+While benchd runs (goal 103) the lines come from its relay on 127.0.0.1 (the same protocol), so neither takes the log
+from the other; --direct asks the S3 itself as before. summary.json says which: "via": "benchd" or "direct".
 
 A line longer than a record slot comes as several records, the later ones starting with "+ " (the S3's stat line):
 they are written as one line again. As a module: parse_datagram(), parse_records(), Tracker, Joiner, format_line(), LEVELS.
@@ -28,9 +30,9 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from benchlib import redact, run_dir, write_json  # noqa: E402
+from benchlib import bench_port, redact, run_dir, write_json  # noqa: E402
 
-LOG_PORT = 5008
+LOG_PORT = bench_port(5008)
 REC_HDR = 18
 UDP_VERSION = 1
 BOARD_NAMES = {0: "s3", 1: "lyrat", 2: "u3", 3: "u1", 4: "u2", 0x83: "u1con", 0x84: "u2con"}
@@ -164,9 +166,17 @@ def main(argv=None):
     ap.add_argument("--echo", action="store_true", help="also print the lines")
     ap.add_argument("--label", default="")
     ap.add_argument("--out", help="directory instead of bench_runs/udplog/<stamp>")
+    ap.add_argument("--direct", action="store_true", help="ask the S3 itself even while benchd runs (takes its log)")
     args = ap.parse_args(argv)
 
     host = args.host or os.environ.get("BENCH_S3_ADDR") or os.environ.get("BENCH_U3_ADDR")
+    import benchd_client
+    relay = None if args.direct else benchd_client.log_endpoint(host)
+    via = "direct"
+    if relay:
+        # benchd holds the S3's log (one listener per S3): take it from its relay, same protocol (goal 103).
+        host, args.port = relay
+        via = "benchd"
     if not host:
         from ota import find_host
         host = find_host(argparse.Namespace(host=None))
@@ -246,11 +256,11 @@ def main(argv=None):
         except OSError:
             pass
         sock.close()
-    summary = {"seconds": round(time.monotonic() - t0, 1), "datagrams": datagrams, "written": written,
+    summary = {"seconds": round(time.monotonic() - t0, 1), "datagrams": datagrams, "written": written, "via": via,
                "filter": {"board": args.board, "level": args.level, "grep": args.grep},
                "boards": tracker.summary(), "s3": s3_state, "relay": s3_state}
     write_json(out / "summary.json", summary)
-    print(json.dumps({"out": str(out), "boards": summary["boards"]}))
+    print(json.dumps({"out": str(out), "via": via, "boards": summary["boards"]}))
     return 0 if datagrams else 1
 
 

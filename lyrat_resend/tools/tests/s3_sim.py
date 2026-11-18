@@ -49,6 +49,7 @@ import otahost as H  # noqa: E402
 import s3_emu  # noqa: E402
 import images  # noqa: E402
 import upd_sim  # noqa: E402
+from benchlib import port_offset  # noqa: E402
 
 S3_MAIN = REPO / "s3_eth_bridge" / "main" / "main.c"
 S3_DBGLOG = REPO / "s3_eth_bridge" / "main" / "s3_dbglog.c"
@@ -690,11 +691,12 @@ class Sim(s3_emu.Emulator):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--tap-port", type=int, default=D["PORT_REQUEST"])
-    ap.add_argument("--ota-port", dest="port", type=int, default=5007)
-    ap.add_argument("--log-port", type=int, default=5008)
-    ap.add_argument("--stream-port-call", type=int, default=D["PORT_CALL"])
-    ap.add_argument("--stream-port-mic", type=int, default=D["PORT_MIC"])
+    off = port_offset()          # BENCH_PORT_OFFSET moves every default port, as in the tools (goal 103)
+    ap.add_argument("--tap-port", type=int, default=D["PORT_REQUEST"] + off)
+    ap.add_argument("--ota-port", dest="port", type=int, default=5007 + off)
+    ap.add_argument("--log-port", type=int, default=5008 + off)
+    ap.add_argument("--stream-port-call", type=int, default=D["PORT_CALL"] + off)
+    ap.add_argument("--stream-port-mic", type=int, default=D["PORT_MIC"] + off)
     ap.add_argument("--token-file")
     ap.add_argument("--s3-image")
     ap.add_argument("--lyrat-image")

@@ -43,9 +43,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from benchlib import REPO_DIR, run_dir, write_json  # noqa: E402
+from benchlib import REPO_DIR, bench_port, run_dir, write_json  # noqa: E402
 
-OTA_PORT = 5007
+OTA_PORT = bench_port(5007)
 UDP_VERSION = 1
 CHUNK_MAX = 1008
 REQ_HDR = 9

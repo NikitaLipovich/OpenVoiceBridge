@@ -62,14 +62,14 @@ import wave
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from benchlib import run_dir  # noqa: E402
+from benchlib import bench_port, run_dir  # noqa: E402
 
 RATE = 16000
 PROGRESS_S = 30.0
 SAMPLES_PER_FRAME = 240
 HEADER = 8
 MAX_GAP_FRAMES = RATE * 30 // SAMPLES_PER_FRAME   # a larger jump is a board restart, not a loss
-NAMES = {5004: "call", 5005: "mic"}
+NAMES = {bench_port(5004): "call", bench_port(5005): "mic"}
 SOCKET_BUFFER = 1 << 20
 
 
@@ -130,7 +130,7 @@ class _Stream:
 
 
 class UdpRecorder:
-    def __init__(self, ports=(5004, 5005)):
+    def __init__(self, ports=(bench_port(5004), bench_port(5005))):
         self.socks = {}
         self.streams = {}
         for port in ports:
@@ -189,11 +189,11 @@ class UdpRecorder:
 TAP_MAGIC = b"S3"
 TAP_VERSION = 1
 TAP_HEADER = 24
-TAP_REQUEST_PORT = 5006
+TAP_REQUEST_PORT = bench_port(5006)
 TAP_REQUEST_S = 1.0
 TAP_SILENT_S = 3.0        # no stream for this long: the board may be back with another address, broadcast again
 TAP_STREAMS = {0: "call", 1: "mic"}
-TAP_PORTS = {"call": 5004, "mic": 5005}
+TAP_PORTS = {"call": bench_port(5004), "mic": bench_port(5005)}
 REPLY_MARKS = 600         # 10 minutes of TAP1 replies
 MARK_EVERY = 500          # about every 7.5 s at 240 frames a packet
 JOURNAL_NAME = "packets.journal"
@@ -639,7 +639,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seconds", type=float, help="length; with --tap and --receive it may be left out")
     ap.add_argument("--out", help="directory; with --tap the default is <bench runs>/record/<stamp>")
-    ap.add_argument("--ports", default="5004,5005")
+    ap.add_argument("--ports", default="%d,%d" % (bench_port(5004), bench_port(5005)))
     ap.add_argument("--tap", action="store_true", help="take the PCM streams of the S3-ETH board")
     ap.add_argument("--slots", default="L,LR", help="--tap: slots of the call and mic lines: L, R or LR. The call has the "
                                                     "same samples in both slots, the mic has two different channels")

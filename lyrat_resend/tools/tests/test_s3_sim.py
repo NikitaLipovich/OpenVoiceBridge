@@ -206,7 +206,7 @@ class Live(unittest.TestCase):
         end = time.monotonic() + D["STATUS_MS"] / 1000.0 * 3
         joiner = udplog.Joiner()
         try:
-            s.sendto(b"LOG1 3 3", ("127.0.0.1", 5008))
+            s.sendto(b"LOG1 3 3", ("127.0.0.1", udplog.LOG_PORT))
             while time.monotonic() < end:
                 try:
                     data = s.recvfrom(4096)[0]
@@ -217,7 +217,7 @@ class Live(unittest.TestCase):
                         if whole["text"].startswith("stat up="):
                             return whole["text"]
         finally:
-            s.sendto(b"LOG0", ("127.0.0.1", 5008))
+            s.sendto(b"LOG0", ("127.0.0.1", udplog.LOG_PORT))
             s.close()
         raise AssertionError("no stat line in %.0f s" % (D["STATUS_MS"] / 1000.0 * 3))
 

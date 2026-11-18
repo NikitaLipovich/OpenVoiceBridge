@@ -13,6 +13,21 @@ REPO_DIR = BENCH_DIR.parents[2]
 DEFAULT_PORT = os.environ.get("BENCH_PORT", "COM15")
 RUNS_ROOT = Path(os.environ.get("BENCH_RUNS", REPO_DIR / "goals_harness" / "bench_runs"))
 
+
+def port_offset() -> int:
+    """BENCH_PORT_OFFSET: added to every network port of the bench tools (5004..5010, benchd 5080/5081) and to the
+    simulator's defaults, so test runs of parallel goals do not meet on the same ports (goal 103). It stays 0 on the
+    real bench: the firmware's ports are fixed."""
+    try:
+        return int(os.environ.get("BENCH_PORT_OFFSET", "0") or 0)
+    except ValueError:
+        return 0
+
+
+def bench_port(base: int) -> int:
+    """A port of the bench as the firmware knows it (5004..5010) moved by BENCH_PORT_OFFSET."""
+    return base + port_offset()
+
 _MAC = re.compile(r"\b([0-9a-fA-F]{2}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2})\b")
 _CALLER = re.compile(r"(CLIP\S*\s*).*$")
 

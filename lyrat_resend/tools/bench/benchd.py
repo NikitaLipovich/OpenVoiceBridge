@@ -1,0 +1,1030 @@
+#!/usr/bin/env python3
+"""benchd: the bench service on the PC (goal 103). One process owns the S3's debug log and serves it to everyone.
+
+  benchd.py [--host ADDR] [--http-port 5080] [--relay-port 5081] [--lan [--lan-control]] [--home DIR]
+            [--rotate-mb 20] [--rotate-min 60] [--disk-mb 2048] [--lost-s 10] [--poll-s 5] [--bod-poll-s 300]
+            [--s3-level 3] [--lyrat-level 3] [--bt-mode-cmd "TEMPLATE {mode}"]
+
+What it does, without stopping, while it runs:
+  log      asks the S3 for the log of both boards (LOG1 every 2 s, docs/OTA.md "Debug log": the S3 has one listener) and
+           writes every line to <home>/<YYYY-MM-DD>/log-HHMMSS.txt with the PC's time and the board's, MAC prefixes
+           hidden; a new file every --rotate-min minutes, above --rotate-mb, on a new day; the oldest files go above
+           --disk-mb. Home: BENCHD_HOME, else goals_harness/bench_runs/benchd (outside git, R6).
+  events   <home>/<day>/events.jsonl from the lines (bench_events.py: starts and their reason, SLC, SCO and its codec,
+           updates, panics, supply dips, the S3's Wi-Fi) and from its own watch: board_lost/board_back (no answer of
+           the S3, no frames of the LyraT behind it, for --lost-s), log_gap, cmd, lock, job, benchd.
+  relay    UDP 127.0.0.1:--relay-port speaks the S3's log protocol (LOG1 [s3] [lyrat] [u2] for 10 s, LOG0, datagrams
+           "UL" as the S3 sends them, filtered to the asked levels): udplog.py and the tools' NetWatch listen here
+           while benchd runs, so nobody takes the log from anybody (benchd_client.log_endpoint).
+  api      HTTP/JSON on 127.0.0.1:--http-port (--lan: all interfaces, read only from outside unless --lan-control):
+             GET  /status /logs?from=&to=&board=&grep=&limit= /tail?after=&board=&grep= /events?from=&to=&type=
+                  /lock /jobs /jobs/<id>      (time: ISO, HH:MM[:SS] today, or -30s/-10m/-2h)
+             POST /cmd {target lyrat|s3, cmd, owner, token}    /ota {board lyrat|s3|both, variant|image, via}
+                  /action {name reboot_lyrat|restart_s3|bt_mode|flash_both|call_probe}
+                  /lock {owner, ttl_s, wait_s, pid, note}  /lock/renew {owner, token, ttl_s}  /lock/release {owner, token}
+                  /shutdown
+           A POST needs the header "X-Bench: 1" and JSON (a foreign web page cannot send that). /cmd, /ota and /action
+           are refused (423) while another owner holds the lock, unless "force": true (the admin page asks twice).
+  lock     one lock for the bench: an owner takes it for ttl_s (default 900, at most 4 h), renews it, gives it back; a
+           second owner waits up to wait_s in a queue (first come first served) or is refused with the holder's name;
+           an expired lock or a dead pid frees it. Kept in <home>/state.json over a restart of benchd.
+  page     GET / is the owner's admin page (benchd_admin.html, no external files).
+The CLI for goals is bench.py; the guide is lyrat_resend/docs/BENCHD.md. Ports move with BENCH_PORT_OFFSET.
+Nothing here plays sound or touches the phone beyond "adb devices" and the model (read only, never with BENCH_NO_ADB=1).
+"""
+import argparse
+import json
+import os
+import re
+import secrets
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+BENCH = Path(__file__).resolve().parent
+sys.path.insert(0, str(BENCH))
+import benchd_client  # noqa: E402
+import udplog  # noqa: E402
+from bench_events import EventIndex  # noqa: E402
+from benchlib import bench_port, redact  # noqa: E402
+
+VERSION = "103.1"
+LEASE_S = 10.0                 # a LOG1 of a relay subscriber holds this long, as on the S3
+TTL_MAX_S = 4 * 3600
+RING_LINES = 5000
+VER_LINE = re.compile(r"\bver=(\S+)")
+STAT_FIELDS = re.compile(r"\b(up|rssi|net|txp|selftest|ip)=(\S+)")
+REC_FMT = "<BBHIIIH"
+
+
+def now_iso(dt=None):
+    return (dt or datetime.now()).isoformat(timespec="milliseconds")
+
+
+def parse_time(text, now=None):
+    """ISO, HH:MM[:SS] today, or -30s/-10m/-2h/-1d; the ISO string, or None for an empty value."""
+    if not text:
+        return None
+    now = now or datetime.now()
+    t = text.strip()
+    m = re.fullmatch(r"-(\d+(?:\.\d+)?)([smhd])", t)
+    if m:
+        unit = {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+        return now_iso(now - timedelta(seconds=float(m.group(1)) * unit))
+    if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", t):
+        parts = [int(x) for x in t.split(":")] + [0]
+        return now_iso(now.replace(hour=parts[0], minute=parts[1], second=parts[2], microsecond=0))
+    return now_iso(datetime.fromisoformat(t))
+
+
+# --- files: log, events ---------------------------------------------------------------------------------------------
+
+class Store:
+    def __init__(self, home, rotate_mb=20.0, rotate_min=60.0, disk_mb=2048.0):
+        self.home = Path(home)
+        self.home.mkdir(parents=True, exist_ok=True)
+        self.rotate_bytes = int(rotate_mb * 1024 * 1024)
+        self.rotate_s = rotate_min * 60.0
+        self.disk_bytes = int(disk_mb * 1024 * 1024)
+        self.lock = threading.RLock()
+        self.f = None
+        self.path = None
+        self.opened = 0.0
+        self.day = None
+        self.ring = []
+        self.next_id = 1
+        self.events = []
+        self.counts = {"lines": 0, "events": 0, "files": 0, "deleted": 0}
+
+    def _open(self, now):
+        if self.f:
+            self.f.close()
+        self.day = now.strftime("%Y-%m-%d")
+        d = self.home / self.day
+        d.mkdir(parents=True, exist_ok=True)
+        name = "log-%s.txt" % now.strftime("%H%M%S")
+        n = 1
+        while (d / name).exists():
+            n += 1
+            name = "log-%s-%d.txt" % (now.strftime("%H%M%S"), n)
+        self.path = d / name
+        self.f = open(self.path, "a", encoding="utf-8", newline="\n")
+        self.opened = time.monotonic()
+        self.counts["files"] += 1
+        self._trim()
+
+    def _trim(self):
+        """The oldest log files go while all of them together are above the limit; the events stay."""
+        files = sorted(self.home.glob("*/log-*.txt"))
+        total = sum(p.stat().st_size for p in files)
+        for p in files:
+            if total <= self.disk_bytes or p == self.path:
+                break
+            size = p.stat().st_size
+            try:
+                p.unlink()
+            except OSError:
+                continue
+            total -= size
+            self.counts["deleted"] += 1
+
+    def disk(self):
+        files = list(self.home.glob("*/log-*.txt"))
+        return {"log_files": len(files), "log_bytes": sum(p.stat().st_size for p in files), "limit_bytes": self.disk_bytes}
+
+    def write(self, board, t_ms, text, now=None):
+        now = now or datetime.now()
+        line = redact("%s %-5s %9.3f %s" % (now_iso(now), board, t_ms / 1000.0, text))
+        with self.lock:
+            if (self.f is None or now.strftime("%Y-%m-%d") != self.day or time.monotonic() - self.opened >= self.rotate_s
+                    or self.f.tell() >= self.rotate_bytes):
+                self._open(now)
+            self.f.write(line + "\n")
+            self.ring.append({"id": self.next_id, "board": board, "line": line})
+            self.next_id += 1
+            if len(self.ring) > RING_LINES:
+                del self.ring[:len(self.ring) - RING_LINES]
+            self.counts["lines"] += 1
+
+    def flush(self):
+        with self.lock:
+            if self.f:
+                self.f.flush()
+
+    def event(self, ev):
+        ev = dict(ev)
+        ev.setdefault("t", now_iso())
+        with self.lock:
+            d = self.home / ev["t"][:10]
+            d.mkdir(parents=True, exist_ok=True)
+            with open(d / "events.jsonl", "a", encoding="utf-8", newline="\n") as f:
+                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+            self.events.append(ev)
+            if len(self.events) > 2000:
+                del self.events[:len(self.events) - 2000]
+            self.counts["events"] += 1
+        return ev
+
+    def close(self):
+        with self.lock:
+            if self.f:
+                self.f.close()
+                self.f = None
+
+    def _days(self, t_from, t_to):
+        days = sorted(p for p in self.home.iterdir() if p.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", p.name))
+        return [d for d in days if (not t_from or d.name >= t_from[:10]) and (not t_to or d.name <= t_to[:10])]
+
+    def logs(self, t_from=None, t_to=None, board=None, grep=None, limit=2000):
+        rx = re.compile(grep) if grep else None
+        out, truncated = [], False
+        self.flush()
+        for d in self._days(t_from, t_to):
+            for p in sorted(d.glob("log-*.txt")):
+                try:
+                    fh = open(p, encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                with fh:
+                    for line in fh:
+                        t = line[:23]
+                        if t_from and t < t_from:
+                            continue
+                        if t_to and t > t_to:
+                            break
+                        parts = line.split(" ", 2)
+                        if board and board != "all" and (len(parts) < 2 or parts[1] != board):
+                            continue
+                        if rx and not rx.search(line):
+                            continue
+                        out.append(line.rstrip("\n"))
+                        if len(out) > limit:
+                            out.pop(0)
+                            truncated = True
+        return {"lines": out, "count": len(out), "truncated": truncated, "kept": "last %d" % limit if truncated else None}
+
+    def tail(self, after=0, board=None, grep=None, limit=500):
+        rx = re.compile(grep) if grep else None
+        with self.lock:
+            rows = [r for r in self.ring if r["id"] > after]
+            last = self.next_id - 1
+        rows = [r for r in rows if (not board or board == "all" or r["board"] == board) and (not rx or rx.search(r["line"]))]
+        return {"lines": [r["line"] for r in rows[-limit:]], "last_id": last}
+
+    def query_events(self, t_from=None, t_to=None, kind=None, limit=1000):
+        kinds = set(kind.split(",")) if kind else None
+        out = []
+        for d in self._days(t_from, t_to):
+            p = d / "events.jsonl"
+            if not p.exists():
+                continue
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    try:
+                        ev = json.loads(line)
+                    except ValueError:
+                        continue
+                    t = ev.get("t", "")
+                    if (t_from and t < t_from) or (t_to and t > t_to) or (kinds and ev.get("type") not in kinds):
+                        continue
+                    out.append(ev)
+        return {"events": out[-limit:], "count": len(out), "truncated": len(out) > limit}
+
+
+# --- the log relay for the tools ------------------------------------------------------------------------------------
+
+class Relay:
+    """LOG1/LOG0 like the S3 on 127.0.0.1; every subscriber gets the datagrams at the levels it asked for."""
+
+    def __init__(self, port):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(("127.0.0.1", port))
+        self.sock.settimeout(0.3)
+        self.port = self.sock.getsockname()[1]
+        self.subs = {}
+        self.lock = threading.Lock()
+        self.reply = b'{"benchd":1}'
+        self.sent = 0
+
+    def levels(self):
+        with self.lock:
+            now = time.monotonic()
+            live = [s["levels"] for s in self.subs.values() if s["until"] > now]
+        return [max([lv[i] for lv in live] or [0]) for i in range(3)]
+
+    def subscribers(self):
+        with self.lock:
+            now = time.monotonic()
+            return [{"port": p[1], "levels": s["levels"], "left_s": round(s["until"] - now, 1)}
+                    for p, s in self.subs.items() if s["until"] > now]
+
+    def serve(self, halt):
+        while not halt.is_set():
+            try:
+                data, peer = self.sock.recvfrom(512)
+            except socket.timeout:
+                continue
+            except OSError:              # Windows: the ICMP of a send to a subscriber that went away
+                continue
+            if data.startswith(b"LOG1"):
+                words = data.split()[1:4]
+                try:
+                    lv = [min(5, max(0, int(w))) for w in words]
+                except ValueError:
+                    lv = []
+                lv = (lv + [3, 3, 3])[:3] if lv else [3, 3, 3]
+                if len(words) == 2:
+                    lv[2] = lv[1]
+                with self.lock:
+                    self.subs[peer] = {"until": time.monotonic() + LEASE_S, "levels": lv}
+                on = 1
+            elif data.startswith(b"LOG0"):
+                with self.lock:
+                    self.subs.pop(peer, None)
+                on = 0
+            else:
+                continue
+            try:
+                self.sock.sendto(b"LOG %d " % on + self.reply, peer)
+            except OSError:
+                pass
+
+    def publish(self, data, recs):
+        with self.lock:
+            now = time.monotonic()
+            for p in [p for p, s in self.subs.items() if s["until"] <= now]:
+                del self.subs[p]
+            subs = list(self.subs.items())
+        for peer, s in subs:
+            lv = s["levels"]
+            keep = [r for r in recs if not r["level"] or r["level"] <= lv[min(r["board"], 2)]]
+            if not keep:
+                continue
+            out = data if len(keep) == len(recs) else pack(keep)
+            try:
+                self.sock.sendto(out, peer)
+                self.sent += 1
+            except OSError:
+                pass
+
+
+def pack(recs):
+    body = b"".join(struct.pack(REC_FMT, r["board"], r["level"], r["boot"], r["seq"], r["t_ms"], r["lost"],
+                                len(r["text"].encode("utf-8"))) + r["text"].encode("utf-8") for r in recs)
+    return b"UL" + bytes([udplog.UDP_VERSION, len(recs)]) + body
+
+
+# --- the bench lock --------------------------------------------------------------------------------------------------
+
+class BenchLock:
+    def __init__(self, store, state_file):
+        self.store = store
+        self.state_file = Path(state_file)
+        self.cond = threading.Condition()
+        self.holder = None
+        self.queue = []
+        self.tickets = 0
+        try:
+            saved = json.loads(self.state_file.read_text(encoding="utf-8")).get("lock")
+            if saved and saved.get("until_epoch", 0) > time.time():
+                self.holder = saved
+        except (OSError, ValueError):
+            pass
+
+    def _save(self):
+        try:
+            self.state_file.write_text(json.dumps({"lock": self.holder}, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _expire(self):
+        h = self.holder
+        if not h:
+            return
+        why = None
+        if time.time() >= h["until_epoch"]:
+            why = "ttl"
+        elif h.get("pid") and not benchd_client.pid_alive(h["pid"]):
+            why = "pid %d gone" % h["pid"]
+        if why:
+            self.store.event({"type": "lock", "action": "expired", "owner": h["owner"], "why": why})
+            self.holder = None
+            self._save()
+            self.cond.notify_all()
+
+    def tick(self):
+        with self.cond:
+            self._expire()
+
+    def view(self):
+        with self.cond:
+            self._expire()
+            h = self.holder
+            holder = None
+            if h:
+                holder = {k: h.get(k) for k in ("owner", "since", "pid", "note")}
+                holder["until"] = datetime.fromtimestamp(h["until_epoch"]).isoformat(timespec="seconds")
+                holder["left_s"] = round(h["until_epoch"] - time.time(), 1)
+                holder["token_hint"] = h["token"][:6]
+            return {"holder": holder, "queue": [{"owner": q["owner"], "since": q["since"]} for q in self.queue]}
+
+    def acquire(self, owner, ttl_s=900, wait_s=0.0, pid=None, note=""):
+        if not owner:
+            return 400, {"error": "owner is needed"}
+        ttl_s = max(5.0, min(float(ttl_s or 900), TTL_MAX_S))
+        wait_s = max(0.0, min(float(wait_s or 0), TTL_MAX_S))
+        end = time.monotonic() + wait_s
+        with self.cond:
+            self.tickets += 1
+            ticket = {"owner": owner, "id": self.tickets, "since": now_iso()}
+            self.queue.append(ticket)
+            try:
+                while True:
+                    self._expire()
+                    h = self.holder
+                    if h and h["owner"] == owner:
+                        h["until_epoch"] = time.time() + ttl_s
+                        h["pid"] = pid or h.get("pid")
+                        self._save()
+                        return 200, {"token": h["token"], "owner": owner, "renewed": True, "ttl_s": ttl_s}
+                    if h is None and self.queue[0] is ticket:
+                        self.holder = {"owner": owner, "token": secrets.token_hex(12), "since": now_iso(),
+                                       "until_epoch": time.time() + ttl_s, "pid": pid, "note": note or ""}
+                        self._save()
+                        self.store.event({"type": "lock", "action": "taken", "owner": owner, "ttl_s": ttl_s,
+                                          "note": note or ""})
+                        return 200, {"token": self.holder["token"], "owner": owner, "renewed": False, "ttl_s": ttl_s}
+                    left = end - time.monotonic()
+                    if left <= 0:
+                        held = self.holder
+                        return 409, {"error": "bench is held by %s" % (held["owner"] if held else "the queue"),
+                                     "holder": held and held["owner"],
+                                     "until": held and datetime.fromtimestamp(held["until_epoch"]).isoformat(timespec="seconds"),
+                                     "queue": [q["owner"] for q in self.queue if q is not ticket]}
+                    self.cond.wait(min(left, 1.0))
+            finally:
+                if ticket in self.queue:
+                    self.queue.remove(ticket)
+                self.cond.notify_all()
+
+    def renew(self, owner, token, ttl_s=None):
+        with self.cond:
+            self._expire()
+            h = self.holder
+            if not h or (token != h["token"] and owner != h["owner"]):
+                return 409, {"error": "not the holder", "holder": h and h["owner"]}
+            h["until_epoch"] = time.time() + max(5.0, min(float(ttl_s or 900), TTL_MAX_S))
+            self._save()
+            return 200, {"owner": h["owner"], "left_s": round(h["until_epoch"] - time.time(), 1)}
+
+    def release(self, owner=None, token=None, force=False):
+        with self.cond:
+            h = self.holder
+            if not h:
+                return 200, {"released": False, "note": "the lock was free"}
+            if not (force or (token and token == h["token"]) or (owner and owner == h["owner"])):
+                return 409, {"error": "not the holder", "holder": h["owner"]}
+            self.store.event({"type": "lock", "action": "taken away" if force and owner != h["owner"] else "released",
+                              "owner": h["owner"], "by": owner})
+            self.holder = None
+            self._save()
+            self.cond.notify_all()
+            return 200, {"released": True}
+
+    def allows(self, owner=None, token=None, force=False):
+        """None when a changing request may go now, else the holder's name."""
+        with self.cond:
+            self._expire()
+            h = self.holder
+            if not h or force or (token and token == h["token"]) or (owner and owner == h["owner"]):
+                return None
+            return h["owner"]
+
+
+# --- jobs: fw.py, call_check.py as children --------------------------------------------------------------------------
+
+class Jobs:
+    def __init__(self, store, env):
+        self.store = store
+        self.env = env
+        self.jobs = {}
+        self.n = 0
+        self.lock = threading.Lock()
+        self.dir = store.home / "jobs"
+
+    def start(self, kind, argv, owner):
+        self.dir.mkdir(parents=True, exist_ok=True)
+        with self.lock:
+            self.n += 1
+            jid = "%s-%d" % (datetime.now().strftime("%H%M%S"), self.n)
+        out = self.dir / ("%s-%s.txt" % (jid, kind))
+        fh = open(out, "w", encoding="utf-8", errors="replace")
+        env = dict(self.env())
+        if owner:
+            env["BENCH_LOCK_OWNER"] = owner
+        proc = subprocess.Popen([sys.executable, *argv], stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                env=env, cwd=str(BENCH))
+        job = {"id": jid, "kind": kind, "argv": [Path(a).name if os.sep in a or "/" in a else a for a in argv],
+               "owner": owner, "started": now_iso(), "ended": None, "exit": None, "pid": proc.pid, "out": str(out)}
+        with self.lock:
+            self.jobs[jid] = job
+        self.store.event({"type": "job", "action": "start", "id": jid, "kind": kind, "owner": owner, "argv": job["argv"]})
+
+        def wait():
+            code = proc.wait()
+            fh.close()
+            job.update(ended=now_iso(), exit=code)
+            self.store.event({"type": "job", "action": "end", "id": jid, "kind": kind, "exit": code})
+        threading.Thread(target=wait, daemon=True).start()
+        return job
+
+    def get(self, jid, tail=4000):
+        with self.lock:
+            job = self.jobs.get(jid)
+        if not job:
+            return None
+        job = dict(job)
+        try:
+            text = Path(job["out"]).read_text(encoding="utf-8", errors="replace")
+            job["tail"] = redact(text[-tail:])
+        except OSError:
+            job["tail"] = ""
+        return job
+
+    def list(self):
+        with self.lock:
+            return [dict(j) for j in self.jobs.values()]
+
+    def running(self):
+        return [j for j in self.list() if j["ended"] is None]
+
+
+# --- the service -----------------------------------------------------------------------------------------------------
+
+class Benchd:
+    def __init__(self, args):
+        self.args = args
+        self.home = Path(args.home or benchd_client.home())
+        self.store = Store(self.home, args.rotate_mb, args.rotate_min, args.disk_mb)
+        self.halt = threading.Event()
+        self.relay = Relay(args.relay_port)
+        self.lock = BenchLock(self.store, self.home / "state.json")
+        self.jobs = Jobs(self.store, self.child_env)
+        self.index = EventIndex()
+        self.tracker = udplog.Tracker()
+        self.joiner = udplog.Joiner()
+        self.fixed_host = args.host or os.environ.get("BENCH_S3_ADDR")
+        self.host = self.fixed_host
+        self.log_port = args.log_port
+        self.chan = None
+        self.chan_lock = threading.Lock()
+        self.started = time.monotonic()
+        self.s3 = {"addr": self.host, "seen": None, "uq": None, "stat": {}, "ver": None, "lost": False,
+                   "relay_state": None, "datagrams": 0, "last_line": None}
+        self.lyrat = {"ver": None, "lost": False, "last_line": None, "last_frame_ms": None}
+        self.last_rx = 0.0
+        self.last_uq = 0.0
+        self.gap_seen = {}
+        self.gap_event_at = 0.0
+        self.phone = {"checked": None, "state": "not looked at"}
+        self.http = None
+        self.url = None
+
+    # --- environment of the children: they find this service and the S3 without broadcast
+    def child_env(self):
+        env = {k: v for k, v in os.environ.items() if k != "BENCH_NO_BENCHD"}
+        env["BENCHD_URL"] = self.url
+        env["PYTHONIOENCODING"] = "utf-8"
+        if self.host:
+            env["BENCH_S3_ADDR"] = self.host
+        return env
+
+    # --- the S3 ---------------------------------------------------------------------------------------------------
+    def channel(self):
+        """The control channel to the S3 (s3_uart.Channel), made once per address; None without an address."""
+        if not self.host:
+            return None
+        if self.chan is None or self.chan.board != self.host:
+            import s3_uart
+            if self.chan is not None:
+                self.chan.close()
+            try:
+                self.chan = s3_uart.Channel(self.host)
+            except OSError:
+                self.chan = None
+        return self.chan
+
+    def discover(self):
+        """The S3 by broadcast (UQ), as the tools find it; the address is kept in memory only."""
+        import s3_uart
+        try:
+            ch = s3_uart.Channel()
+        except OSError:
+            return None
+        try:
+            return ch.board if ch.find(timeout=4.0) else None
+        finally:
+            ch.close()
+
+    def link_loop(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("", 0))
+        sock.settimeout(0.2)
+        next_ask = 0.0
+        next_find = 0.0
+        try:
+            while not self.halt.is_set():
+                now = time.monotonic()
+                if not self.host:
+                    if now >= next_find:
+                        found = self.discover()
+                        next_find = time.monotonic() + 5.0
+                        if found:
+                            self.host = self.s3["addr"] = found
+                            self.store.event({"type": "s3_found", "board": "s3", "addr": found})
+                    else:
+                        self.halt.wait(0.2)
+                    continue
+                if now >= next_ask:
+                    lv = self.relay.levels()
+                    want = (max(self.args.s3_level, lv[0]), max(self.args.lyrat_level, lv[1]), max(self.args.lyrat_level, lv[2]))
+                    try:
+                        sock.sendto(("LOG1 %d %d %d" % want).encode(), (self.host, self.log_port))
+                    except OSError:
+                        pass
+                    next_ask = now + udplog.LEASE_REPEAT_S
+                    if (not self.fixed_host and self.last_rx and now - max(self.last_rx, self.last_uq) > 30.0):
+                        # Nothing from the S3 for 30 s: its address may have changed (DHCP). Look again.
+                        self.store.event({"type": "s3_search", "board": "s3", "old": self.host})
+                        self.host = None
+                        self.last_rx = 0.0
+                        continue
+                try:
+                    data, peer = sock.recvfrom(2048)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    continue
+                if peer[0] != self.host:
+                    continue
+                self.last_rx = time.monotonic()
+                if data.startswith(b"LOG "):
+                    self.relay.reply = data.split(b" ", 2)[2] if data.count(b" ") >= 2 else self.relay.reply
+                    try:
+                        self.s3["relay_state"] = json.loads(self.relay.reply)
+                    except ValueError:
+                        pass
+                    continue
+                recs = udplog.parse_datagram(data)
+                if recs is None:
+                    continue
+                self.s3["datagrams"] += 1
+                self.relay.publish(data, recs)
+                pc = datetime.now()
+                for rec in recs:
+                    self.tracker.add(rec)
+                    for whole in self.joiner.feed(rec):
+                        self.line(whole, pc)
+                self.store.flush()
+                self.check_gaps()
+        finally:
+            try:
+                if self.host:
+                    sock.sendto(b"LOG0", (self.host, self.log_port))
+            except OSError:
+                pass
+            sock.close()
+
+    def line(self, rec, pc):
+        board = udplog.BOARD_NAMES.get(rec["board"], "b%d" % rec["board"])
+        self.store.write(board, rec["t_ms"], rec["text"], pc)
+        side = self.s3 if board == "s3" else self.lyrat if board == "lyrat" else None
+        if side is not None:
+            side["last_line"] = now_iso(pc)
+            m = VER_LINE.search(rec["text"])
+            if m:
+                side["ver"] = m.group(1)
+            if board == "s3" and rec["text"].startswith("stat up="):
+                self.s3["stat"] = dict(STAT_FIELDS.findall(rec["text"]))
+        for ev in self.index.feed(rec):
+            ev["t"] = now_iso(pc)
+            ev["board_t_s"] = round(rec["t_ms"] / 1000.0, 3)
+            self.store.event(ev)
+
+    def check_gaps(self):
+        now = time.monotonic()
+        if now - self.gap_event_at < 10.0:
+            return
+        cur = {b: (v["lost_board"], v["lost_way"]) for b, v in self.tracker.boards.items()}
+        new = {}
+        for b, (lb, lw) in cur.items():
+            ob, ow = self.gap_seen.get(b, (0, 0))
+            if lb > ob or lw > ow:
+                new[udplog.BOARD_NAMES.get(b, str(b))] = {"lost_board": lb - ob, "lost_way": lw - ow}
+        if new:
+            self.gap_event_at = now
+            self.gap_seen = cur
+            self.store.event({"type": "log_gap", "boards": new})
+
+    def poll_loop(self):
+        next_bod = time.monotonic() + self.args.bod_poll_s if self.args.bod_poll_s > 0 else None
+        while not self.halt.wait(self.args.poll_s):
+            self.lock.tick()
+            self.phone_state()
+            if not self.host:
+                continue
+            if not self.chan_lock.acquire(timeout=0.1):
+                continue
+            try:
+                ch = self.channel()
+                q = ch.query() if ch else None
+            finally:
+                self.chan_lock.release()
+            now = time.monotonic()
+            if q:
+                self.last_uq = now
+                self.s3["uq"] = q
+                self.s3["seen"] = now_iso()
+                self.lyrat["last_frame_ms"] = q.get("last_frame_ms")
+            s3_quiet = now - max(self.last_uq, self.last_rx) > self.args.lost_s
+            self.lost("s3", s3_quiet, "no answer to UQ and no log for %.0f s" % self.args.lost_s)
+            if q or s3_quiet:
+                lf = (q or {}).get("last_frame_ms", -1)
+                ly_lost = s3_quiet or lf is None or lf < 0 or lf > max(3000, self.args.lost_s * 1000)
+                self.lost("lyrat", ly_lost, "S3 not answering" if s3_quiet else "no frame from the LyraT for %s ms" % lf)
+            if next_bod and now >= next_bod and q and not self.lock.view()["holder"] and not self.lyrat["lost"]:
+                next_bod = now + self.args.bod_poll_s
+                # Supply dips are only counted on the board; asked only while nobody holds the bench.
+                self.command("lyrat", "bod", owner="benchd", quiet=True)
+
+    def lost(self, board, is_lost, why):
+        side = self.s3 if board == "s3" else self.lyrat
+        if is_lost and not side["lost"]:
+            side["lost"] = True
+            self.store.event({"type": "board_lost", "board": board, "why": why})
+        elif not is_lost and side["lost"]:
+            side["lost"] = False
+            self.store.event({"type": "board_back", "board": board})
+
+    def command(self, target, text, owner=None, quiet=False):
+        with self.chan_lock:
+            ch = self.channel()
+            if ch is None:
+                return 503, {"error": "S3 not found"}
+            words = text.split()
+            if target == "lyrat":
+                r = ch.command(text)
+                for line in (r.get("text") or "").splitlines():
+                    for ev in self.index.feed({"board": 1, "text": line}):
+                        self.store.event(ev)
+            elif target == "s3" and words and words[0] == "query":
+                q = ch.query()
+                r = {"status": 0 if q else None, "reply": q}
+            elif target == "s3" and words and words[0] == "restart":
+                boot = ch.restart_s3()
+                r = {"status": 0 if boot is not None else None, "new_boot": boot}
+            elif target == "s3" and words and words[0] == "power":
+                got = ch.power(int(words[1]) if len(words) > 1 else None)
+                r = {"status": got[1] if got else None, "applied": got[0] if got else None}
+            elif target == "s3" and words and words[0] == "tx" and len(words) == 2:
+                got = ch.set_tx(words[1])
+                r = {"status": 0 if got else None, "reply": got}
+            else:
+                return 400, {"error": "unknown command for %s: %s (s3: query, restart, power [N], tx 0|1|A)" % (target, text)}
+        if not quiet or r.get("status") != 0:
+            self.store.event({"type": "cmd", "target": target, "cmd": text, "owner": owner, "status": r.get("status"),
+                              "attempts": r.get("attempts")})
+        return (200 if r.get("status") is not None else 504), r
+
+    def phone_state(self):
+        """adb, read only: is a phone there and which model. Never with BENCH_NO_ADB=1. Run by poll_loop every 30 s."""
+        if os.environ.get("BENCH_NO_ADB") == "1":
+            self.phone = {"checked": time.monotonic(), "state": "not looked at (BENCH_NO_ADB=1)"}
+            return self.phone
+        if self.phone["checked"] and time.monotonic() - self.phone["checked"] < 30.0:
+            return self.phone
+        adb = shutil.which("adb")
+        st = {"checked": time.monotonic()}
+        if not adb:
+            st["state"] = "no adb"
+        else:
+            try:
+                r = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=5)
+                rows = [ln.split("\t") for ln in r.stdout.splitlines()[1:] if "\t" in ln]
+                st["devices"] = len(rows)
+                st["state"] = rows[0][1] if rows else "no phone"
+                if rows and rows[0][1] == "device":
+                    m = subprocess.run([adb, "shell", "getprop", "ro.product.model"], capture_output=True, text=True,
+                                       timeout=5)
+                    st["model"] = m.stdout.strip()
+            except (OSError, subprocess.SubprocessError) as e:
+                st["state"] = "adb failed: %s" % str(e)[:60]
+        self.phone = st
+        return st
+
+    def status(self):
+        uq = self.s3.get("uq") or {}
+        hour_ago = parse_time("-1h")
+        with self.store.lock:
+            recent = [e for e in self.store.events if e.get("t", "") >= hour_ago]
+        kinds = {}
+        for e in recent:
+            kinds[e["type"]] = kinds.get(e["type"], 0) + 1
+        return {
+            "benchd": {"version": VERSION, "pid": os.getpid(), "up_s": round(time.monotonic() - self.started, 1),
+                       "home": str(self.home), "file": str(self.store.path) if self.store.path else None,
+                       "counts": self.store.counts, "disk": self.store.disk()},
+            "s3": {"addr": self.host, "found": bool(self.host), "lost": self.s3["lost"], "boot": uq.get("boot"),
+                   "up_s": round(uq["up_ms"] / 1000.0, 1) if uq.get("up_ms") is not None else None,
+                   "rssi": self.s3["stat"].get("rssi"), "net": self.s3["stat"].get("net"),
+                   "txp": self.s3["stat"].get("txp"), "selftest": self.s3["stat"].get("selftest"),
+                   "ver": self.s3["ver"], "tx_on": uq.get("tx_on"), "last_answer": self.s3["seen"],
+                   "last_line": self.s3["last_line"], "datagrams": self.s3["datagrams"],
+                   "log": self.s3["relay_state"]},
+            "lyrat": {"lost": self.lyrat["lost"], "up_s": uq.get("lyrat_up_s"), "last_frame_ms": self.lyrat["last_frame_ms"],
+                      "ver": self.lyrat["ver"], "last_line": self.lyrat["last_line"],
+                      "sco_open": self.index.sco_open},
+            "log_counts": self.tracker.summary(),
+            "phone": {k: v for k, v in self.phone.items() if k != "checked"},
+            "lock": self.lock.view(),
+            "jobs": self.jobs.running(),
+            "events_last_hour": kinds,
+            "relay_port": self.relay.port,
+            "subscribers": self.relay.subscribers(),
+            "bt_mode": bool(self.args.bt_mode_cmd),
+        }
+
+    # --- run ------------------------------------------------------------------------------------------------------
+    def run(self):
+        run_file = benchd_client.run_file(self.args.http_port)
+        try:
+            old = json.loads(run_file.read_text(encoding="utf-8"))
+            if benchd_client.pid_alive(old.get("pid")) and old.get("pid") != os.getpid():
+                print("benchd already runs: pid %s, http %s" % (old.get("pid"), old.get("http_port")), file=sys.stderr)
+                return 3
+        except (OSError, ValueError):
+            pass
+        bind = "0.0.0.0" if self.args.lan else "127.0.0.1"
+        self.http = ThreadingHTTPServer((bind, self.args.http_port), make_handler(self))
+        self.http.daemon_threads = True
+        port = self.http.server_address[1]
+        self.url = "http://127.0.0.1:%d" % port
+        run = {"pid": os.getpid(), "http_port": port, "relay_port": self.relay.port, "started": now_iso(),
+               "lan": bool(self.args.lan), "home": str(self.home)}
+        run_file = benchd_client.run_file(port)
+        run_file.parent.mkdir(parents=True, exist_ok=True)
+        run_file.write_text(json.dumps(run, indent=1), encoding="utf-8")
+        self.store.event({"type": "benchd", "action": "start", "version": VERSION, "http_port": port,
+                          "relay_port": self.relay.port, "lan": bool(self.args.lan)})
+        threads = [threading.Thread(target=self.relay.serve, args=(self.halt,), daemon=True),
+                   threading.Thread(target=self.link_loop, daemon=True),
+                   threading.Thread(target=self.poll_loop, daemon=True)]
+        for t in threads:
+            t.start()
+        print(json.dumps(dict(run, url=self.url)), flush=True)
+        try:
+            self.http.serve_forever(poll_interval=0.3)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.halt.set()
+            for t in threads:
+                t.join(timeout=3.0)
+            self.store.event({"type": "benchd", "action": "stop"})
+            self.store.close()
+            try:
+                if json.loads(run_file.read_text(encoding="utf-8")).get("pid") == os.getpid():
+                    run_file.unlink()
+            except (OSError, ValueError):
+                pass
+        return 0
+
+    def stop(self):
+        threading.Thread(target=self.http.shutdown, daemon=True).start()
+
+
+# --- HTTP -------------------------------------------------------------------------------------------------------------
+
+def make_handler(svc):
+    admin = BENCH / "benchd_admin.html"
+
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "benchd/" + VERSION
+
+        def log_message(self, *a):
+            pass
+
+        def reply(self, code, obj, ctype="application/json; charset=utf-8"):
+            body = obj if isinstance(obj, bytes) else json.dumps(obj, ensure_ascii=False, indent=1).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            if ctype.startswith("text/html"):
+                self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline' 'self'; "
+                                                            "style-src 'unsafe-inline' 'self'; connect-src 'self'")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def local(self):
+            return self.client_address[0].startswith("127.") or self.client_address[0] == "::1"
+
+        def do_GET(self):
+            u = urlparse(self.path)
+            q = {k: v[-1] for k, v in parse_qs(u.query).items()}
+            try:
+                if u.path in ("/", "/index.html"):
+                    return self.reply(200, admin.read_bytes(), "text/html; charset=utf-8")
+                if u.path == "/favicon.ico":
+                    self.send_response(204)
+                    self.end_headers()
+                    return None
+                if u.path == "/status":
+                    return self.reply(200, svc.status())
+                if u.path == "/logs":
+                    return self.reply(200, svc.store.logs(parse_time(q.get("from")), parse_time(q.get("to")),
+                                                          q.get("board"), q.get("grep"), int(q.get("limit", 2000))))
+                if u.path == "/tail":
+                    return self.reply(200, svc.store.tail(int(q.get("after", 0)), q.get("board"), q.get("grep"),
+                                                          int(q.get("limit", 500))))
+                if u.path == "/events":
+                    return self.reply(200, svc.store.query_events(parse_time(q.get("from")), parse_time(q.get("to")),
+                                                                  q.get("type"), int(q.get("limit", 1000))))
+                if u.path == "/lock":
+                    return self.reply(200, svc.lock.view())
+                if u.path == "/jobs":
+                    return self.reply(200, {"jobs": svc.jobs.list()})
+                if u.path.startswith("/jobs/"):
+                    job = svc.jobs.get(u.path[6:])
+                    return self.reply(200 if job else 404, job or {"error": "no such job"})
+                return self.reply(404, {"error": "unknown path"})
+            except (ValueError, re.error) as e:
+                return self.reply(400, {"error": str(e)})
+
+        def do_POST(self):
+            u = urlparse(self.path)
+            if not self.local() and not svc.args.lan_control:
+                return self.reply(403, {"error": "control only from this PC (benchd --lan-control allows the LAN)"})
+            if self.headers.get("X-Bench") != "1":
+                return self.reply(403, {"error": "header X-Bench: 1 is needed"})
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n).decode("utf-8") or "{}") if n else {}
+                if not isinstance(body, dict):
+                    raise ValueError("a JSON object is needed")
+            except ValueError as e:
+                return self.reply(400, {"error": "bad JSON: %s" % e})
+            owner, token, force = body.get("owner"), body.get("token"), bool(body.get("force"))
+            try:
+                if u.path == "/lock":
+                    return self.reply(*svc.lock.acquire(owner, body.get("ttl_s", 900), body.get("wait_s", 0),
+                                                        body.get("pid"), body.get("note", "")))
+                if u.path == "/lock/renew":
+                    return self.reply(*svc.lock.renew(owner, token, body.get("ttl_s")))
+                if u.path == "/lock/release":
+                    return self.reply(*svc.lock.release(owner, token, force))
+                if u.path == "/shutdown":
+                    if not self.local():
+                        return self.reply(403, {"error": "only from this PC"})
+                    self.reply(200, {"stopping": True})
+                    return svc.stop()
+                if u.path not in ("/cmd", "/ota", "/action"):
+                    return self.reply(404, {"error": "unknown path"})
+                held = svc.lock.allows(owner, token, force)
+                if held:
+                    return self.reply(423, {"error": "the bench is held by %s" % held, "holder": held})
+                if force and owner != (svc.lock.view()["holder"] or {}).get("owner"):
+                    svc.store.event({"type": "lock", "action": "overridden", "by": owner or "admin", "path": u.path})
+                if u.path == "/cmd":
+                    target, cmd = body.get("target", "lyrat"), (body.get("cmd") or "").strip()
+                    if not cmd:
+                        return self.reply(400, {"error": "cmd is needed"})
+                    return self.reply(*svc.command(target, cmd, owner))
+                if u.path == "/ota":
+                    return self.reply(*ota_job(svc, body, owner))
+                return self.reply(*action(svc, body, owner))
+            except (ValueError, TypeError) as e:
+                return self.reply(400, {"error": str(e)})
+
+    return Handler
+
+
+def ota_job(svc, body, owner):
+    board = body.get("board", "both")
+    if board not in ("lyrat", "s3", "both"):
+        return 400, {"error": "board: lyrat, s3 or both"}
+    argv = [str(BENCH / "fw.py"), "flash", "--board", board]
+    if body.get("image"):
+        if board == "both":
+            return 400, {"error": "an image is for one board"}
+        if not Path(body["image"]).is_file():
+            return 400, {"error": "no such image file"}
+        argv += ["--image", body["image"]]
+    elif body.get("variant"):
+        argv += ["--variant", str(body["variant"])]
+    if body.get("via") in ("auto", "wifi", "uart"):
+        argv += ["--via", body["via"]]
+    return 202, svc.jobs.start("flash-" + board, argv, owner or "admin")
+
+
+def action(svc, body, owner):
+    name = body.get("name")
+    if name == "reboot_lyrat":
+        return svc.command("lyrat", "reboot 1", owner or "admin")
+    if name == "restart_s3":
+        return svc.command("s3", "restart", owner or "admin")
+    if name == "bt_mode":
+        if not svc.args.bt_mode_cmd:
+            return 400, {"error": "this firmware has no Bluetooth mode command (benchd --bt-mode-cmd)"}
+        mode = str(body.get("mode", ""))
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,16}", mode):
+            return 400, {"error": "mode: letters and digits"}
+        return svc.command("lyrat", svc.args.bt_mode_cmd.format(mode=mode), owner or "admin")
+    if name == "flash_both":
+        return ota_job(svc, {"board": "both"}, owner)
+    if name == "call_probe":
+        return 202, svc.jobs.start("call_probe", [str(BENCH / "call_check.py"), "--probe", "1"], owner or "admin")
+    return 400, {"error": "unknown action %s" % name}
+
+
+def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--host", help="the S3's address (else BENCH_S3_ADDR, else found by broadcast)")
+    ap.add_argument("--log-port", type=int, default=udplog.LOG_PORT, help="the S3's log port")
+    ap.add_argument("--http-port", type=int, default=bench_port(benchd_client.HTTP_PORT))
+    ap.add_argument("--relay-port", type=int, default=bench_port(benchd_client.RELAY_PORT))
+    ap.add_argument("--lan", action="store_true", help="listen on all interfaces (reading only from outside)")
+    ap.add_argument("--lan-control", action="store_true", help="with --lan: also commands from the LAN")
+    ap.add_argument("--home", help="folder of the logs (default BENCHD_HOME or bench_runs/benchd)")
+    ap.add_argument("--rotate-mb", type=float, default=20.0)
+    ap.add_argument("--rotate-min", type=float, default=60.0)
+    ap.add_argument("--disk-mb", type=float, default=2048.0)
+    ap.add_argument("--lost-s", type=float, default=10.0, help="a board is lost after this long without a sign")
+    ap.add_argument("--poll-s", type=float, default=5.0, help="UQ to the S3 this often")
+    ap.add_argument("--bod-poll-s", type=float, default=300.0, help="ask the LyraT 'bod' this often while the lock is free; 0 off")
+    ap.add_argument("--s3-level", type=int, default=3)
+    ap.add_argument("--lyrat-level", type=int, default=3)
+    ap.add_argument("--bt-mode-cmd", default=None, help='console command of the BT mode button, "{mode}" is replaced')
+    args = ap.parse_args(argv)
+    os.environ["BENCH_NO_BENCHD"] = "1"     # this process never asks itself (s3_uart.Channel, ota.find_host)
+    if args.home:
+        os.environ["BENCHD_HOME"] = args.home
+    return Benchd(args).run()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

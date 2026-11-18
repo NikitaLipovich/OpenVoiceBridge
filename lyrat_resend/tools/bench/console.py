@@ -20,6 +20,8 @@ same parsers count it. Limits against USB: the LyraT sends at most 2 KB/s and ke
 lines from before the log ring starts (ROM banner, "App version") never come; a LyraT that hangs cannot be reset this way.
 
 One listener per S3: the S3 sends its log to the last PC that asked. All NetWatch of one process share one listener (LogHub).
+While benchd runs (goal 103) LogHub listens to its relay instead (benchd_client.log_endpoint), so tools and the service
+do not take the log from one another.
 open_watch(port, out, ...) picks the transport: USB when a port is given, --no-open is asked, or BENCH_USB=1; the network
 otherwise. As a module: NetWatch, LogHub, open_watch(), usb_mode(), add_usb_args(), apply_usb_args().
 """
@@ -195,7 +197,9 @@ class NetWatch(SerialWatch):
             self.channel = None
             self.event("open_failed", denied=False, err="S3 does not answer")
             return False
-        self.hub = LogHub.get(host)
+        import benchd_client
+        # While benchd runs it holds the S3's log; its relay speaks the same protocol (goal 103).
+        self.hub = LogHub.get(*(benchd_client.log_endpoint(host) or (host, udplog.LOG_PORT)))
         self.queue = self.hub.subscribe(self)
         self.hub_datagrams_at = self.hub.datagrams
         self.sp = _Handle(self)

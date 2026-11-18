@@ -62,11 +62,15 @@ def step_ports(args):
     import s3_uart
     import round as rnd
     step = Step("ports", "Стенд и порты")
-    procs = oc.other_bench_processes()
+    # The simulator shares nothing with the bench tools of another run (goal 101 #001, 103 #002); bench_busy() decides
+    # (the benchd lock while it runs, else the processes) and may find the bench free: then the step goes on.
+    procs = [] if oc.simulated_bench() else oc.other_bench_processes()
     if procs is None:
         return step.finish(NOT_CHECKED, "список процессов не читается", "Посмотрите вручную, не идёт ли прогон.")
     if procs:
-        return oc.refuse_if_busy(step, need_lyrat=False, need_udp=False)
+        refused = oc.refuse_if_busy(step, need_lyrat=False, need_udp=False)
+        if refused:
+            return refused
     faults, busy = [], []
     lyrat, s3 = oc.lyrat_port(), oc.s3_port()
     if oc.usb_mode():
