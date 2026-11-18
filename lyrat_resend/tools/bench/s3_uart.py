@@ -158,6 +158,12 @@ class Channel:
         parts = got.split()
         return int(parts[1]), int(parts[2])
 
+    def wifi_off(self, seconds):
+        """The S3's Wi-Fi off in 0.3 s for this many seconds (1..300), then on again by itself ("UO", goal 100).
+        Returns the S3's code (0 going off, 1 bad value, 2 already off, 3 no Wi-Fi in this build) or None."""
+        got = self._ask("UO %d" % seconds, lambda d: d.startswith(b"UO "))
+        return int(got.split()[2]) if got else None
+
     def restart_s3(self, timeout=20.0):
         """Restart of the S3 over the network ("UX <boot>": a repeat after the restart is refused by the new boot id).
         Returns the new boot id once the S3 answers again, None when it did not restart or come back. Goal 093."""

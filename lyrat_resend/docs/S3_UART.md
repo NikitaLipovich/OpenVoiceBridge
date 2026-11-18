@@ -87,3 +87,11 @@ Noise suppression of the microphone: `ns off|sns|web0|web1|web2` switches the mo
   USB console: it checks the line the network console rides on).
 - `tools/bench/console.py`: the LyraT's (or the S3's) console over the network for every bench tool, `NetWatch`.
 - `tools/bench/round.py uart`: the full check. `round.py audio --uart-load 10`: the audio stage with commands running.
+
+Goal 100 (experiment levers, defaults unchanged): the LyraT command `esco PKT LAT RTX` replaces the eSCO answer to the
+phone's next request (HCI packet mask, max latency ms, retransmission effort), `esco 0` answers as the stack does
+(default); every link prints `ESCO up st link tesco wesco rx tx air asked=PKT/LAT/RTX`. On the ESP32 controller 2-EV3
+always settles Wesco 2, EV3 gives Tesco 6/Wesco 4 and more uplink losses. `afh HEX20` sets the host channel map (bit n =
+channel n, byte 0 = channels 0..7), `afh all` clears it (default). The S3 control word `UO S` (`s3_uart.Channel.wifi_off`)
+stops the S3 Wi-Fi 0.3 s later for S seconds (1..300) and starts it again by itself; with no IP S + 90 s after the
+command the S3 restarts. On batteries one `UO` of 15 coincided with both boards losing power (goal 100 #001).

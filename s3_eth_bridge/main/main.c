@@ -31,6 +31,10 @@
 //                        USB nothing else restarts the S3
 //   UP [<qdbm>]          Wi-Fi transmit power cap in 0.25 dBm (8..84) now, until the next start; without a value only
 //                        read. "UP <applied qdbm> <esp_err>"; also in the stat line as txp=. -1: no Wi-Fi in this build
+//   UO <s>               Wi-Fi off in 300 ms for <s> seconds (1..300), then on again by itself with the same power cap
+//                        (goal 100: the LyraT's Bluetooth with no 2.4 GHz transmitter next to it). "UO <s> <err>": 0
+//                        going off, 1 bad value, 2 already off, 3 no Wi-Fi in this build. Nothing is heard meanwhile
+//                        (no log, no commands). Guard (#001): no IP <s> + 90 s after the command restarts the board
 //
 // Stream packet, little endian, PCM 16 bit after the header:
 //   0  'S' '3'   2  version   3  stream (0 call, 1 mic)   4  u32 seq (per stream, since boot)
@@ -450,6 +454,7 @@ static int hex_value(char c)
 
 static int wifi_tx_power(void);
 static esp_err_t wifi_set_tx_power(int qdbm);
+static int wifi_off_for(int seconds);
 
 static void restart_now(void *arg)
 {
@@ -519,6 +524,9 @@ static bool ctl_request(char *text, int n, const struct sockaddr_in *from, sockl
         esp_err_t err = ESP_OK;
         if (text[2] == ' ') err = wifi_set_tx_power(atoi(text + 3));
         len = snprintf(reply, sizeof(reply), "UP %d %d", wifi_tx_power(), (int)err);
+    } else if (strncmp(text, "UO ", 3) == 0) {
+        int seconds = atoi(text + 3);
+        len = snprintf(reply, sizeof(reply), "UO %d %d", seconds, wifi_off_for(seconds));
     } else if (strcmp(text, "UQ") == 0) {
         int64_t now = esp_timer_get_time();
         len = snprintf(reply, sizeof(reply),
@@ -670,6 +678,7 @@ static esp_err_t net_init(void)
 static int wifi_rssi(void) { return 0; }
 static int wifi_tx_power(void) { return -1; }
 static esp_err_t wifi_set_tx_power(int qdbm) { (void)qdbm; return ESP_ERR_NOT_SUPPORTED; }
+static int wifi_off_for(int seconds) { (void)seconds; return 3; }
 
 #else
 
@@ -680,6 +689,8 @@ static esp_err_t wifi_set_tx_power(int qdbm) { (void)qdbm; return ESP_ERR_NOT_SU
 
 static esp_timer_handle_t s_wifi_retry;
 static uint32_t s_wifi_fails;           // attempts in a row without an IP; only the event task touches it
+static volatile bool s_wifi_off;        // "UO": stopped on purpose, no reconnect attempts until the timer starts it
+static int s_wifi_cap_qdbm = WIFI_MAX_TX_QDBM;   // the cap to apply again after each start, 0 = driver default
 
 static void wifi_retry_now(void *arg)
 {
@@ -703,6 +714,9 @@ static void wifi_retry(void)
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+        // After a stop ("UO") the driver starts with its defaults: no power save and the cap as before.
+        esp_wifi_set_ps(WIFI_PS_NONE);
+        if (s_wifi_cap_qdbm) esp_wifi_set_max_tx_power((int8_t)s_wifi_cap_qdbm);
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
         s_link_up = true;
@@ -716,7 +730,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         s_link_up = false;
         s_got_ip = false;
         strcpy(s_ip, "-");
-        wifi_retry();
+        if (!s_wifi_off) wifi_retry();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *e = data;
         snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&e->ip_info.ip));
@@ -774,8 +788,61 @@ static esp_err_t wifi_set_tx_power(int qdbm)
 {
     if (qdbm < 8 || qdbm > 84) return ESP_ERR_INVALID_ARG;
     esp_err_t err = esp_wifi_set_max_tx_power((int8_t)qdbm);
+    if (err == ESP_OK) s_wifi_cap_qdbm = qdbm;
     ESP_LOGI(TAG, "tx power cap %d: %s, now %d", qdbm, esp_err_to_name(err), wifi_tx_power());
     return err;
+}
+
+static volatile bool s_wifi_off_busy;
+static esp_timer_handle_t s_wifi_off_guard;
+
+// Goal 100 #001: a "UO" must never leave the board off the network. The guard is an esp_timer of its own, armed with
+// the command for <s> + UO_GUARD_S seconds; when it fires without an IP (the start failed, the task never woke, the
+// AP was not found) the board restarts, which brings the Wi-Fi up through the normal boot.
+#define UO_GUARD_S  90
+
+static void wifi_off_guard_fire(void *arg)
+{
+    if (s_got_ip && !s_wifi_off) return;
+    ESP_LOGE(TAG, "wifi still off %d s after the planned return, restarting", UO_GUARD_S);
+    esp_restart();
+}
+
+// One short task per "UO": stop and start block until the Wi-Fi task has done them, which the esp_timer task should
+// not wait for. The radio comes back by itself, nothing waits for the PC.
+static void wifi_off_task(void *arg)
+{
+    int seconds = (int)(intptr_t)arg;
+    vTaskDelay(pdMS_TO_TICKS(300));         // the reply leaves first
+    s_wifi_off = true;
+    if (s_wifi_retry) esp_timer_stop(s_wifi_retry);
+    esp_err_t err = esp_wifi_stop();
+    ESP_LOGW(TAG, "wifi off for %d s: %s", seconds, esp_err_to_name(err));
+    vTaskDelay(pdMS_TO_TICKS(seconds * 1000));
+    s_wifi_off = false;
+    s_wifi_fails = 0;
+    err = esp_wifi_start();                 // STA_START sets power save and the cap, then connects
+    ESP_LOGW(TAG, "wifi on again after %d s off: %s", seconds, esp_err_to_name(err));
+    s_wifi_off_busy = false;
+    vTaskDelete(NULL);
+}
+
+static int wifi_off_for(int seconds)
+{
+    if (seconds < 1 || seconds > 300) return 1;
+    if (s_wifi_off_busy) return 2;
+    if (!s_wifi_off_guard) {
+        const esp_timer_create_args_t args = {.callback = wifi_off_guard_fire, .name = "uo_guard"};
+        if (esp_timer_create(&args, &s_wifi_off_guard) != ESP_OK) return 1;   // no guard, no "UO"
+    }
+    s_wifi_off_busy = true;
+    esp_timer_stop(s_wifi_off_guard);
+    esp_timer_start_once(s_wifi_off_guard, (uint64_t)(seconds + UO_GUARD_S) * 1000000ULL);
+    if (xTaskCreate(wifi_off_task, "wifi_off", 4096, (void *)(intptr_t)seconds, 5, NULL) != pdPASS) {
+        s_wifi_off_busy = false;
+        return 1;
+    }
+    return 0;
 }
 
 #endif

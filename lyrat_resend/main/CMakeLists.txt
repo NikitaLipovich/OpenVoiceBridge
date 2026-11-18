@@ -1,5 +1,5 @@
 idf_component_register(SRCS "voice_ns.c" "main.c" "aec.c" "spectral_ns.c" "msbc_codec.c" "plc.c" "link_power.c" "voice_ns.c"
-                         "ota_link.c" "ota_sha256.c" "dbg_log.c" "lyrat_ota.c" "lyrat_dbglog.c" "upd_mode.c"
+                         "ota_link.c" "ota_sha256.c" "dbg_log.c" "lyrat_ota.c" "lyrat_dbglog.c" "upd_mode.c" "esco_ctl.c"
                     INCLUDE_DIRS "."
                     REQUIRES
                         nvs_flash
@@ -17,3 +17,7 @@ idf_component_register(SRCS "voice_ns.c" "main.c" "aec.c" "spectral_ns.c" "msbc_
 idf_component_get_property(bt_dir bt COMPONENT_DIR)
 set_source_files_properties(msbc_codec.c PROPERTIES INCLUDE_DIRECTORIES
     "${bt_dir}/host/bluedroid/external/sbc/decoder/include;${bt_dir}/host/bluedroid/external/sbc/encoder/include;${bt_dir}/host/bluedroid/common/include;${bt_dir}/host/bluedroid/stack/include;${bt_dir}/common/include;${bt_dir}/common/osi/include;${bt_dir}/include/esp32/include")
+
+# Goal 100: the eSCO answer of the board and the settled link parameters, without changing ESP-IDF (esco_ctl.c).
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=BTM_EScoConnRsp" "-Wl,--wrap=btm_sco_connected"
+                      "-Wl,--wrap=btm_esco_proc_conn_chg")

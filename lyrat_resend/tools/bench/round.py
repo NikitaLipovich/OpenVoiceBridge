@@ -1630,8 +1630,22 @@ def loss_judge(path, tones, gaps=()):
     return tone_blocks.analyse(samples, rate, tones, exclude=[tuple(g) for g in gaps])
 
 
-def loss_window(watch, args, out, tag, seconds, wifi_expected=None):
-    """One measured window: both directions carry a tone, each failure gets a time."""
+def esco_settled(lines):
+    """The last "ESCO up" line of the LyraT (goal 100 firmware) as numbers, None without one."""
+    found = None
+    for line in lines:
+        m = ESCO_UP_LINE.search(line)
+        if m:
+            g = m.groups()
+            found = {"status": int(g[0]), "link": int(g[1]), "tesco": int(g[2]), "wesco": int(g[3]), "rx": int(g[4]),
+                     "tx": int(g[5]), "air": int(g[6]), "asked_pkt": int(g[7], 16), "asked_lat": int(g[8]),
+                     "asked_rtx": int(g[9])}
+    return found
+
+
+def loss_window(watch, args, out, tag, seconds, wifi_expected=None, during=None):
+    """One measured window: both directions carry a tone, each failure gets a time. during: mode commands run right
+    after the phone starts recording, with their time on the recording's clock (goal 100)."""
     window = {"tag": tag, "seconds": seconds, "wifi_expected": wifi_expected, "errors": []}
     out.mkdir(parents=True, exist_ok=True)
     resets, slc_drops = len(watch.resets), watch.slc_drops
@@ -1639,9 +1653,11 @@ def loss_window(watch, args, out, tag, seconds, wifi_expected=None):
     if wifi_expected is not None and (not window["phone_wifi"] or window["phone_wifi"]["enabled"] != wifi_expected):
         window["errors"].append("phone Wi-Fi is not as planned")
     window["start"] = datetime.now().isoformat(timespec="seconds")
+    t_open = watch.now()
     opened = channel_open(watch, window, tag + "-open", args.open_timeout)
     if opened:
         watch.pump(time.monotonic() + args.settle)
+        window["esco"] = esco_settled(lines_since(watch, t_open))
         wav_name = tag + "-up.wav"
         t_rec = watch.now()
         recorder = TapRecorder(("L", "L")).start()
@@ -1661,6 +1677,11 @@ def loss_window(watch, args, out, tag, seconds, wifi_expected=None):
                             "--ei", "seconds", str(LOSS_PLAY_CHUNK_S), "--ei", "level", str(AUDIO_LEVEL))
 
         play_more(0.0)
+        if during:
+            t_cmd = watch.now()
+            window["during"] = {"at_s": round(t_cmd - t_rec, 3), "apply": apply_mode(watch, during)}
+            if any(c["ok"] is False for c in window["during"]["apply"]):
+                window["errors"].append("during command not confirmed: %s" % window["during"]["apply"])
         t_series = watch.now()
         series, stats = loss_pkt_series(watch, seconds, args.pkt_period, play_more)
         if not set_tone(watch, 0):
@@ -1720,6 +1741,7 @@ def loss_brief(window):
             "down_events_per_min": down.get("events_per_min"), "down_impaired_pct": down.get("impaired_pct"),
             "down_worst_s_db": (down.get("snr_per_second") or {}).get("worst_db"),
             "down_under_20": (down.get("snr_per_second") or {}).get("under_min"),
+            "esco": "%(tesco)s/%(wesco)s" % window["esco"] if window.get("esco") else None,
             "up_events_per_min": up.get("events_per_min"), "up_impaired_pct": up.get("impaired_pct"),
             "up_worst_s_db": (up.get("snr_per_second") or {}).get("worst_db"),
             "up_under_20": (up.get("snr_per_second") or {}).get("under_min"),
@@ -1730,10 +1752,16 @@ def loss_brief(window):
 
 BPOW_LINE = re.compile(r"bredr tx power min=(-?\d+) max=(-?\d+) err=(-?\d+)")
 BOD_LINE = re.compile(r"bod on=(\d) level=(\d+) trips=(\d+) last_ms=(-?\d+)")
+ESCO_MODE_LINE = re.compile(r"esco mode=(stack|set) pkt=0x([0-9a-f]+) lat=(\d+) rtx=(\d+)")
+ESCO_UP_LINE = re.compile(r"ESCO up st=(\d+) link=(\d+) tesco=(\d+) wesco=(\d+) rx=(\d+) tx=(\d+) air=(\d+)"
+                          r" asked=0x([0-9a-f]+)/(\d+)/(\d+)")
+AFH_LINE = re.compile(r"afh host=(\S+)(?: err=(-?\d+))?")
+DURING = "during:"
 
 
 def parse_modes(specs):
-    """--mode NAME=CMD[;CMD...] into {name: [cmd, ...]}; an S3 command starts with "s3:" (only "s3:power QDBM")."""
+    """--mode NAME=CMD[;CMD...] into {name: [cmd, ...]}; an S3 command starts with "s3:" ("s3:power QDBM",
+    "s3:wifioff S"); a command after "during:" runs once the phone records, not before the window (goal 100)."""
     modes = {}
     for spec in specs or []:
         name, _, cmds = spec.partition("=")
@@ -1782,6 +1810,25 @@ def apply_mode(watch, cmds):
             got = s3_channel(watch).power(int(words[1]))
             done.append({"cmd": cmd, "ok": bool(got) and got[1] == 0 and got[0] == int(words[1]),
                          "reply": list(got) if got else None})
+        elif words[0] == "s3:wifioff":
+            got = s3_channel(watch).wifi_off(int(words[1]))
+            done.append({"cmd": cmd, "ok": got == 0, "reply": got})
+        elif words[0] == "s3:none":
+            done.append({"cmd": cmd, "ok": True, "reply": None})     # the control arm of a "during" command
+        elif words[0] == "esco":
+            # Goal 100: the eSCO answer for the next link; the reply has to show the asked values.
+            m = board_reply(watch, cmd, ESCO_MODE_LINE)
+            ok = bool(m)
+            if ok and len(words) == 2 and words[1] == "0":
+                ok = m.group(1) == "stack"
+            elif ok and len(words) == 4:
+                ok = (m.group(1) == "set" and int(m.group(2), 16) == int(words[1], 16) and int(m.group(3)) == int(words[2])
+                      and int(m.group(4)) == int(words[3]))
+            done.append({"cmd": cmd, "ok": ok, "reply": m.group(0) if m else None})
+        elif words[0] == "afh":
+            m = board_reply(watch, cmd, AFH_LINE)
+            ok = bool(m) and (len(words) == 1 or (m.group(1) == words[1] and m.group(2) == "0"))
+            done.append({"cmd": cmd, "ok": ok, "reply": m.group(0) if m else None})
         elif words[0] == "bpow":
             m = board_reply(watch, cmd, BPOW_LINE)
             ok = bool(m) and m.group(3) == "0"
@@ -1799,6 +1846,26 @@ def apply_mode(watch, cmds):
 def s3_boot(watch):
     q = s3_channel(watch).query()
     return q.get("boot") if q else None
+
+
+def wifioff_seconds(during):
+    """The seconds of an "s3:wifioff S" among the during-commands of a window, 0 without one (goal 100)."""
+    for cmd in during or []:
+        words = cmd.split()
+        if len(words) == 2 and words[0] == "s3:wifioff":
+            return int(words[1])
+    return 0
+
+
+def wait_s3_back(watch, seconds):
+    """The S3 boot number once it answers again, None after the given seconds (goal 100 #001)."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        boot = s3_boot(watch)
+        if boot is not None:
+            return boot
+        watch.pump(time.monotonic() + 5.0)
+    return None
 
 
 def median(values):
@@ -1909,6 +1976,7 @@ def stage_btloss(args):
     restored = None
     tone_end = None
     guard = restore = None
+    stop_round = False
     if modes:
         # R3: the windows record DSDIN through the S3; a real call stops the round and its sound is dropped (goal 097).
         import owner_common
@@ -1933,14 +2001,26 @@ def stage_btloss(args):
                     if guard.tripped:
                         break
                     mode = name.split("-", 1)[1]
-                    mode_info = {"mode": mode, "mode_apply": apply_mode(watch, modes[mode]), "bod_before": bod_trips(watch),
+                    before = [c for c in modes[mode] if not c.startswith(DURING)]
+                    during = [c[len(DURING):].strip() for c in modes[mode] if c.startswith(DURING)]
+                    mode_info = {"mode": mode, "mode_apply": apply_mode(watch, before), "bod_before": bod_trips(watch),
                                  "s3_boot_before": s3_boot(watch)}
                     watch.pump(time.monotonic() + args.mode_settle)
-                window = loss_window(watch, args, out / name, "%s-%s" % (tag, name), args.seconds, want)
+                window = loss_window(watch, args, out / name, "%s-%s" % (tag, name), args.seconds, want,
+                                     during=during if modes else None)
                 if modes:
                     window.update(mode_info)
                     window["bod_after"] = bod_trips(watch)
                     window["s3_boot_after"] = s3_boot(watch)
+                    off_s = wifioff_seconds(during)
+                    if off_s and window["s3_boot_after"] is None:
+                        # Goal 100 #001: a "UO" once left the bench dark. Wait for the S3 (its own guard restarts it
+                        # 90 s after the planned return), and stop the round rather than run windows on a dead bench.
+                        window["s3_boot_after"] = wait_s3_back(watch, off_s + 120)
+                        if window["s3_boot_after"] is None:
+                            window["errors"].append("S3 not back %d s after Wi-Fi off: round stopped" % (off_s + 120))
+                            window["complete"] = False
+                            stop_round = True
                     b0, b1 = window["bod_before"], window["bod_after"]
                     window["bod_delta"] = b1["trips"] - b0["trips"] if b0 and b1 else None
                     window["s3_restarted"] = (window["s3_boot_before"] != window["s3_boot_after"]
@@ -1957,6 +2037,9 @@ def stage_btloss(args):
                 windows.append(window)
                 print(json.dumps(loss_brief(window), ensure_ascii=False), flush=True)
                 write_json(out / "partial.json", {"windows": [loss_brief(w) for w in windows]})
+                if stop_round:
+                    print(json.dumps({"round_stopped": "S3 did not come back after Wi-Fi off"}), flush=True)
+                    break
                 watch.pump(time.monotonic() + args.gap)
     finally:
         if modes and args.restore:
