@@ -188,6 +188,21 @@ def main():
                     phone.tap(give)
                     time.sleep(3)
                 check("lock given back from the phone", not status()["lock"]["holder"])
+        # "Найти ПК": the phone's UDP broadcast "BENCHD?", the test benchd answers (port of the typed address + 2).
+        for _ in range(8):
+            find = by_text(nodes, "Найти ПК")
+            if find:
+                break
+            phone.scroll(down=False)
+            time.sleep(1)
+            nodes = phone.dump(out / "screen_top.xml")
+        if check("'Найти ПК' is there", find is not None):
+            phone.tap(find)
+            time.sleep(4)
+            nodes = phone.dump(out / "screen_find.xml")
+            bar = by_desc(nodes, "msg-bar")
+            want = "найден ПК %s:%d" % (r.stdout.split(" at ")[1].split(":")[0], run["http_port"]) if " at " in r.stdout else None
+            check("the phone found the PC by UDP", bar and want and bar["text"] == want, bar and bar["text"])
         for _ in range(6):
             ev = by_desc(nodes, "feed-events")
             if ev and ev["text"]:
