@@ -178,6 +178,8 @@ def my_lock(state):
 
 def acquire(owner, ttl_s=900, wait_s=0, pid=None, note=""):
     body = {"owner": owner, "ttl_s": ttl_s, "wait_s": wait_s, "pid": pid, "note": note}
+    if os.environ.get("BENCH_LOCK_TOKEN") and os.environ.get("BENCH_LOCK_OWNER") == owner:
+        body["token"] = os.environ["BENCH_LOCK_TOKEN"]      # inside its own "lock run": the same hold (goal 105)
     return call("POST", "/lock", body, timeout=wait_s + 10.0)
 
 

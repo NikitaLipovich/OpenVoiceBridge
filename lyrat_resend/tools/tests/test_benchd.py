@@ -231,6 +231,41 @@ class StoreUnit(unittest.TestCase):
         ev = st.event({"type": "slc_up", "t": "2026-11-18T00:00:02.000"})
         self.assertEqual(st.query_events("2026-11-18T00:00:00.000", None, "slc_up")["events"], [ev])
 
+    def test_lock_holder_asking_again_does_not_pass_the_queue(self):
+        """goal 105: A holds, B waits, A asks again (a new "lock run" of the same owner) -> B gets the bench first."""
+        import benchd
+        import threading
+        home = TMP / "lockfair"
+        st = benchd.Store(home)
+        lk = benchd.BenchLock(st, home / "state.json")
+        self.assertEqual(lk.acquire("A", ttl_s=60)[0], 200)
+        self.assertTrue(lk.acquire("A", ttl_s=60)[1]["renewed"])        # nobody waits: A keeps it
+        got = {}
+        tb = threading.Thread(target=lambda: got.update(B=lk.acquire("B", ttl_s=60, wait_s=10)))
+        tb.start()
+        end = time.time() + 5
+        while time.time() < end and not lk.view()["queue"]:
+            time.sleep(0.05)
+        code, ans = lk.acquire("A", ttl_s=60)                            # no wait: refused, B is named
+        self.assertEqual((code, ans.get("waiting")), (409, ["B"]))
+        tok = lk.view()["holder"]["token_hint"]
+        code, ans = lk.acquire("A", ttl_s=60, token=lk.holder["token"])     # a tool inside A's own lock run
+        self.assertEqual((code, ans["renewed"], ans["token"][:6]), (200, True, tok))
+        ta = threading.Thread(target=lambda: got.update(A=lk.acquire("A", ttl_s=60, wait_s=10)))
+        ta.start()
+        time.sleep(0.3)
+        self.assertEqual(lk.view()["holder"]["owner"], "A")              # still A's, not renewed past B
+        self.assertNotIn("B", got)
+        lk.release("A")                                                  # A's running command ends
+        tb.join(5)
+        self.assertEqual((got["B"][0], got["B"][1]["owner"], got["B"][1]["renewed"]), (200, "B", False))
+        self.assertNotIn("A", got)                                       # A waits behind B
+        self.assertEqual(lk.renew("B", got["B"][1]["token"], 60)[0], 200)  # renew with the token is unchanged
+        lk.release("B")
+        ta.join(5)
+        self.assertEqual((got["A"][0], got["A"][1]["owner"]), (200, "A"))
+        st.close()
+
     def test_lock_survives_a_restart_and_expires(self):
         import benchd
         home = TMP / "lockstate"

@@ -99,7 +99,7 @@ ROUTES = [
     {"method": "GET", "path": "/api/whoami", "params": {"nonce": "str"},
      "ui_exempt": "the phone's check of its cached address (signed id, goal 105)"},
     {"method": "POST", "path": "/lock", "control": True, "lan": True,
-     "params": {"owner": "str", "ttl_s": "num", "wait_s": "num", "pid": "int", "note": "str"}},
+     "params": {"owner": "str", "ttl_s": "num", "wait_s": "num", "pid": "int", "note": "str", "token": "str"}},
     {"method": "POST", "path": "/lock/renew", "control": True, "lan": True,
      "params": {"owner": "str", "token": "str", "ttl_s": "num"}},
     {"method": "POST", "path": "/lock/release", "control": True, "lan": True,
@@ -435,7 +435,7 @@ class BenchLock:
                 holder["token_hint"] = h["token"][:6]
             return {"holder": holder, "queue": [{"owner": q["owner"], "since": q["since"]} for q in self.queue]}
 
-    def acquire(self, owner, ttl_s=900, wait_s=0.0, pid=None, note=""):
+    def acquire(self, owner, ttl_s=900, wait_s=0.0, pid=None, note="", token=None):
         if not owner:
             return 400, {"error": "owner is needed"}
         ttl_s = max(5.0, min(float(ttl_s or 900), TTL_MAX_S))
@@ -449,7 +449,11 @@ class BenchLock:
                 while True:
                     self._expire()
                     h = self.holder
-                    if h and h["owner"] == owner:
+                    # The holder asking again keeps the bench only when nobody else queued before this ask; else it
+                    # waits in turn like anyone (goal 105: a series of "lock run" of one owner went past the queue).
+                    ahead = [q["owner"] for q in self.queue[:self.queue.index(ticket)] if q["owner"] != owner]
+                    # With the holder's token (a tool run inside its own "lock run") it is the same hold: renewed.
+                    if h and h["owner"] == owner and (not ahead or (token and token == h["token"])):
                         h["until_epoch"] = time.time() + ttl_s
                         h["pid"] = pid or h.get("pid")
                         self._save()
@@ -464,6 +468,10 @@ class BenchLock:
                     left = end - time.monotonic()
                     if left <= 0:
                         held = self.holder
+                        if held and held["owner"] == owner and ahead:
+                            return 409, {"error": "%s waits for the bench before you: give the lock back first" % ahead[0],
+                                         "holder": owner, "waiting": ahead,
+                                         "queue": [q["owner"] for q in self.queue if q is not ticket]}
                         return 409, {"error": "bench is held by %s" % (held["owner"] if held else "the queue"),
                                      "holder": held and held["owner"],
                                      "until": held and datetime.fromtimestamp(held["until_epoch"]).isoformat(timespec="seconds"),
@@ -1005,7 +1013,8 @@ def make_handler(svc):
         return (200, job) if job else (404, {"error": "no such job"})
 
     def post_lock(h, b):
-        return svc.lock.acquire(b.get("owner"), b.get("ttl_s", 900), b.get("wait_s", 0), b.get("pid"), b.get("note", ""))
+        return svc.lock.acquire(b.get("owner"), b.get("ttl_s", 900), b.get("wait_s", 0), b.get("pid"), b.get("note", ""),
+                                b.get("token"))
 
     def post_shutdown(h, b):
         if not h.local():
