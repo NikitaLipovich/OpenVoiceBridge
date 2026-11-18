@@ -139,6 +139,81 @@ class NoiseMeasures(unittest.TestCase):
         self.assertEqual(udp_record.floor_rms([0] * 4000, 1), [None])     # losses written as silence do not count
 
 
+class FakeWatch:
+    """Enough of NetWatch for round.apply_mode: the board answers bpow and bod as the firmware of goal 098 prints."""
+    def __init__(self):
+        self.t, self.recent, self.level, self.trips, self.sent = 0.0, [], (4, 5), 0, []
+        self.channel = self
+
+    def now(self):
+        self.t += 0.01
+        return self.t
+
+    def send(self, text):
+        self.sent.append(text)
+        words = text.split()
+        if words[0] == "bpow" and len(words) > 1:
+            n = int(words[1])
+            self.level = (4, 5) if n == 8 else (n, n)
+        if words[0] == "bpow":
+            self.recent.append((self.now(), "I (1) CMD:   bredr tx power min=%d max=%d err=0 build=4..5" % self.level))
+        elif words[0] == "bod":
+            self.recent.append((self.now(), "I (1) CMD:   bod on=1 level=7 trips=%d last_ms=-1" % self.trips))
+
+    def pump(self, end, until=None):
+        pass
+
+    def power(self, q):
+        return (q, 0)
+
+    def query(self):
+        return {"boot": 7}
+
+
+class BtlossModes(unittest.TestCase):    # goal 098
+    def setUp(self):
+        import round as rnd
+        self.rnd = rnd
+
+    def test_parse_modes(self):
+        modes = self.rnd.parse_modes(["D-H=bpow 8;s3:power 80", "P9-L=bpow 7; s3:power 44"])
+        self.assertEqual(modes, {"D-H": ["bpow 8", "s3:power 80"], "P9-L": ["bpow 7", "s3:power 44"]})
+        with self.assertRaises(SystemExit):
+            self.rnd.parse_modes(["nothing"])
+
+    def test_apply_mode_confirms_each_command(self):
+        w = FakeWatch()
+        done = self.rnd.apply_mode(w, ["bpow 7", "s3:power 44"])
+        self.assertTrue(all(c["ok"] for c in done), done)
+        self.assertEqual(w.level, (7, 7))
+        done = self.rnd.apply_mode(w, ["bpow 8"])
+        self.assertTrue(done[0]["ok"])
+        self.assertEqual(w.level, (4, 5))
+        w.trips = 3
+        self.assertEqual(self.rnd.bod_trips(w)["trips"], 3)
+
+    def test_apply_mode_sees_a_level_not_taken(self):
+        w = FakeWatch()
+        w.send = lambda text: w.recent.append((w.now(), "bredr tx power min=4 max=5 err=0 build=4..5"))
+        self.assertFalse(self.rnd.apply_mode(w, ["bpow 7"])[0]["ok"])
+
+    def test_mode_table(self):
+        def win(mode, down, up, complete=True, bod=0):
+            return {"mode": mode, "tag": mode, "complete": complete, "board_resets": 0, "slc_drops": 0, "bod_delta": bod,
+                    "s3_restarted": False, "sco": {"rx_none_pct": 1.0}, "tap": {"loss_pct": 0.5},
+                    "down": {"events": down, "seconds_measured": 60.0, "snr_per_second": {"worst_db": 20.0}},
+                    "up": {"events": up, "seconds_measured": 60.0, "snr_per_second": {"worst_db": 10.0}}}
+        table = self.rnd.mode_table([win("A", 1, 2), win("A", 3, 0), win("B", 0, 1), win("B", 9, 9, complete=False, bod=2)])
+        self.assertEqual(table["A"]["total_rate_per_min"], 3.0)
+        self.assertEqual(table["A"]["total_median"], 3.0)
+        self.assertEqual(table["A"]["total_min_max"], [3.0, 3.0])
+        self.assertEqual(table["B"]["windows"], 2)
+        self.assertEqual(table["B"]["complete"], 1)
+        self.assertEqual(table["B"]["total_rate_per_min"], 1.0)
+        self.assertEqual(table["B"]["bod_trips"], 2)
+        self.assertEqual(table["A"]["up_worst_db_min"], 10.0)
+
+
 class Imports(unittest.TestCase):
     MODULES = ("audio_check", "benchlib", "btlog", "call_check", "call_quality", "call_record", "call_stream", "console", "first_flash", "fw", "ota", "owner_check", "owner_common", "phone",
                "phone_mic", "round", "s3", "s3_uart", "serial_watch", "tap_check", "tone_blocks", "udp_record",

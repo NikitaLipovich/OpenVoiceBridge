@@ -1722,7 +1722,137 @@ def loss_brief(window):
             "down_under_20": (down.get("snr_per_second") or {}).get("under_min"),
             "up_events_per_min": up.get("events_per_min"), "up_impaired_pct": up.get("impaired_pct"),
             "up_worst_s_db": (up.get("snr_per_second") or {}).get("worst_db"),
-            "up_under_20": (up.get("snr_per_second") or {}).get("under_min")}
+            "up_under_20": (up.get("snr_per_second") or {}).get("under_min"),
+            "mode": window.get("mode"), "down_events": down.get("events"), "up_events": up.get("events"),
+            "tap_loss_pct": (window.get("tap") or {}).get("loss_pct"), "bod_delta": window.get("bod_delta"),
+            "s3_restarted": window.get("s3_restarted"), "board_resets": window.get("board_resets")}
+
+
+BPOW_LINE = re.compile(r"bredr tx power min=(-?\d+) max=(-?\d+) err=(-?\d+)")
+BOD_LINE = re.compile(r"bod on=(\d) level=(\d+) trips=(\d+) last_ms=(-?\d+)")
+
+
+def parse_modes(specs):
+    """--mode NAME=CMD[;CMD...] into {name: [cmd, ...]}; an S3 command starts with "s3:" (only "s3:power QDBM")."""
+    modes = {}
+    for spec in specs or []:
+        name, _, cmds = spec.partition("=")
+        if not name.strip() or not cmds.strip():
+            raise SystemExit("--mode needs NAME=CMD[;CMD...]: %r" % spec)
+        modes[name.strip()] = [c.strip() for c in cmds.split(";") if c.strip()]
+    return modes
+
+
+def board_reply(watch, cmd, pattern, timeout=3.0):
+    """Send a console command; the first match of pattern in the lines after it, or None."""
+    for _ in range(3):
+        t = watch.now()
+        watch.send(cmd)
+
+        def match():
+            for line in lines_since(watch, t):
+                m = pattern.search(line)
+                if m:
+                    return m
+            return None
+        watch.pump(time.monotonic() + timeout, until=lambda: match() is not None)
+        m = match()
+        if m:
+            return m
+    return None
+
+
+def bod_trips(watch):
+    """Dips under the LyraT's supply watch threshold since its start (goal 098); None from a firmware without it."""
+    m = board_reply(watch, "bod", BOD_LINE)
+    return {"on": int(m.group(1)), "level": int(m.group(2)), "trips": int(m.group(3)), "last_ms": int(m.group(4))} if m else None
+
+
+def s3_channel(watch):
+    channel = getattr(watch, "channel", None)
+    return channel if channel is not None else s3_uart.Channel()
+
+
+def apply_mode(watch, cmds):
+    """Run the commands of one mode, keep each reply. ok None: a command with no known reply to check."""
+    done = []
+    for cmd in cmds:
+        words = cmd.split()
+        if words[0] == "s3:power":
+            got = s3_channel(watch).power(int(words[1]))
+            done.append({"cmd": cmd, "ok": bool(got) and got[1] == 0 and got[0] == int(words[1]),
+                         "reply": list(got) if got else None})
+        elif words[0] == "bpow":
+            m = board_reply(watch, cmd, BPOW_LINE)
+            ok = bool(m) and m.group(3) == "0"
+            if ok and len(words) > 1 and int(words[1]) != 8:
+                ok = int(m.group(1)) == int(m.group(2)) == int(words[1])
+            done.append({"cmd": cmd, "ok": ok, "reply": m.group(0) if m else None})
+        else:
+            t = watch.now()
+            watch.send(cmd)
+            watch.pump(time.monotonic() + 1.0)
+            done.append({"cmd": cmd, "ok": None, "reply": lines_since(watch, t)[-1:]})
+    return done
+
+
+def s3_boot(watch):
+    q = s3_channel(watch).query()
+    return q.get("boot") if q else None
+
+
+def median(values):
+    v = sorted(x for x in values if x is not None)
+    if not v:
+        return None
+    return v[len(v) // 2] if len(v) % 2 else round((v[len(v) // 2 - 1] + v[len(v) // 2]) / 2, 3)
+
+
+def mode_table(windows):
+    """Per mode: events summed over complete windows and per minute, the spread of the windows, the power checks."""
+    table = {}
+    for w in windows:
+        if not w.get("mode"):
+            continue
+        row = table.setdefault(w["mode"], {"windows": 0, "complete": 0, "minutes": 0.0, "down_events": 0, "up_events": 0,
+                                           "total_per_min": [], "rx_none_pct": [], "down_worst_db": [], "up_worst_db": [],
+                                           "tap_loss_pct": [], "bod_trips": 0, "s3_restarts": 0, "lyrat_resets": 0,
+                                           "slc_drops": 0, "tags": []})
+        row["windows"] += 1
+        row["tags"].append(w["tag"])
+        row["lyrat_resets"] += w.get("board_resets") or 0
+        row["slc_drops"] += w.get("slc_drops") or 0
+        row["bod_trips"] += w.get("bod_delta") or 0
+        row["s3_restarts"] += 1 if w.get("s3_restarted") else 0
+        if not w.get("complete"):
+            continue
+        down, up = w.get("down") or {}, w.get("up") or {}
+        minutes = min(down.get("seconds_measured") or 0, up.get("seconds_measured") or 0) / 60.0
+        if minutes <= 0:
+            continue
+        row["complete"] += 1
+        row["minutes"] += minutes
+        row["down_events"] += down.get("events") or 0
+        row["up_events"] += up.get("events") or 0
+        row["total_per_min"].append(round(((down.get("events") or 0) + (up.get("events") or 0)) / minutes, 2))
+        row["rx_none_pct"].append((w.get("sco") or {}).get("rx_none_pct"))
+        row["down_worst_db"].append((down.get("snr_per_second") or {}).get("worst_db"))
+        row["up_worst_db"].append((up.get("snr_per_second") or {}).get("worst_db"))
+        row["tap_loss_pct"].append((w.get("tap") or {}).get("loss_pct"))
+    for row in table.values():
+        m = row["minutes"]
+        row["minutes"] = round(m, 2)
+        row["down_per_min"] = round(row["down_events"] / m, 2) if m else None
+        row["up_per_min"] = round(row["up_events"] / m, 2) if m else None
+        row["total_rate_per_min"] = round((row["down_events"] + row["up_events"]) / m, 2) if m else None
+        tot = row["total_per_min"]
+        row["total_median"] = median(tot)
+        row["total_min_max"] = [min(tot), max(tot)] if tot else None
+        row["rx_none_pct_median"] = median(row["rx_none_pct"])
+        row["down_worst_db_min"] = min((x for x in row["down_worst_db"] if x is not None), default=None)
+        row["up_worst_db_min"] = min((x for x in row["up_worst_db"] if x is not None), default=None)
+        row["tap_loss_pct_median"] = median(row["tap_loss_pct"])
+    return table
 
 
 def stage_btloss(args):
@@ -1758,7 +1888,15 @@ def stage_btloss(args):
     tag = datetime.now().strftime("%H%M%S")
     windows = []
     plan = []
-    if args.ab:
+    modes = parse_modes(args.mode)
+    order = [n.strip() for n in (args.order or "").split(",") if n.strip()] or list(modes)
+    if modes and [n for n in order if n not in modes]:
+        raise SystemExit("--order names a mode not given by --mode: %s" % [n for n in order if n not in modes])
+    if modes and (args.ab or args.phone_wifi != "asis"):
+        raise SystemExit("--mode does not combine with --ab or --phone-wifi")
+    if modes:
+        plan = [(None, "%02d-%s" % (i + 1, name)) for i, name in enumerate(order)]
+    elif args.ab:
         for i in range(args.ab):
             plan += [(False, "off%d" % (i + 1)), (True, "on%d" % (i + 1))]
     elif args.phone_wifi != "asis":
@@ -1770,6 +1908,11 @@ def stage_btloss(args):
     wifi_after = None
     restored = None
     tone_end = None
+    guard = restore = None
+    if modes:
+        # R3: the windows record DSDIN through the S3; a real call stops the round and its sound is dropped (goal 097).
+        import owner_common
+        guard = owner_common.RealCallGuard(state=telecom_state).start()
     try:
         if wifi_touched:
             write_json(WIFI_SAVED, {"enabled": wifi_before["enabled"], "connected": wifi_before["connected"]})
@@ -1785,12 +1928,41 @@ def stage_btloss(args):
                     reached = phone_wifi_set(want)
                     print(json.dumps({"phone_wifi": reached, "for": name}), flush=True)
                     watch.pump(time.monotonic() + args.wifi_settle)
+                mode_info = {}
+                if modes:
+                    if guard.tripped:
+                        break
+                    mode = name.split("-", 1)[1]
+                    mode_info = {"mode": mode, "mode_apply": apply_mode(watch, modes[mode]), "bod_before": bod_trips(watch),
+                                 "s3_boot_before": s3_boot(watch)}
+                    watch.pump(time.monotonic() + args.mode_settle)
                 window = loss_window(watch, args, out / name, "%s-%s" % (tag, name), args.seconds, want)
+                if modes:
+                    window.update(mode_info)
+                    window["bod_after"] = bod_trips(watch)
+                    window["s3_boot_after"] = s3_boot(watch)
+                    b0, b1 = window["bod_before"], window["bod_after"]
+                    window["bod_delta"] = b1["trips"] - b0["trips"] if b0 and b1 else None
+                    window["s3_restarted"] = (window["s3_boot_before"] != window["s3_boot_after"]
+                                              if window["s3_boot_before"] is not None else None)
+                    if any(c["ok"] is False for c in window["mode_apply"]):
+                        window["errors"].append("mode not confirmed: %s" % window["mode_apply"])
+                        window["complete"] = False
+                    if guard.tripped:
+                        window["errors"].append("real call: %s" % guard.tripped)
+                        window["complete"] = False
+                        for f in (out / name).glob("*.wav"):
+                            f.unlink(missing_ok=True)
+                    write_json(out / name / "window.json", window)
                 windows.append(window)
                 print(json.dumps(loss_brief(window), ensure_ascii=False), flush=True)
                 write_json(out / "partial.json", {"windows": [loss_brief(w) for w in windows]})
                 watch.pump(time.monotonic() + args.gap)
     finally:
+        if modes and args.restore:
+            restore = apply_mode(watch, [c.strip() for c in args.restore.split(";") if c.strip()])
+        if guard is not None:
+            guard.stop()
         if wifi_touched:
             restored = phone_wifi_restore()
         wifi_after = phone_wifi()
@@ -1834,6 +2006,11 @@ def stage_btloss(args):
         "port_drops_zero": summary["port_drops"] == 0,
         "usb_removals_zero": removals == 0,
     }
+    if modes:
+        checks["no_real_call"] = guard.tripped is None
+        checks["modes_restored"] = not args.restore or (bool(restore) and not any(c["ok"] is False for c in restore))
+        checks["bod_trips_zero"] = all(w.get("bod_delta") in (0, None) for w in windows)
+        checks["s3_restarts_zero"] = not any(w.get("s3_restarted") for w in windows)
     verdict = "INVALID_WINDOW" if standby != 0 else ("PASS" if all(checks.values()) else "FAIL")
     result = {"stage": "btloss", "label": args.label, "power": args.power, "verdict": verdict, "checks": checks,
               "start": start.isoformat(timespec="seconds"), "end": end.isoformat(timespec="seconds"),
@@ -1842,6 +2019,9 @@ def stage_btloss(args):
                           "pkt_period_s": args.pkt_period, "tone_hz": LOSS_TONE, "board_cmd": args.board_cmd},
               "leftover_wifi_state_restored": leftover, "phone_wifi_before": wifi_before, "phone_wifi_after": wifi_after,
               "windows": briefs, "wifi_off": side(False), "wifi_on": side(True),
+              "modes": modes or None, "order": order if modes else None, "by_mode": mode_table(windows) if modes else None,
+              "restore": restore,
+              "real_call_guard": {"tripped": guard.tripped, "looks": guard.looks, "unknown": guard.unknown} if guard else None,
               "telecom_before": telecom_before, "telecom_after": telecom_after, "phone_before": before, "phone_after": after,
               "pc_standby_entries": standby, "usb_removals": removals, "serial": summary}
     write_json(out / "round.json", result)
@@ -3123,6 +3303,11 @@ def main():
     p.add_argument("--wifi-settle", type=float, default=10.0, help="seconds after the phone's Wi-Fi changed")
     p.add_argument("--keep-wav", action="store_true", help="keep the recordings of the two tones")
     p.add_argument("--board-cmd", action="append", help="console command before the windows, may repeat")
+    p.add_argument("--mode", action="append", help="NAME=CMD[;CMD...]: a radio mode set before its windows, may repeat; "
+                   "LyraT console commands, or s3:power QDBM for the S3's Wi-Fi (goal 098)")
+    p.add_argument("--order", default="", help="comma list of mode names, one window each, in this order")
+    p.add_argument("--restore", default="", help="CMD[;CMD...] run at the end, e.g. 'bpow 8;s3:power 80'")
+    p.add_argument("--mode-settle", type=float, default=2.0, help="seconds after a mode was set")
     p.add_argument("--source", default="raw", choices=["vc", "mic", "recog", "raw"])
     p.add_argument("--settle", type=float, default=1.0)
     p.add_argument("--gap", type=float, default=3.0)

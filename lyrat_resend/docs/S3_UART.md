@@ -76,6 +76,8 @@ partition), refused during SCO; the phone keeps its side (`phone.py forget`). `s
 their last two bytes only, as the PC's logs keep them; the full addresses stay on the USB console. The caller's number of
 a `CLIP` is not printed at all any more: every log line also goes over the network.
 
+Radio power and supply (goal 098): `bpow` reads the BR/EDR transmit power (`bredr tx power min=N max=N err=E build=A..B`, levels 0 = -12 dBm ... 4 = 0 dBm, 5 = +3, 6 = +6, 7 = +9 dBm); `bpow N` sets one level 0..7, `bpow 8` the build's default (4..5 unless a `bredr_*` variant). Whether an open link follows a level set at run time is not proven (goal 098 #001): to compare levels, build them (`fw.py --variant mac_b1+bredr_p9`); the boot line `BREDR tx power` shows what the controller took. `bod` prints the supply watch: the chip's brownout detector at about 2.80 V with its reset off, `bod on=1 level=7 trips=N last_ms=T` counts the dips since the start (a step, not a voltage). Both lines are also in `s`.
+
 Noise suppression of the microphone: `ns off|sns|web0|web1|web2` switches the mode with the channel open, the reply is `ns = <mode>`, status 1 for a name that does not exist. It takes effect on the next frame, with a fade of 5 ms on both sides. `status` shows `ns=<asked> applied=<running> switches=<count>` and the time of a frame. `nscal` makes `sns` take a new noise profile. `cpu` prints the load of every task since its last call. Anyone in the local network can send these, as all commands here. How to compare the modes by ear: `VOICE_CHECK.md`.
 
 ## Tools

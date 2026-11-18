@@ -85,8 +85,17 @@
 #if __has_include("bench_variant.h")
 #include "bench_variant.h"
 #endif
-#ifdef BENCH_BROWNOUT_RESET
 #include "hal/brownout_hal.h"
+#include "hal/brownout_ll.h"    // the latched raw flag of the detector, for the supply watch (goal 098)
+
+// BR/EDR transmit power, esp_power_level_t: 0 is -12 dBm, 4 is 0 dBm, 5 +3, 6 +6, 7 +9 dBm. The stack's own default is
+// the range 4..5, inside which the phone steers the power (LMP power control). A bench variant fixes one level.
+#ifdef BENCH_BREDR_POWER
+#define BREDR_TX_MIN BENCH_BREDR_POWER
+#define BREDR_TX_MAX BENCH_BREDR_POWER
+#else
+#define BREDR_TX_MIN ESP_PWR_LVL_N0
+#define BREDR_TX_MAX ESP_PWR_LVL_P3
 #endif
 
 // ---------------------------------------------------------------------------
@@ -1457,16 +1466,14 @@ static esp_err_t bt_init(void)
     esp_bluedroid_config_t bd_cfg = BT_BLUEDROID_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_bluedroid_init_with_cfg(&bd_cfg));
     ESP_ERROR_CHECK(esp_bluedroid_enable());
-#ifdef BENCH_BREDR_POWER
-    // Bench only: fixed BR/EDR transmit power, level 0 is -12 dBm, level 7 is +9 dBm, goal 062. The stack's default is 0...+3 dBm.
-    ESP_ERROR_CHECK(esp_bredr_tx_power_set((esp_power_level_t)BENCH_BREDR_POWER, (esp_power_level_t)BENCH_BREDR_POWER));
+    // Before any page or connection: the level of this build, always printed (goals 062, 098).
+    ESP_ERROR_CHECK(esp_bredr_tx_power_set((esp_power_level_t)BREDR_TX_MIN, (esp_power_level_t)BREDR_TX_MAX));
     {
         esp_power_level_t bredr_min, bredr_max;
         if (esp_bredr_tx_power_get(&bredr_min, &bredr_max) == ESP_OK) {
             ESP_LOGI(TAG_BT, "BREDR tx power min=%d max=%d", bredr_min, bredr_max);
         }
     }
-#endif
 
     ESP_ERROR_CHECK(esp_bt_gap_set_device_name(BT_DEVICE_NAME));
     link_power_init();
@@ -1544,6 +1551,82 @@ static void ctl_uart_print_stats(void);
 static int ctl_uart_set_baud(int baud);
 static int ctl_uart_garbage(int bytes);
 
+// ---------------------------------------------------------------------------
+// BR/EDR power at run time and the supply watch (goal 098)
+// ---------------------------------------------------------------------------
+
+static void bredr_power_print(void)
+{
+    esp_power_level_t lo = 0, hi = 0;
+    esp_err_t err = lyrat_bt_ready() ? esp_bredr_tx_power_get(&lo, &hi) : ESP_ERR_INVALID_STATE;
+    CMD_OUT("  bredr tx power min=%d max=%d err=%d build=%d..%d", (int)lo, (int)hi, (int)err, BREDR_TX_MIN, BREDR_TX_MAX);
+}
+
+// "bpow N": the controller's global BR/EDR power; whether an open link follows it is measured on the bench (goal 098 D2).
+static void cmd_bpow(int val)
+{
+    int lo = val, hi = val;
+    if (val == 8) {
+        lo = BREDR_TX_MIN;
+        hi = BREDR_TX_MAX;
+    } else if (val != -1 && (val < 0 || val > 7)) {
+        CMD_OUT("bpow: 0..7 one level, 8 build default, nothing to read");
+        return;
+    }
+    if (val != -1 && lyrat_bt_ready()) {
+        esp_bredr_tx_power_set((esp_power_level_t)lo, (esp_power_level_t)hi);
+        // The controller takes the value in its own task: a read at once still sees the old one (098 #001).
+        for (int i = 0; i < 30; i++) {
+            esp_power_level_t a, b;
+            if (esp_bredr_tx_power_get(&a, &b) == ESP_OK && (int)a == lo && (int)b == hi) break;
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+    bredr_power_print();
+}
+
+// The chip's brownout detector at its highest threshold, about 2.80 V, with the reset off: each dip sets a latched raw
+// interrupt flag, which a timer reads and clears. A step, not a voltmeter: 3.3 V falling to 2.9 V is not seen. The
+// normal firmware keeps CONFIG_ESP_BROWNOUT_DET off (goal 010: the radio's start dipped below it), so nothing else
+// owns the detector; the variants bod and bod7 keep their reset instead.
+#define BOD_WATCH_LEVEL 7
+#define BOD_WATCH_PERIOD_US 10000
+static volatile uint32_t s_bod_trips;
+static volatile int64_t s_bod_last_us = -1;
+static bool s_bod_on;
+
+static void bod_watch_poll(void *arg)
+{
+    if (RTCCNTL.int_raw.rtc_brown_out) {
+        s_bod_trips++;
+        s_bod_last_us = esp_timer_get_time();
+        brownout_ll_intr_clear();
+    }
+}
+
+static void bod_watch_init(void)
+{
+#ifndef BENCH_BROWNOUT_RESET
+    brownout_hal_config_t bod = {
+        .threshold = BOD_WATCH_LEVEL, .enabled = true, .reset_enabled = false,
+        .flash_power_down = false, .rf_power_down = false,
+    };
+    brownout_hal_config(&bod);
+    brownout_ll_intr_enable(false);     // nobody takes the interrupt; the raw flag still latches
+    brownout_ll_intr_clear();
+    esp_timer_handle_t timer;
+    const esp_timer_create_args_t args = {.callback = bod_watch_poll, .name = "bod"};
+    s_bod_on = esp_timer_create(&args, &timer) == ESP_OK && esp_timer_start_periodic(timer, BOD_WATCH_PERIOD_US) == ESP_OK;
+#endif
+}
+
+static void bod_watch_print(void)
+{
+    int64_t last = s_bod_last_us;
+    CMD_OUT("  bod on=%d level=%d trips=%"PRIu32" last_ms=%lld", s_bod_on, BOD_WATCH_LEVEL, s_bod_trips,
+            last < 0 ? -1LL : (long long)(last / 1000));
+}
+
 static void print_status(void)
 {
     CMD_OUT("=== DSP Pipeline Status ===");
@@ -1570,6 +1653,8 @@ static void print_status(void)
     CMD_OUT("  SLC     = %s", s_slc_up ? "up" : "down");
     CMD_OUT("  scan_during_sco=%d", s_scan_during_sco);
     CMD_OUT("  plc=%d", s_plc_on);
+    bredr_power_print();
+    bod_watch_print();
     CMD_OUT("  bonds=%d", esp_bt_gap_get_bond_device_num());
     // Addresses stay on the local console: a reply on the control channel leaves the board over the network.
     if (s_cmd_cap) {
@@ -1643,6 +1728,8 @@ static void print_help(void)
     CMD_OUT("  ugarb N — N bytes of noise onto that UART, for the test of the S3's parser");
     CMD_OUT("  ota    — running image, its state, the receiver of new firmware");
     CMD_OUT("  ulog   — the log ring for the PC: listener, level, lines dropped");
+    CMD_OUT("  bpow [N] — BR/EDR transmit power: no N reads, 0..7 fixes one level (0 -12 dBm, 7 +9 dBm), 8 build default");
+    CMD_OUT("  bod    — supply watch: dips under about 2.80 V since start, no reset");
     CMD_OUT("  reboot [1] — restart in 1 s; refused during SCO unless 1");
     CMD_OUT("  unpair — remove every bond and the peer list (the phone keeps its own)");
     CMD_OUT("  upd [8] — restart into the updater and stay there 120 s for an image (8: test with a wrong Wi-Fi password)");
@@ -1896,6 +1983,10 @@ static void process_cmd(char *line)
         char text[160];
         lyrat_log_status(text, sizeof(text));
         CMD_OUT("%s", text);
+    } else if (strcmp(cmd, "bpow") == 0) {
+        cmd_bpow(val);
+    } else if (strcmp(cmd, "bod") == 0) {
+        bod_watch_print();
     } else if (strcmp(cmd, "reboot") == 0) {
         // Over the network nothing else can reset this board: the S3 has no wire to EN (R13).
         if (s_sco_active && val != 1) {
@@ -2210,6 +2301,7 @@ void app_main(void)
     };
     brownout_hal_config(&bod);
 #endif
+    bod_watch_init();
     lyrat_log_init((uint16_t)esp_random());    // from here every log line also waits in the ring for the PC
     esp_reset_reason_t reset_reason = esp_reset_reason();
     ESP_LOGI(TAG, "BOOT reset_reason=%s code=%d", reset_reason_name(reset_reason), (int)reset_reason);
