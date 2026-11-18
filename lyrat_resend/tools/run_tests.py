@@ -13,12 +13,15 @@ and none was skipped in a full run; --quick may skip the checks it leaves out on
 
 The OTA tests need two images of each board: the full run makes them from its own firmware builds (the "ota" one a variant
 with another version and ELF SHA, tests/images.py); --quick takes the builds of the last full run, else synthetic images,
-and says which in summary.json. Docs: lyrat_resend/docs/TESTS.md. Made by goal 092.
+and says which in summary.json. Each check runs in a job object of its own (tests/procjob.py, goal 107): its whole process
+tree ends with it - after PASS or FAIL (leftovers are killed and named), at its timeout, on Ctrl+C (exit 130) and when this
+runner dies. Docs: lyrat_resend/docs/TESTS.md. Made by goal 092.
 """
 import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -37,6 +40,7 @@ PY = sys.executable
 
 sys.path.insert(0, str(TESTS))
 import images  # noqa: E402
+import procjob  # noqa: E402
 
 
 def unittest_cmd(module):
@@ -123,6 +127,11 @@ CHECKS = [
      [PY, "test_platform_tools.py"], PLATFORM, 1800, "base", False),
     ("platform_pins", "platform: wiring table against the pin rules, with mutations that must be caught",
      [PY, "plat_pins_check.py", "--mutate"], PLATFORM, 120, "base", False),
+    # Keep last: it also proves no process of the checks above still holds ota_test/build/otahost.dll.
+    ("child_cleanup", "what a run starts ends with it (goal 107): fake checks that pass, fail, crash or time out, Ctrl+C "
+                      "and a killed runner leave no process and no busy DLL; processes outside the run and the bench "
+                      "service untouched; a test process run alone takes its children with it; otahost.dll free",
+     unittest_cmd("test_child_cleanup"), TESTS, 300, "base", False),
 ]
 NAMES = [c[0] for c in CHECKS]
 
@@ -142,25 +151,84 @@ def unittest_counts(text):
     return (int(ran.group(1)) if ran else None), (int(skipped.group(1)) if skipped else 0)
 
 
+def proc_names(pids):
+    """Image names of these pids, for the note about leftovers (best effort)."""
+    try:
+        out = subprocess.run(["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    names = {}
+    for line in out.splitlines():
+        cells = [c.strip('"') for c in line.split('","')]
+        if len(cells) > 1 and cells[1].isdigit() and int(cells[1]) in pids:
+            names[int(cells[1])] = cells[0]
+    return names
+
+
+def wait_in_steps(p, deadline):
+    """p.wait() till the deadline in short steps: one long WaitForSingleObject does not wake for Ctrl+C on Windows,
+    the KeyboardInterrupt would only come when the check ends by itself."""
+    while True:
+        try:
+            return p.wait(timeout=max(0.0, min(0.25, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            if time.monotonic() >= deadline:
+                raise
+
+
 def run_check(check, run_dir: Path, env):
+    """One check in a job of its own (tests/procjob.py, goal 107): whatever it starts dies with it - after PASS, FAIL,
+    its timeout, Ctrl+C, or this runner's own death - and processes left behind are named in the result."""
     name, what, cmd, cwd, timeout, kind, _ = check
     cmd = [c.replace("{run}", str(run_dir)) for c in cmd]
     log = run_dir / (name + ".log")
+    out_f, err_f = run_dir / (name + ".stdout.tmp"), run_dir / (name + ".stderr.tmp")
     t0 = time.monotonic()
+    leftover, interrupted = [], False
+    job = procjob.Job()
     try:
-        r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=timeout, env=env)
-        code, out = r.returncode, r.stdout + ("\n--- stderr ---\n" + r.stderr if r.stderr else "")
-    except subprocess.TimeoutExpired as e:
-        code, out = None, "TIMEOUT after %d s\n%s" % (timeout, (e.stdout or b"")[-5000:] if isinstance(e.stdout, bytes)
-                                                     else (e.stdout or "")[-5000:])
-    except OSError as e:
-        code, out = None, "could not start: %s" % e
+        # Output into files, not pipes: a grandchild still holding a pipe would keep a reader waiting for ever.
+        with open(out_f, "wb") as fo, open(err_f, "wb") as fe:
+            try:
+                p = procjob.popen(job, cmd, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=fo, stderr=fe, env=env)
+            except OSError as e:
+                p = None
+                code, head = None, "could not start: %s" % e
+            if p is not None:
+                try:
+                    code, head = wait_in_steps(p, t0 + timeout), ""
+                except subprocess.TimeoutExpired:
+                    code, head = None, "TIMEOUT after %d s\n" % timeout
+                except KeyboardInterrupt:
+                    code, head, interrupted = None, "INTERRUPTED (Ctrl+C) after %.0f s\n" % (time.monotonic() - t0), True
+                if code is None or job.pids():
+                    leftover = [x for x in job.terminate() if x != p.pid]     # the check itself is not a leftover
+                    p.wait()
+    finally:
+        job.close()
+    names = proc_names(set(leftover)) if leftover else {}
+    read = lambda f: f.read_bytes().decode("utf-8", "replace") if f.exists() else ""
+    stdout, stderr = read(out_f), read(err_f)
+    for f in (out_f, err_f):
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    if head.startswith(("TIMEOUT", "INTERRUPTED")):
+        stdout = stdout[-5000:]
+    out = head + stdout + ("\n--- stderr ---\n" + stderr if stderr else "")
+    if leftover:
+        out += "\n--- killed with the check's job (goal 107) ---\n" + "".join(
+            "%d %s\n" % (x, names.get(x, "?")) for x in leftover)
     seconds = round(time.monotonic() - t0, 1)
     log.write_text(out, encoding="utf-8")
     ran, skipped = unittest_counts(out)
     result = {"name": name, "what": what, "status": "PASS" if code == 0 else "FAIL", "exit": code, "seconds": seconds,
               "log": log.name}
+    if leftover:
+        result["leftover"] = ["%s:%d" % (names.get(x, "?"), x) for x in leftover]
+    if interrupted:
+        result["interrupted"] = True
     if ran is not None:
         result["tests"] = ran
         result["skipped"] = skipped
@@ -188,19 +256,31 @@ def main():
     ap.add_argument("--out", help="folder instead of goals_harness/bench_runs/tests/<stamp>")
     ap.add_argument("--port-offset", type=int, default=None,
                     help="BENCH_PORT_OFFSET for the whole run: parallel runs (worktrees) on different offsets do not meet")
+    ap.add_argument("--check-file", help=argparse.SUPPRESS)   # JSON list of checks instead of CHECKS: the cleanup test's fakes
     args = ap.parse_args()
+    checks = list(CHECKS)
+    if args.check_file:
+        checks = [(c["name"], c.get("what", "test of the runner"), c["cmd"], Path(c.get("cwd", ".")), c["timeout"],
+                   "base", False) for c in json.loads(Path(args.check_file).read_text(encoding="utf-8"))]
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, signal.default_int_handler)   # Ctrl+Break stops the run like Ctrl+C
+    if sys.platform == "win32":
+        # A process started with Ctrl+C ignored (CREATE_NEW_PROCESS_GROUP somewhere above: background shells, IDE
+        # tasks) passes that on: Ctrl+C would not stop the run. Take it back (goal 107).
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False)
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(errors="replace")
         except (AttributeError, ValueError):
             pass
     if args.list:
-        for c in CHECKS:
+        for c in checks:
             print("%-15s %-6s %s" % (c[0], c[5], c[1]))
         return 0
     only = [n.strip() for n in args.only.split(",")] if args.only else None
     if only:
-        unknown = [n for n in only if n not in NAMES]
+        unknown = [n for n in only if n not in [c[0] for c in checks]]
         if unknown:
             ap.error("unknown check(s) %s; known: %s" % (", ".join(unknown), ", ".join(NAMES)))
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -221,34 +301,44 @@ def main():
     t_all = time.monotonic()
     image_kinds = None
     print("tests -> %s" % run_dir, flush=True)
-    for check in CHECKS:
+    interrupted = False
+    for check in checks:
         name, what, _, _, _, kind, needs_images = check
         if only and name not in only:
             continue
-        if args.quick and kind == "build":
-            res = {"name": name, "what": what, "status": "SKIP", "note": "--quick leaves out the builds"}
-        else:
-            if needs_images and image_kinds is None:
-                d, image_kinds = prepare_images(run_dir)
-                env["OTA_TEST_BUILDS"] = str(d)
-                summary["images"] = image_kinds
-            if sys.stdout.isatty():
-                print("  %-15s ..." % name, end="", flush=True)
-            res = run_check(check, run_dir, env)
+        try:
+            if args.quick and kind == "build":
+                res = {"name": name, "what": what, "status": "SKIP", "note": "--quick leaves out the builds"}
+            else:
+                if needs_images and image_kinds is None:
+                    d, image_kinds = prepare_images(run_dir)
+                    env["OTA_TEST_BUILDS"] = str(d)
+                    summary["images"] = image_kinds
+                if sys.stdout.isatty():
+                    print("  %-15s ..." % name, end="", flush=True)
+                res = run_check(check, run_dir, env)
+        except KeyboardInterrupt:          # outside a check's wait: its job is closed already, nothing of it runs
+            res = {"name": name, "what": what, "status": "FAIL", "interrupted": True}
         summary["checks"].append(res)
         extra = res.get("note") or ("%s tests" % res["tests"] if "tests" in res else "")
+        if res.get("leftover"):
+            extra += "  killed leftovers: %s" % ", ".join(res["leftover"])
         print("%s  %-15s %-4s %6s  %s" % ("\r" if sys.stdout.isatty() else "", name, res["status"], ("%.0f s" % res["seconds"]) if "seconds" in res else "",
                                            extra), flush=True)
+        if res.get("interrupted"):
+            interrupted = summary["interrupted"] = True
+            print("interrupted: the checks after %s are not run" % name, flush=True)
+            break
     summary["seconds"] = round(time.monotonic() - t_all, 1)
     statuses = [c["status"] for c in summary["checks"]]
     skipped_on_purpose = args.quick or only
-    summary["pass"] = bool(statuses) and all(s == "PASS" or (s == "SKIP" and skipped_on_purpose) for s in statuses)
+    summary["pass"] = not interrupted and bool(statuses) and all(s == "PASS" or (s == "SKIP" and skipped_on_purpose) for s in statuses)
     summary["counts"] = {s: statuses.count(s) for s in ("PASS", "FAIL", "SKIP")}
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     print("%s  %d pass, %d fail, %d skip, %.0f s  %s" % ("PASS" if summary["pass"] else "FAIL", summary["counts"]["PASS"],
                                                         summary["counts"]["FAIL"], summary["counts"]["SKIP"],
                                                         summary["seconds"], run_dir / "summary.json"))
-    return 0 if summary["pass"] else 1
+    return 130 if interrupted else 0 if summary["pass"] else 1
 
 
 if __name__ == "__main__":

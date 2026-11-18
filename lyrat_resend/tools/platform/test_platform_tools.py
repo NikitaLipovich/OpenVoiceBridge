@@ -23,6 +23,10 @@ TOKEN = "emu-token-0123456789abc"
 RESULTS = {}
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "bench"))
+sys.path.append(str(HERE.parent / "tests"))
+import procjob  # noqa: E402
+
+procjob.tie_this_process()      # the emulators started here die with this process, whatever way it ends (goal 107)
 
 
 class Emu:

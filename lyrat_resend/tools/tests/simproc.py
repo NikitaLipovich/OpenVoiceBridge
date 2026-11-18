@@ -13,6 +13,10 @@ TOOLS = HERE.parent
 BENCH = TOOLS / "bench"
 sys.path.insert(0, str(HERE))
 import images  # noqa: E402
+import procjob  # noqa: E402
+
+# Run alone or under run_tests: what this test process starts dies with it, whatever way it ends (goal 107).
+procjob.tie_this_process()
 
 TMP = Path(tempfile.mkdtemp(prefix="t092_"))
 TOKEN = TMP / "token.h"

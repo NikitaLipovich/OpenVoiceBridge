@@ -17,6 +17,10 @@ HERE = Path(__file__).resolve().parent
 BENCH = HERE.parent / "bench"
 sys.path.insert(0, str(BENCH))
 import ota  # noqa: E402
+sys.path.append(str(HERE.parent / "tests"))
+import procjob  # noqa: E402
+
+procjob.tie_this_process()      # the emulators started here die with this process, whatever way it ends (goal 107)
 
 BUILDS = Path(os.environ.get("OTA_TEST_BUILDS", HERE / "images"))
 S3_BASE = BUILDS / "s3-base" / "s3_eth_bridge.bin"

@@ -19,6 +19,16 @@ Needs: Python 3.13 with numpy and pyserial, Visual Studio Build Tools 2022 (`cl`
 if elsewhere), ESP-IDF v5.5.2 (`IDF_PATH`, `IDF_TOOLS_PATH`, as `tools/bench/fw.py`), the Android SDK with a JDK for
 `sco_probe` (as `tools/android/build_apk.py`), and `s3_eth_bridge/main/ota_secrets.h` for the secrets check.
 
+Processes of a run end with it (goal 107). Each check runs in a Windows job object of its own (`tools/tests/procjob.py`,
+ctypes, KILL_ON_JOB_CLOSE): when the check ends, passed or not, whatever it started and left running is killed and named in
+`summary.json` (`leftover`) and at the end of its log; at its timeout the whole tree goes, not only the first process;
+Ctrl+C (or Ctrl+Break) kills the running check's tree, writes `summary.json` with `"interrupted": true`, runs nothing more
+and exits with 130; and if the runner itself is killed, Windows closes the job and the tree goes with it. Only processes
+of the run's own jobs are killed — never by name or port, so a live `benchd` and other runs are not touched. Test modules
+that start simulators (`simproc`, `ota_test/test_tools.py`, `platform/test_platform_tools.py`) also tie themselves with
+`procjob.tie_this_process()`, so a test run alone that is killed takes its simulators with it. A simulator left alive
+used to hold `ota_test/build/otahost.dll` and the next build failed with LNK1104 (goal 106 #001).
+
 ## Checks
 
 | Name | What it proves | Code |
@@ -45,6 +55,7 @@ if elsewhere), ESP-IDF v5.5.2 (`IDF_PATH`, `IDF_TOOLS_PATH`, as `tools/bench/fw.
 | `bench_ui` | The bench UI generator (goal 104): deterministic; `--check` catches (a) hand edits of the generated files or the template, (b) unknown endpoint, parameter, choice, action name, LAN control on a local route, a route taken out of benchd, (c) a status path that is not there (also in a list), (d) a route without a button (warning, error with `--strict`) on broken copies; the template language gives the same text in Python, the page's JS (node) and the phone's Java (JVM); the page renders in headless Chrome against benchd + simulator; LAN token 401/200, `/shutdown` never from the LAN; UDP discovery | `tools/tests/test_bench_ui.py` |
 | `bench_find` | The phone finds benchd and the S3 itself (goal 105, `BENCHD.md` «Как телефон находит ПК»): the phone's Java (`BenchFind`, `S3Direct`) on the JVM against real benchd processes — signed answer = `benchd_client`, a foreign service (other token), an unsigned and an old (goal 104) one not taken, a cache that is only a hint, the same service on another port found anew — and direct mode against the simulator (UQ, log by LOG1/LOG0, UC, UX); its status = `s3_direct.py`, log parsing = `udplog`, redact = `benchlib`; the direct ops agree in generator, spec and app; every write to the S3 only in direct mode | `tools/tests/test_bench_find.py`, `tools/tests/BenchNetMain.java` |
 | `platform_rom`, `platform_tools`, `platform_pins` | The three-board platform of goal 095 | `tools/platform/` |
+| `child_cleanup` | What a run starts ends with it (goal 107): the real `run_tests.py` on fake checks whose children and grandchildren load a DLL and ignore Ctrl+C — after a check that passes, fails, crashes or times out, after Ctrl+C and after the runner is killed from outside, no process of theirs runs and the DLL opens for writing; a process outside the run and the bench service on 5080 untouched; a test process run alone (`procjob.tie_this_process()`) takes its children with it. Runs last: then `ota_test/build/otahost.dll` is free too | `tools/tests/test_child_cleanup.py`, `tools/tests/procjob.py` |
 
 ## The S3 simulator
 
