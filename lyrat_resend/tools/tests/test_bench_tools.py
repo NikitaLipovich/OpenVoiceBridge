@@ -46,6 +46,25 @@ class Uart(unittest.TestCase):
         rc, out, _, _ = run_tool("s3_uart.py", "cmd", "nosuchcmd")
         self.assertEqual((rc, last_json(out)["status"]), (1, 1))
 
+    def test_mode(self):
+        """s3_uart.py mode (goal 102): show, switch, refusal during SCO and back, against the C rules in the model."""
+        rc, out, err, _ = run_tool("s3_uart.py", "mode")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("mode=phone src=nvs", out)
+        rc, out, _, _ = run_tool("s3_uart.py", "cmd", "simsco 1")
+        rc, out, _, _ = run_tool("s3_uart.py", "mode", "pc")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("mode refused: SCO active, 'mode pc 1' forces", out)
+        run_tool("s3_uart.py", "cmd", "simsco 0")
+        rc, out, _, _ = run_tool("s3_uart.py", "mode", "pc")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("mode pc saved, was phone, dropping the link to phone", out)
+        rc, out, _, _ = run_tool("s3_uart.py", "mode", "pc")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("mode pc unchanged", out)
+        rc, out, _, _ = run_tool("s3_uart.py", "mode", "phone")
+        self.assertEqual(rc, 0, out)
+
     def test_tx_off_refuses_then_auto(self):
         rc, out, _, _ = run_tool("s3_uart.py", "tx", "0")
         self.assertIn("UT 0", out)

@@ -1,6 +1,7 @@
 // PC build of the shared firmware code (build_host.cmd): exports for the Python tests what the headers keep inline,
 // and opaque constructors for the sender, the receiver and the log ring. Made by goal 090.
 #define __attribute__(x)
+#include "hf_mode.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -106,3 +107,6 @@ int16_t host_soft_limit(int32_t s) { return call_soft_limit(s); }
 // Goal 096: the rules of the LyraT's updater (upd_mode.c) as an opaque object.
 #include "upd_mode.h"
 upd_watch_t *host_watch_new(void) { return (upd_watch_t *)calloc(1, sizeof(upd_watch_t)); }
+
+// goal 102: the size of the mode state, so that Python allocates it
+size_t host_sizeof_hfm(void) { return sizeof(hfm_t); }

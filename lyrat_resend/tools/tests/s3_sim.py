@@ -46,6 +46,7 @@ sys.path.insert(0, str(TOOLS / "bench"))
 sys.path.insert(0, str(HERE))
 import otahost as H  # noqa: E402
 import s3_emu  # noqa: E402
+import otahost  # noqa: E402
 import images  # noqa: E402
 import upd_sim  # noqa: E402
 
@@ -149,6 +150,7 @@ class LyratConsole:
         self.tone = 0
         self.slc = 1
         self.sco = 0
+        self.hfm = None         # the mode rules of goal 102, made at the first "mode"
         self.ran = []           # every command that ran, for the tests: a repeat must not run twice
         self.start = time.monotonic()
 
@@ -173,6 +175,18 @@ class LyratConsole:
             return ST_OK, "simsco = %d" % self.sco
         if word == "ns":
             return ST_OK, "ns = %s" % (arg.strip() or "off")
+        if word == "mode":
+            # Goal 102: the firmware's own rules (hf_mode.c); the phone in its slot, the PC paired in the PC slot.
+            if self.hfm is None:
+                self.hfm = otahost.CHfm(nvs_mode="phone", phone=bytes.fromhex("02112233" + PEER[-5:].replace(":", "")),
+                                        pc=bytes.fromhex("021122334402"))
+            live = self.hfm.slot(self.hfm.mode) if self.slc else None
+            act, out = self.hfm.command(arg, self.sco, live)
+            if arg.strip() and self.sim:
+                self.sim.lyrat_log("mode cmd: %s" % out, tag="BT")
+            if act & otahost.HFM_DO_DROP:
+                self.slc, self.sco = 1, 0          # the link drops and the AG of the new mode comes up (model: at once)
+            return ST_OK, out
         if word == "ver":
             return ST_OK, "lyrat_resend sim"
         if word == "status":

@@ -8,6 +8,8 @@
   s3_uart.py power [QDBM]          the S3's Wi-Fi power cap in 0.25 dBm (8..84) now, without a new image; shown in stat as txp=
   s3_uart.py restart               restart the S3 over the network, prints its new boot id
   s3_uart.py reboot                restart the LyraT (console command "reboot 1" through the relay)
+  s3_uart.py mode [phone|pc] [--force]   the LyraT's mode (goal 102, docs/DUAL_MODE.md): show it, or switch; exit 1
+                                   when the LyraT refused (SCO open without --force, bad request)
 
 As a module: Channel (query, command, raw, set_tx, set_baud), frame(), and line_check(watch, channel, baud).
 The S3 is found by broadcast, its address is not stored. Exit code: 0 done, 1 failed, 2 board not found.
@@ -277,6 +279,17 @@ def line_check(watch, channel, baud=9600, seconds=6.0):
     return r
 
 
+def mode_command(want=None, force=False):
+    """Console text of the LyraT's "mode" (goal 102)."""
+    return "mode" if not want else "mode %s%s" % (want, " 1" if force else "")
+
+
+def mode_reply_ok(status, text):
+    """The LyraT took the request: a show ("mode=..."), a switch ("saved") or the same mode ("unchanged")."""
+    t = (text or "").strip()
+    return status == ST_OK and not t.startswith("mode refused") and ("mode=" in t or "saved" in t or "unchanged" in t)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="action", required=True)
@@ -289,6 +302,9 @@ def main():
     p.add_argument("qdbm", nargs="?", type=int)
     sub.add_parser("restart")
     sub.add_parser("reboot")
+    p = sub.add_parser("mode")
+    p.add_argument("want", nargs="?", choices=["phone", "pc"])
+    p.add_argument("--force", action="store_true", help="switch even with SCO open (the call or Zoom audio drops)")
     p = sub.add_parser("linecheck")
     p.add_argument("--baud", type=int, default=9600)
     p.add_argument("--seconds", type=float, default=6.0)
@@ -317,6 +333,11 @@ def main():
         boot = channel.restart_s3()
         print(json.dumps({"restarted": boot is not None, "boot": boot}))
         return 0 if boot is not None else 1
+    elif args.action == "mode":
+        got = channel.command(mode_command(args.want, args.force))
+        print(redact(got["text"] or ""))
+        print(json.dumps({k: got[k] for k in ("status", "attempts", "ms")}))
+        return 0 if mode_reply_ok(got["status"], got["text"]) else 1
     elif args.action == "reboot":
         got = channel.command("reboot 1", retries=2)
         print(redact(got["text"] or ""))
