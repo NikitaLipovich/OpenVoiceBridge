@@ -305,7 +305,9 @@ public class BenchActivity extends Activity implements BenchUi {
                         prefix = la.getPrefixLength();
                     }
                 }
-                boolean changed = wifi == null || !wifi.equals(n) || !(n + "/" + ip).equals(key);
+                // The first event after registering is the network as it is, not a change: it only starts a search
+                // when nothing is connected yet (the search of onResume ran before the Wi-Fi was known).
+                boolean changed = key.isEmpty() ? mode != MODE_SERVICE : !(n + "/" + ip).equals(key);
                 wifi = n;
                 wifiIp = ip;
                 wifiPrefix = prefix;
