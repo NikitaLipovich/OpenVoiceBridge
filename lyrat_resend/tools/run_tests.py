@@ -82,6 +82,11 @@ CHECKS = [
                    "on synthetic lines (tone, silence, cut pieces, clipping, noise, shifted lines); live pipeline, PCM output "
                    "and its latency (goal 097)",
      unittest_cmd("test_call_check"), TESTS, 900, "base", True),
+    ("call_listen", "the live stream cut into utterances (goal 101): borders against synthetic speech in quiet and noise, "
+                    "silence, clicks, a background step, overlap, the 30 s cut, missing sound and lost blocks, files bit for "
+                    "bit, the recogniser hook, CPU; a dropped stream and its reconnect; a scenario played by the simulator "
+                    "through call_check to call_listen",
+     unittest_cmd("test_call_listen"), TESTS, 600, "base", True),
     ("phone_compare", "the LyraT mic before Bluetooth against the phone's recording: alignment (offset, clock drift, a jump of "
                       "the time line, no convergence), lost frames knocked out at known times found within 7.5 ms with "
                       "their type, files and report, the check against tone_blocks, call_check --compare plumbing (goal 099)",

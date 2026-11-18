@@ -21,6 +21,7 @@ REBOOT_DELAY_MS with a new boot id and the boot line "BOOT reset_reason=SW code=
 bond), unpair and ota; its log lines carry the uptime since its own start.
 Goal 097: console "simsco 1|0" opens or closes the headset channel with the firmware's lines (test only); --mic-frame-offset
 puts the mic's counter behind as on the board; --clicks marks both lines at the same bus frame for alignment tests.
+Goal 101: --play-call / --play-mic WAV play a file on that line in a loop from the S3's start, instead of the tones.
 Goal 096: the LyraT is the updater in factory plus the headset firmware in ota_0 (upd_sim.py): every start goes
 through the updater (C rules of upd_mode.c, clock sped up by --upd-scale), "upd [8]" goes there, the updater takes
 images on its own UDP port (--lyrat-port, printed as lyrat_port) and from the relay, the headset firmware has no slot.
@@ -265,6 +266,17 @@ class Uart(s3_emu.Uart):
         return out
 
 
+def read_play(path):
+    """The first channel of a 16 kHz 16 bit WAV as a list of ints (goal 101: recordings and scripts through the S3)."""
+    import wave
+    with wave.open(str(path), "rb") as w:
+        if w.getframerate() != RATE or w.getsampwidth() != 2:
+            raise SystemExit("--play-*: %s is not 16 kHz 16 bit" % path)
+        ch = w.getnchannels()
+        data = struct.unpack("<%dh" % (w.getnframes() * ch), w.readframes(w.getnframes()))
+    return data[0::ch] or (0,)
+
+
 class Stream:
     def __init__(self, name, stream, port, freqs):
         self.name, self.stream, self.port, self.freqs = name, stream, port, freqs
@@ -273,9 +285,13 @@ class Stream:
         self.total = 0
         self.sent = self.send_fail = self.overflows = self.timeouts = 0
         self.phase = [0.0, 0.0]
+        self.play = None                 # goal 101: mono int16 samples played on both channels, in a loop
 
     def pcm(self, frames, clicks=False):
         """clicks (goal 097): a 2 ms burst every 0.5 s of the bus, at the same bus frame on both lines."""
+        if self.play is not None:
+            n = len(self.play)
+            return [[int(self.play[(self.total + i) % n])] * 2 for i in range(frames)]
         out = []
         for i in range(frames):
             pair = []
@@ -304,6 +320,9 @@ class Sim(s3_emu.Emulator):
         self.clock = time.monotonic()
         self.loss, self.dup = args.stream_loss, args.stream_dup
         self.mic_frame_offset, self.clicks = args.mic_frame_offset, args.clicks
+        for s, path in zip(self.streams, (args.play_call, args.play_mic)):
+            if path:
+                s.play = read_play(path)
         self.rnd_stream = random.Random(11)
         self.console = LyratConsole(self)
         self.lyrat_reboot_at = None
@@ -690,6 +709,8 @@ def main(argv=None):
     ap.add_argument("--upd-scale", type=float, default=20.0,
                     help="the updater's clock runs this much faster: 10 s window in 0.5 s (goal 096)")
     ap.add_argument("--lyrat-silent", action="store_true", help="no frames from the LyraT: the S3 keeps its TX off")
+    ap.add_argument("--play-call", help="WAV 16 kHz 16 bit (first channel) played on the call line in a loop (goal 101)")
+    ap.add_argument("--play-mic", help="WAV 16 kHz 16 bit (first channel) played on the mic line in a loop (goal 101)")
     args = ap.parse_args(argv)
     tmp = None
     if not args.s3_image or not args.lyrat_image:

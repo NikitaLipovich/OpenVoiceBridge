@@ -235,9 +235,16 @@ def lyrat_over_network(timeout=5.0):
         ch.close()
 
 
+def simulated_bench():
+    """The S3 is the simulator on this PC (BENCH_S3_ADDR on loopback, the tests). A tool of the real bench running beside
+    it shares nothing with it but the stream's UDP ports, which bench_busy checks on their own (goal 101, #001)."""
+    addr = os.environ.get("BENCH_S3_ADDR", "").strip().lower()
+    return addr.startswith("127.") or addr == "localhost"
+
+
 def bench_busy(step, need_lyrat=True, need_udp=True):
     """A message if something else holds the bench, otherwise None. Nothing here stops anything."""
-    procs = other_bench_processes()
+    procs = [] if simulated_bench() else other_bench_processes()
     if procs is None:
         return "список процессов не читается, занятость стенда неизвестна"
     if procs:

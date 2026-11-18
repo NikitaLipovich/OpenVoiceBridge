@@ -396,6 +396,24 @@ class Stages(unittest.TestCase):
         finally:
             os.environ["BENCH_S3_ADDR"] = "127.0.0.1"
 
+    def test_real_bench_tool_does_not_hold_the_simulator(self):
+        """Goal 101 #001: a poller of the real bench (s3_uart.py query to the board over Wi-Fi) running beside the tests
+        must not make a run against the simulator refuse; the real bench still sees it."""
+        with_sim_addr()
+        import owner_common as oc
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "s3_uart.py", "query"])
+        try:
+            time.sleep(0.5)
+            self.assertIsNone(oc.bench_busy(None, need_lyrat=False, need_udp=False))
+            os.environ["BENCH_S3_ADDR"] = "192.0.2.1"
+            try:
+                self.assertIn("s3_uart.py", oc.bench_busy(None, need_lyrat=False, need_udp=False) or "")
+            finally:
+                os.environ["BENCH_S3_ADDR"] = "127.0.0.1"
+        finally:
+            p.kill()
+            p.wait()
+
 
 class LossyCall(unittest.TestCase):
     """A conversation's streams over a lossy network: each loss is silence of its length at its frame, and counted."""
