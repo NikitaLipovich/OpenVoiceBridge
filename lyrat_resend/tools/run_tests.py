@@ -110,6 +110,11 @@ CHECKS = [
                  "language the same in Python, the page's JS (node) and the phone's Java (JVM), the page renders against "
                  "benchd + simulator, the LAN token, UDP discovery",
      unittest_cmd("test_bench_ui"), TESTS, 900, "base", True),
+    ("bench_find", "the phone finds benchd and the S3 itself (goal 105): the phone's Java (JVM) against real benchd "
+                   "processes - signed answer, foreign and old services not taken, cache only a hint, another port found "
+                   "anew - and direct mode against the simulator (UQ, log by LOG1/LOG0, UC, UX), its status = s3_direct.py, "
+                   "log parsing = udplog, every write to the S3 only in direct mode",
+     unittest_cmd("test_bench_find"), TESTS, 600, "base", False),
     ("platform_rom", "platform: ROM loader in C against the esptool protocol model",
      [PY, "test_rom.py"], PLATFORM, 900, "base", False),
     ("platform_tools", "platform: platform_ota.py and udplog.py against the U3 emulator",

@@ -12,9 +12,18 @@ test on the simulator beside a running bench service stays on its simulator.
 
 As a module: info(), s3_addr(), log_endpoint(host), call(method, path, body), lock_state(), my_lock(state),
 acquire(owner, ...), release(...), renew(...), pid_alive(pid), Lock (a context manager).
+
+Discovery on the LAN (goal 105): the phone (and find_lan() here) sends "BENCHD? 2 <nonce>" by broadcast to
+DISCOVERY_PORT or asks GET /api/whoami?nonce=<nonce>; benchd answers with disc_answer(): its id, name and HTTP port
+signed with HMAC-SHA256 keyed by the LAN token (disc_sig), so a client that holds the token knows its own service
+without the token ever being sent. verify_answer() is the reference of BenchFind.java on the phone.
 """
+import hashlib
+import hmac
 import json
 import os
+import re
+import socket
 import sys
 import time
 import urllib.error
@@ -27,6 +36,8 @@ from benchlib import RUNS_ROOT, bench_port  # noqa: E402
 HTTP_PORT = 5080
 RELAY_PORT = 5081
 DISCOVERY_PORT = 5082       # benchd --lan answers 'BENCHD?' here (goal 104)
+DISC_PROTO = 2              # "BENCHD? 2 <nonce>", signed answer (goal 105)
+NONCE_RE = r"[0-9a-f]{16,64}"
 CACHE_S = 10.0
 _cache = {"at": None, "info": None, "key": None}
 
@@ -213,3 +224,98 @@ class Lock:
             os.environ.pop("BENCH_LOCK_TOKEN", None)
             os.environ.pop("BENCH_LOCK_OWNER", None)
             self.token = None
+
+
+# --- discovery on the LAN (goal 105) ---------------------------------------------------------------------------------
+
+def disc_id(token):
+    """The id of a benchd instance: the first 12 hex of HMAC-SHA256(token, "benchd-id"); "" without a token."""
+    if not token:
+        return ""
+    return hmac.new(token.encode("utf-8"), b"benchd-id", hashlib.sha256).hexdigest()[:12]
+
+
+def disc_message(nonce, inst_id, http_port, control, name):
+    return "benchd-disc|%d|%s|%s|%d|%d|%s" % (DISC_PROTO, nonce, inst_id, int(http_port), 1 if control else 0, name)
+
+
+def disc_sig(token, nonce, inst_id, http_port, control, name):
+    return hmac.new(token.encode("utf-8"), disc_message(nonce, inst_id, http_port, control, name).encode("utf-8"),
+                    hashlib.sha256).hexdigest()
+
+
+def disc_answer(token, nonce, http_port, control, name, version):
+    """The answer of benchd to "BENCHD? 2 <nonce>" and to /api/whoami: signed when the service has a token."""
+    inst = disc_id(token)
+    out = {"benchd": 1, "proto": DISC_PROTO, "version": version, "http_port": int(http_port), "control": bool(control),
+           "id": inst, "name": name, "nonce": nonce}
+    if token:
+        out["sig"] = disc_sig(token, nonce, inst, http_port, control, name)
+    return out
+
+
+def parse_request(data):
+    """The nonce of a "BENCHD? 2 <nonce>" request; "" for the old "BENCHD?" of goal 104; None for anything else."""
+    text = data.decode("ascii", "replace").strip()
+    if text == "BENCHD?":
+        return ""
+    parts = text.split()
+    if len(parts) == 3 and parts[0] == "BENCHD?" and parts[1] == str(DISC_PROTO) and re.fullmatch(NONCE_RE, parts[2]):
+        return parts[2]
+    return None
+
+
+def verify_answer(ans, token, nonce):
+    """'ok', 'unsigned', 'old' (goal 104's answer to the plain "BENCHD?"), 'bad_sig', 'wrong_nonce' or 'not_benchd'
+    (the same verdicts as BenchFind.verify on the phone)."""
+    if not isinstance(ans, dict) or ans.get("benchd") != 1 or not isinstance(ans.get("http_port"), int)             or isinstance(ans.get("http_port"), bool):
+        return "not_benchd"
+    if not isinstance(ans.get("proto"), int) and ans.get("nonce") is None:
+        return "old"
+    if ans.get("nonce") != nonce:
+        return "wrong_nonce"
+    if not ans.get("sig"):
+        return "unsigned"
+    if not token:
+        return "unsigned"
+    want = disc_sig(token, nonce, str(ans.get("id", "")), ans["http_port"], bool(ans.get("control")), str(ans.get("name", "")))
+    return "ok" if hmac.compare_digest(want, str(ans["sig"])) else "bad_sig"
+
+
+def find_lan(token, ports=(None,), timeout=1.2, sends=3, targets=("255.255.255.255",)):
+    """Every benchd that answers a broadcast round, as [{addr, ms, verdict, answer}] (the PC's own way to see what the
+    phone sees). ports: discovery ports (None: DISCOVERY_PORT moved by BENCH_PORT_OFFSET)."""
+    nonce = os.urandom(16).hex()
+    req = ("BENCHD? %d %s" % (DISC_PROTO, nonce)).encode("ascii")
+    ports = [p or bench_port(DISCOVERY_PORT) for p in ports]
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    s.bind(("", 0))
+    t0 = time.monotonic()
+    found = {}
+    try:
+        for k in range(sends):
+            for port in ports:
+                for t in targets:
+                    try:
+                        s.sendto(req, (t, port))
+                    except OSError:
+                        pass
+            end = t0 + (k + 1) * timeout / sends
+            while time.monotonic() < end:
+                s.settimeout(max(0.01, end - time.monotonic()))
+                try:
+                    data, peer = s.recvfrom(1024)
+                except (socket.timeout, ConnectionResetError):
+                    continue
+                try:
+                    ans = json.loads(data.decode("utf-8"))
+                except ValueError:
+                    continue
+                key = (peer[0], ans.get("http_port") if isinstance(ans, dict) else None)
+                if key not in found:
+                    found[key] = {"addr": peer[0], "ms": round((time.monotonic() - t0) * 1000.0, 1),
+                                  "verdict": verify_answer(ans, token, nonce), "answer": ans}
+    finally:
+        s.close()
+    return list(found.values())

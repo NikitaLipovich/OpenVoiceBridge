@@ -122,6 +122,7 @@ def main():
     env = dict(os.environ, BENCH_S3_ADDR="127.0.0.1", BENCHD_HOME=str(home), BENCH_OTA_TOKEN=ota_token,
                PYTHONIOENCODING="utf-8")
     sim = simproc.Sim()
+    # Goal 105: the app finds benchd by itself; phone-link hands only the token (and this offset's ports).
     d = subprocess.Popen([sys.executable, str(BENCH / "benchd.py"), "--home", str(home), "--poll-s", "1", "--lan",
                           "--lan-control"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     try:
@@ -146,7 +147,9 @@ def main():
         svc = by_desc(nodes, "svc")
         check("service line", svc and svc["text"].startswith("служба: pid %s" % run["pid"]), svc and svc["text"])
         conn = by_desc(nodes, "conn")
-        check("no network error", conn is not None and conn["text"] == "", conn and conn["text"])
+        # Goal 105: the app finds the PC itself; the line says where.
+        check("found the PC by itself", conn is not None and conn["text"].startswith("найден ПК")
+              and ":%d (" % run["http_port"] in conn["text"], conn and conn["text"])
         lan = by_desc(nodes, "f-lan")
         check("LAN control shown as on", lan and lan["text"].startswith("включено"), lan and lan["text"])
         up_before = (by_desc(nodes, "f-s3_addr") or {}).get("text", "")
@@ -188,7 +191,7 @@ def main():
                     phone.tap(give)
                     time.sleep(3)
                 check("lock given back from the phone", not status()["lock"]["holder"])
-        # "Найти ПК": the phone's UDP broadcast "BENCHD?", the test benchd answers (port of the typed address + 2).
+        # "Найти ПК": the phone's UDP broadcast "BENCHD? 2 <nonce>", the test benchd answers signed (goal 105).
         for _ in range(8):
             find = by_text(nodes, "Найти ПК")
             if find:
@@ -200,9 +203,9 @@ def main():
             phone.tap(find)
             time.sleep(4)
             nodes = phone.dump(out / "screen_find.xml")
-            bar = by_desc(nodes, "msg-bar")
-            want = "найден ПК %s:%d" % (r.stdout.split(" at ")[1].split(":")[0], run["http_port"]) if " at " in r.stdout else None
-            check("the phone found the PC by UDP", bar and want and bar["text"] == want, bar and bar["text"])
+            conn = by_desc(nodes, "conn")
+            check("the phone found the PC by UDP", conn and conn["text"].startswith("найден ПК")
+                  and ":%d (поиск в сети)" % run["http_port"] in conn["text"], conn and conn["text"])
         for _ in range(6):
             ev = by_desc(nodes, "feed-events")
             if ev and ev["text"]:

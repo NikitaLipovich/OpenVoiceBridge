@@ -26,7 +26,7 @@ public final class BenchRenderMain implements BenchUi {
     }
 
     @Override
-    public void panel(String id, String title) {
+    public void panel(String id, String title, int via) {
     }
 
     @Override

@@ -13,7 +13,10 @@
   bench.py lock acquire --owner G [--ttl S] [--wait S] [--note TEXT]    prints the token
   bench.py lock renew|release --owner G [--token T]
   bench.py lock run --owner G [--ttl S] [--wait S] [--note TEXT] -- COMMAND...   take the lock, run, give it back
-  bench.py phone-link [--host IP:PORT] [--serial S]   hand the PC's address and the LAN token to the phone app
+  bench.py phone-link [--host IP:PORT] [--forget] [--serial S]
+                                                   hand the LAN token to the phone app; it finds the PC itself (goal 105),
+                                                   --host is only a hint it checks, --forget drops its cached address
+  bench.py phone-logs [--delete] [--serial S]      fetch the logs the phone wrote in direct mode (PC off) over adb
                                                    (sco_probe, screen "Стенд") over adb and open the screen (goal 104)
   bench.py lan-token                               print the LAN token (benchd --lan --lan-control makes it)
 Time: ISO, HH:MM[:SS] today, or -30s/-10m/-2h. --owner defaults to BENCH_LOCK_OWNER, --token to BENCH_LOCK_TOKEN.
@@ -141,6 +144,7 @@ def cmd_lock(args):
 
 SCO_APP = "com.openvoicebridge.scoprobe"
 LINK_PATH = "/sdcard/Android/data/%s/files/bench_link.json" % SCO_APP
+LOGS_PATH = "/sdcard/Android/data/%s/files/direct_logs" % SCO_APP
 
 
 def adb_cmd(serial, *args, timeout=30):
@@ -160,8 +164,10 @@ def pc_address_for(phone_ip):
 
 
 def cmd_phone_link(args):
-    """The PC's address and the LAN token into the app's own files dir (adb push; the app reads it once and deletes it),
-    then the "Стенд" screen opens. Reads the phone's Wi-Fi address only; no setting of the phone is touched (R4)."""
+    """The LAN token into the app's own files dir (adb push; the app reads it once and deletes it), then the "Стенд"
+    screen opens. Since goal 105 no address goes with it: the app finds benchd itself and checks it by a signature with
+    the token; --host IP:PORT is a hint it checks the same way. Ports moved by BENCH_PORT_OFFSET (a test service, the
+    simulator) go with it, so the app looks there. No setting of the phone is touched (R4)."""
     import tempfile
     token_file = bc.home() / "lan_token.txt"
     try:
@@ -169,23 +175,19 @@ def cmd_phone_link(args):
     except OSError:
         print("no LAN token yet: start benchd with --lan --lan-control once (it makes %s)" % token_file, file=sys.stderr)
         return 1
-    host = args.host
-    if not host:
-        r = adb_cmd(args.serial, "shell", "ip -4 addr show wlan0")
-        m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", r.stdout)
-        if r.returncode != 0 or not m:
-            print("the phone's Wi-Fi address is not known (adb: %s); give --host IP:PORT" % (r.stderr.strip() or "no wlan0"),
-                  file=sys.stderr)
-            return 1
-        port = bc.bench_port(bc.HTTP_PORT)
-        try:
-            port = json.loads(bc.run_file().read_text(encoding="utf-8")).get("http_port", port)
-        except (OSError, ValueError):
-            pass
-        host = "%s:%d" % (pc_address_for(m.group(1)), port)
+    link = {"token": token}
+    if args.host:
+        link["hint"] = args.host
+    if args.forget:
+        link["forget"] = True
+    for key, default, given in (("discovery_port", bc.DISCOVERY_PORT, args.discovery_port), ("s3_port", 5006, args.s3_port),
+                                ("log_port", 5008, args.log_port)):
+        port = given or bc.bench_port(default)
+        if port != default:
+            link[key] = port
     with tempfile.TemporaryDirectory() as tmp:
         f = Path(tmp) / "bench_link.json"
-        f.write_text(json.dumps({"host": host, "token": token}), encoding="utf-8")
+        f.write_text(json.dumps(link), encoding="utf-8")
         r = adb_cmd(args.serial, "push", str(f), LINK_PATH)
     if r.returncode != 0:
         print("adb push failed: %s" % (r.stderr.strip() or r.stdout.strip()), file=sys.stderr)
@@ -194,8 +196,33 @@ def cmd_phone_link(args):
     if r.returncode != 0:
         print("am start failed: %s" % r.stderr.strip(), file=sys.stderr)
         return 1
-    print("phone linked to benchd at %s (the token is on the phone, not printed)" % host)
+    extra = ", ".join("%s %s" % (k, v) for k, v in link.items() if k != "token")
+    print("phone linked: the token is on the phone (not printed); it finds the PC itself%s" % (" (" + extra + ")" if extra else ""))
     return 0
+
+
+def cmd_phone_logs(args):
+    """The log files the app wrote in direct mode (goal 105) into goals_harness/bench_runs/phone_logs/<stamp>/ (outside
+    git); --delete removes them from the phone after the copy."""
+    from benchlib import run_dir
+    r = adb_cmd(args.serial, "shell", "ls", LOGS_PATH)
+    names = [n.strip() for n in r.stdout.split() if n.strip().endswith(".log")] if r.returncode == 0 else []
+    if not names:
+        print("no direct-mode logs on the phone (%s)" % (r.stderr.strip() or "empty"))
+        return 0
+    out = run_dir("phone_logs")
+    out.mkdir(parents=True, exist_ok=True)
+    got = 0
+    for n in names:
+        p = adb_cmd(args.serial, "pull", LOGS_PATH + "/" + n, str(out / n), timeout=120)
+        if p.returncode != 0:
+            print("adb pull %s failed: %s" % (n, p.stderr.strip()), file=sys.stderr)
+            continue
+        got += 1
+        if args.delete:
+            adb_cmd(args.serial, "shell", "rm", LOGS_PATH + "/" + n)
+    print(json.dumps({"out": str(out), "files": got, "deleted_on_phone": bool(args.delete)}))
+    return 0 if got == len(names) else 1
 
 
 def main(argv=None):
@@ -247,7 +274,14 @@ def main(argv=None):
     p.add_argument("--timeout", type=float, default=600.0)
     p.add_argument("--note", default="")
     p = sub.add_parser("phone-link")
-    p.add_argument("--host", help="IP:PORT of benchd as the phone sees it (default: this PC's address towards the phone)")
+    p.add_argument("--host", help="IP:PORT of benchd, only a hint the app checks (it finds the PC itself)")
+    p.add_argument("--forget", action="store_true", help="the app drops its cached address of the PC and the S3")
+    p.add_argument("--discovery-port", type=int, help="where the app asks 'BENCHD?' (default 5082 + BENCH_PORT_OFFSET)")
+    p.add_argument("--s3-port", type=int, help="the S3's request port for the app (default 5006 + BENCH_PORT_OFFSET)")
+    p.add_argument("--log-port", type=int, help="the S3's log port for the app (default 5008 + BENCH_PORT_OFFSET)")
+    p.add_argument("--serial", help="adb serial of the phone")
+    p = sub.add_parser("phone-logs")
+    p.add_argument("--delete", action="store_true", help="remove them from the phone after the copy")
     p.add_argument("--serial", help="adb serial of the phone")
     sub.add_parser("lan-token")
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -263,6 +297,8 @@ def main(argv=None):
 
     if args.cmd == "phone-link":
         return cmd_phone_link(args)
+    if args.cmd == "phone-logs":
+        return cmd_phone_logs(args)
     if args.cmd == "lan-token":
         try:
             print((bc.home() / "lan_token.txt").read_text(encoding="utf-8").strip())

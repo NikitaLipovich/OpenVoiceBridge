@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <!-- The "Стенд" screen (goal 104) talks to benchd on the PC over the home Wi-Fi, plain HTTP with a token. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Goal 105: the screen follows the Wi-Fi (NetworkCallback) and ties its sockets to it; a normal permission. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application android:label="SCO Probe" android:allowBackup="false" android:usesCleartextTraffic="true">
         <!-- singleTask: a repeated `am start` lands in onNewIntent of the same activity. -->

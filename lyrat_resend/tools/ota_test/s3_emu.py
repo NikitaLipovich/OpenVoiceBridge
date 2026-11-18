@@ -166,9 +166,10 @@ class Emulator:
         self.verify_until = 0.0
         self.next_status = 0.0
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind(("127.0.0.1", args.port))
+        host = getattr(args, "host", None) or "127.0.0.1"     # s3_sim.py --host 0.0.0.0: reachable from the LAN (goal 105)
+        self.sock.bind((host, args.port))
         self.log = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.log.bind(("127.0.0.1", args.log_port))
+        self.log.bind((host, args.log_port))
         self.log_loss = args.log_loss
         self.log_peer = None
         self.log_until = 0.0

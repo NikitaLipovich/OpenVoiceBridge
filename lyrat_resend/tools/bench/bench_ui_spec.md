@@ -12,7 +12,7 @@
 | `title` | заголовок страницы и экрана |
 | `owner` | имя замка владельца (одно для ПК и телефона: замок общий) |
 | `poll_ms` | `status`, `job` — период опроса `/status` и задания |
-| `texts` | общие тексты рантаймов: `no_service`, `updated`, `lock_other`, `job_started`, `job_state`, `job_running`, `job_ended`, `done`, `refused`, `unknown_route`, `busy` |
+| `texts` | общие тексты рантаймов: `no_service`, `updated`, `lock_other`, `job_started`, `job_state`, `job_running`, `job_ended`, `done`, `refused`, `unknown_route`, `busy`; прямого режима телефона (гоал 105): `direct_header` (шапка по статусу прямого режима), `direct_unavailable`, `direct_done` (`$reply`), `direct_failed` (`$why`), `direct_pc_back` |
 | `header` | шаблон строки службы |
 | `panels` | панели: `id`, `title`, `fields`, `actions` (группа кнопок этой панели), `results: true` — здесь строка ответа и вывод задания |
 | `actions` | действия (кнопки) |
@@ -56,6 +56,13 @@
 | `visible_if` | условия видимости (например, «Режим BT» — только при `bt_mode`) |
 | `available_if`, `unavailable_text` | иначе вместо запроса — этот текст |
 | `result` | `ok`/`fail` — случаи по JSON ответа; без него: 202 → задание, 200 → `texts.done`, иначе `texts.refused` |
+| `via` | через что работает (гоал 105): `["benchd"]` (умолчание), `["s3-direct"]` или оба. `s3-direct` — телефон без ПК, напрямую с S3 |
+| `direct` | у действия с `s3-direct`: `{"op": "uc", "text": команда консоли LyraT (только `{$param.x}`)}`, `{"op": "ux"}` (перезапуск S3), `{"op": "cmd"}` (параметры `target` lyrat/s3 и `cmd`; S3 напрямую — только `query`, `restart`) |
+| `direct_unavailable` | текст кнопки без `s3-direct` в прямом режиме (иначе `texts.direct_unavailable`) |
+
+`via` есть и у панели, ленты и поля (поле по умолчанию — как его панель). В прямом режиме телефон показывает только
+то, где есть `s3-direct`; статус прямого режима — ключи `s3.*`/`lyrat.*` как в `/status` (эталон `s3_direct.py`).
+Веб-страница benchd получает спецификацию без частей, где нет `benchd`. Лента с `s3-direct` — только `tail`.
 
 ## Лента
 
@@ -68,4 +75,5 @@ events: `columns`, `hide_keys`, `bad` (regex типа+action для красно
 (a) сгенерированные файлы = то, что даёт спецификация; (b) маршрут, параметры, варианты, имя `/action` есть в
 `ROUTES`/`ACTIONS` benchd.py, `lan_control` только для `lan`-маршрутов; (c) пути статуса есть в `/status` benchd
 против эмулятора; (d) управляющий маршрут или действие benchd без кнопки — предупреждение (`--strict` — ошибка; маршрут
-без кнопки по делу помечается в benchd `ui_exempt`).
+без кнопки по делу помечается в benchd `ui_exempt`); (e) у действия с `s3-direct` есть `direct` с известной op и её
+параметрами; (f) пути статуса, показываемые в прямом режиме, есть в статусе `s3_direct.py` против эмулятора.

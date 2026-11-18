@@ -5,6 +5,12 @@ import android.app.AlertDialog;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.net.ConnectivityManager;
+import android.net.LinkAddress;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -33,22 +39,26 @@ import com.openvoicebridge.scoprobe.BenchTemplate.Param;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
 import java.net.ConnectException;
-import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.HttpURLConnection;
-import java.net.InetAddress;
+import java.net.Inet4Address;
 import java.net.NoRouteToHostException;
 import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -57,41 +67,58 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
 /**
- * The "Стенд" screen (goal 104): the bench service benchd on the PC, controlled from the phone over the Wi-Fi.
- * What is on it comes from the generated BenchSpec (bench_ui_spec.json, the same spec as benchd's web page); this class
- * is the hand-written runtime: native widgets for the calls of BenchSpec.build(), HTTP to benchd, polling, confirmations,
- * network errors, the PC's address and the LAN token.
+ * The "Стенд" screen (goals 104, 105): the bench service benchd on the PC, controlled from the phone over the Wi-Fi,
+ * and the S3 directly when the PC is off. What is on it comes from the generated BenchSpec (bench_ui_spec.json, the same
+ * spec as benchd's web page); this class is the hand-written runtime.
  *
- * Address and token: typed in, or found ("Найти ПК": UDP "BENCHD?" broadcast, benchd --lan answers), or handed over by
- * `bench.py phone-link` as files/bench_link.json in the app's external files dir (only adb and this app can write it),
- * which is read once and deleted. Kept in the app's private preferences. No intent extra carries the token.
+ * Finding the PC (goal 105, DECISIONS D1-D4): no address is given; BenchFind looks on every start of the screen, after
+ * two failed polls, on a change of the Wi-Fi and by the button: the cached address first (GET /api/whoami with a nonce),
+ * then a broadcast round. Only a service that signs the nonce with the LAN token gets the token; the cache is a hint.
+ * The token comes once from `bench.py phone-link` as files/bench_link.json in the app's external files dir (only adb and
+ * this app can write it), read once and deleted, kept in the private preferences. Sockets and HTTP go over the Wi-Fi
+ * network even when Android's default network is the mobile one.
+ *
+ * Modes (D6): SERVICE - everything through benchd, the phone sends the S3 nothing but UQ (read only, to compare the
+ * address); DIRECT - no benchd answered at all and the S3 did: status by UQ, the log by LOG1 into a file of the app,
+ * the actions with "s3-direct" in the spec by UC/UX, each after a fresh search for benchd (never two masters); NONE.
+ * Every write to the S3 is in DirectRun and sendDirect only.
  */
 public class BenchActivity extends Activity implements BenchUi {
     static final String LINK_FILE = "bench_link.json";
-    private static final int DISCOVERY_PORT = 5082;
+    static final String LOG_DIR = "direct_logs";
+    private static final long LOG_DIR_MAX = 20L * 1024 * 1024;
     private static final int COLOR_OK = Color.rgb(0x18, 0x79, 0x4e);
     private static final int COLOR_WARN = Color.rgb(0xa1, 0x62, 0x07);
     private static final int COLOR_BAD = Color.rgb(0xc2, 0x41, 0x0c);
     private static final int COLOR_MUTE = Color.rgb(0x66, 0x70, 0x7c);
+    private static final long S3_LOOK_MS = 15000;           // UQ broadcast while the service is there (read only)
+    private static final long DIRECT_SEARCH_MS = 5000;      // a search for benchd this often in direct mode
+    private static final int MODE_NONE = 0, MODE_SERVICE = 1, MODE_DIRECT = 2;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService net = Executors.newFixedThreadPool(3);
+    private final SecureRandom rnd = new SecureRandom();
     private SharedPreferences prefs;
     private LinearLayout root;
     private LinearLayout current;          // the panel being built
     private LinearLayout currentRow;
     private EditText hostEdit, tokenEdit;
-    private TextView connView, svcView, updatedView, msgView, jobView, barView;
+    private TextView modeView, connView, s3View, svcView, updatedView, msgView, jobView, barView;
     private final Map<String, Object> vars = new HashMap<>();
     private final List<Field> fields = new ArrayList<>();
     private final Map<String, TextView> fieldViews = new HashMap<>();
+    private final Map<String, View> fieldRows = new HashMap<>();
     private final Map<String, LinearLayout> listViews = new HashMap<>();
+    private final Map<View, Integer> panelVia = new LinkedHashMap<>();
     private final List<Action> actions = new ArrayList<>();
     private final Map<String, View> actionViews = new HashMap<>();
     private final Map<String, Button> actionButtons = new HashMap<>();
+    private final Map<String, Boolean> routeOk = new HashMap<>();
     private final Map<String, View> paramViews = new HashMap<>();
     private final List<Feed> feeds = new ArrayList<>();
     private final Map<String, TextView> feedViews = new HashMap<>();
@@ -103,12 +130,29 @@ public class BenchActivity extends Activity implements BenchUi {
     private String lastJob = null;
     private boolean running = false;
 
+    // finding (main thread only, except the flag)
+    private final AtomicBoolean searching = new AtomicBoolean(false);
+    private int mode = MODE_NONE;
+    private String svcHost;                 // "ip:port" of the service in use
+    private boolean svcVerified;            // it signed our nonce: the token may go there
+    private int failures, pollErrors;
+    private long nextSearchAt, nextS3At;
+    private volatile Network wifi;
+    private volatile String wifiIp;
+    private volatile int wifiPrefix;
+    private ConnectivityManager cm;
+    private ConnectivityManager.NetworkCallback netCallback;
+    private List<String> s3Seen = new ArrayList<>();
+    private Long s3Ms;
+    private DirectRun direct;
+
     // --- life ------------------------------------------------------------------------------------------------------
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         prefs = getSharedPreferences("bench", MODE_PRIVATE);
+        migrate();
         vars.put("device", "телефон");
         vars.put("owner", BenchSpec.OWNER);
         // A fixed line on top for the answer of the last action (the buttons may be far down the page), then the page.
@@ -127,9 +171,10 @@ public class BenchActivity extends Activity implements BenchUi {
         scroll.addView(root);
         frame.addView(scroll, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         setContentView(frame);
+        cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         buildConnection();
         BenchSpec.build(this);
-        importLink();
+        applyMode();
     }
 
     @Override
@@ -137,7 +182,9 @@ public class BenchActivity extends Activity implements BenchUi {
         super.onResume();
         importLink();
         running = true;
-        checkRoutes();
+        watchNetwork();
+        failures = 0;
+        search("экран открыт", false);
         tick.run();
         for (final Feed f : feeds) {
             schedule(f);
@@ -148,6 +195,15 @@ public class BenchActivity extends Activity implements BenchUi {
     protected void onPause() {
         running = false;
         main.removeCallbacksAndMessages(null);
+        stopDirect(null);          // LOG0: the log goes back to whoever asks next; no command leaves without the screen
+        if (netCallback != null) {
+            try {
+                cm.unregisterNetworkCallback(netCallback);
+            } catch (RuntimeException ignored) {
+                // not registered
+            }
+            netCallback = null;
+        }
         super.onPause();
     }
 
@@ -163,8 +219,17 @@ public class BenchActivity extends Activity implements BenchUi {
             if (!running) {
                 return;
             }
-            refreshStatus();
-            refreshJob();
+            long now = System.currentTimeMillis();
+            if (mode == MODE_SERVICE) {
+                refreshStatus();
+                refreshJob();
+                if (now >= nextS3At) {
+                    nextS3At = now + S3_LOOK_MS;
+                    lookS3();
+                }
+            } else if (now >= nextSearchAt) {
+                search(mode == MODE_DIRECT ? "проверка, не включился ли ПК" : "повтор", false);
+            }
             main.postDelayed(this, BenchSpec.POLL_STATUS_MS);
         }
     };
@@ -176,33 +241,154 @@ public class BenchActivity extends Activity implements BenchUi {
                 if (!running) {
                     return;
                 }
-                refreshFeed(f);
+                if (mode == MODE_SERVICE && (f.via & BenchTemplate.VIA_BENCHD) != 0) {
+                    refreshFeed(f);
+                }
                 main.postDelayed(this, f.pollMs);
             }
         }, 300);
     }
 
-    // --- connection: address, token, finding the PC ----------------------------------------------------------------
+    // --- the Wi-Fi network ------------------------------------------------------------------------------------------
+
+    /** Sockets and HTTP on the Wi-Fi (not on the mobile network that Android may prefer when the Wi-Fi has no internet). */
+    private BenchFind.Binder binder() {
+        final Network n = wifi;
+        if (n == null) {
+            return BenchFind.SYSTEM;
+        }
+        return new BenchFind.Binder() {
+            @Override
+            public void bind(DatagramSocket s) throws IOException {
+                n.bindSocket(s);
+            }
+
+            @Override
+            public HttpURLConnection open(URL url) throws IOException {
+                return (HttpURLConnection) n.openConnection(url);
+            }
+        };
+    }
+
+    private final Runnable networkChanged = new Runnable() {
+        @Override
+        public void run() {
+            if (!running) {
+                return;
+            }
+            failures = 0;
+            if (wifi == null) {
+                stopDirect("нет Wi-Fi: телефон не в сети ПК");
+                setMode(MODE_NONE);
+                show(connView, "нет Wi-Fi: телефон не в сети ПК и S3", COLOR_BAD);
+                return;
+            }
+            search("сменилась сеть", false);
+        }
+    };
+
+    private void watchNetwork() {
+        if (netCallback != null) {
+            return;
+        }
+        netCallback = new ConnectivityManager.NetworkCallback() {
+            private String key = "";
+
+            @Override
+            public void onLinkPropertiesChanged(Network n, LinkProperties lp) {
+                String ip = null;
+                int prefix = 0;
+                for (LinkAddress la : lp.getLinkAddresses()) {
+                    if (la.getAddress() instanceof Inet4Address) {
+                        ip = la.getAddress().getHostAddress();
+                        prefix = la.getPrefixLength();
+                    }
+                }
+                boolean changed = wifi == null || !wifi.equals(n) || !(n + "/" + ip).equals(key);
+                wifi = n;
+                wifiIp = ip;
+                wifiPrefix = prefix;
+                key = n + "/" + ip;
+                if (changed) {
+                    main.removeCallbacks(networkChanged);
+                    main.postDelayed(networkChanged, 1000);        // one search for a burst of events
+                }
+            }
+
+            @Override
+            public void onLost(Network n) {
+                if (n.equals(wifi)) {
+                    wifi = null;
+                    wifiIp = null;
+                    key = "";
+                    main.removeCallbacks(networkChanged);
+                    main.postDelayed(networkChanged, 1000);
+                }
+            }
+        };
+        try {
+            cm.registerNetworkCallback(new NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .build(), netCallback);
+        } catch (RuntimeException e) {
+            netCallback = null;
+            say("сеть не отслеживается: " + e.getMessage());
+        }
+    }
+
+    private List<String> broadcastTargets() {
+        List<String> t = new ArrayList<>();
+        t.add("255.255.255.255");
+        String sub = BenchFind.subnetBroadcast(wifiIp, wifiPrefix);
+        if (sub != null) {
+            t.add(sub);
+        }
+        return t;
+    }
+
+    // --- connection: token, hints, the cache ----------------------------------------------------------------------
 
     private void buildConnection() {
         TextView title = text(BenchSpec.TITLE, 20, true);
         root.addView(title);
+        modeView = text("ищу ПК…", 14, true);
+        modeView.setContentDescription("mode");
+        root.addView(modeView);
+        connView = text("", 13, false);
+        connView.setContentDescription("conn");
+        root.addView(connView);
+        s3View = text("", 13, false);
+        s3View.setContentDescription("s3line");
+        root.addView(s3View);
         LinearLayout row = hbox();
-        hostEdit = new EditText(this);
-        hostEdit.setHint("адрес ПК: IP:5080");
-        hostEdit.setSingleLine(true);
-        hostEdit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        hostEdit.setText(prefs.getString("host", ""));
-        hostEdit.setContentDescription("host");
-        row.addView(hostEdit, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         Button find = button("Найти ПК", false);
+        find.setContentDescription("find");
         find.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                discover();
+                failures = 0;
+                search("кнопка", true);
             }
         });
         row.addView(find);
+        Button refresh = button("Обновить", false);
+        refresh.setContentDescription("refresh");
+        refresh.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                refreshNow();
+            }
+        });
+        row.addView(refresh);
+        root.addView(row);
+        // The way back when nothing is found: an address typed by hand (checked the same way) and the token.
+        row = hbox();
+        hostEdit = new EditText(this);
+        hostEdit.setHint("адрес ПК вручную, если не находится: IP:5080");
+        hostEdit.setSingleLine(true);
+        hostEdit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        hostEdit.setText(prefs.getString("hint", ""));
+        hostEdit.setContentDescription("host");
+        row.addView(hostEdit, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         root.addView(row);
         row = hbox();
         tokenEdit = new EditText(this);
@@ -216,32 +402,27 @@ public class BenchActivity extends Activity implements BenchUi {
         save.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                saveConnection(hostEdit.getText().toString().trim(), tokenEdit.getText().toString().trim());
-                say("адрес и токен сохранены");
-                refreshNow();
+                String typed = hostEdit.getText().toString().trim();
+                if (!typed.isEmpty() && BenchFind.hostPort(typed) == null) {
+                    say("адрес не понят: нужно IP или IP:порт");
+                    return;
+                }
+                prefs.edit().putString("hint", typed).putString("token", tokenEdit.getText().toString().trim()).apply();
+                say("сохранено, проверяю");
+                failures = 0;
+                search("введён адрес", false);
             }
         });
         row.addView(save);
-        Button refresh = button("Обновить", false);
-        refresh.setContentDescription("refresh");
-        refresh.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                refreshNow();
-            }
-        });
-        row.addView(refresh);
         root.addView(row);
-        connView = text("", 13, false);
-        connView.setTextColor(COLOR_BAD);
-        connView.setContentDescription("conn");
-        root.addView(connView);
     }
 
-    private void saveConnection(String host, String token) {
-        prefs.edit().putString("host", host).putString("token", token).apply();
-        hostEdit.setText(host);
-        tokenEdit.setText(token);
+    /** The address of goal 104 ("host") becomes a hint: it is checked like the cache, never trusted. */
+    private void migrate() {
+        String old = prefs.getString("host", null);
+        if (old != null) {
+            prefs.edit().remove("host").putString("hint", old).apply();
+        }
     }
 
     /** files/bench_link.json from `bench.py phone-link`: read once, kept in the preferences, the file deleted. */
@@ -253,11 +434,31 @@ public class BenchActivity extends Activity implements BenchUi {
         }
         try (InputStream in = new FileInputStream(f)) {
             Object o = MiniJson.parse(new String(readAll(in), StandardCharsets.UTF_8));
-            Object host = BenchTemplate.resolve("host", o, null), token = BenchTemplate.resolve("token", o, null);
-            if (host instanceof String) {
-                saveConnection((String) host, token instanceof String ? (String) token : "");
-                say("адрес и токен получены с ПК");
+            if (!(o instanceof Map)) {
+                throw new IllegalArgumentException("not an object");
             }
+            Map<?, ?> m = (Map<?, ?>) o;
+            SharedPreferences.Editor e = prefs.edit();
+            if (m.get("token") instanceof String) {
+                e.putString("token", (String) m.get("token"));
+                tokenEdit.setText((String) m.get("token"));
+            }
+            Object hint = m.get("hint") != null ? m.get("hint") : m.get("host");      // "host": a link file of 104
+            e.putString("hint", hint instanceof String ? (String) hint : "");
+            hostEdit.setText(hint instanceof String ? (String) hint : "");
+            if (Boolean.TRUE.equals(m.get("forget"))) {
+                e.remove("cache").remove("s3_cache");
+            }
+            for (String k : new String[]{"discovery_port", "s3_port", "log_port"}) {
+                if (m.get(k) instanceof Long) {
+                    e.putInt(k, ((Long) m.get(k)).intValue());
+                } else {
+                    e.remove(k);
+                }
+            }
+            e.apply();
+            say("связь с ПК получена: " + (m.get("token") instanceof String ? "токен" : "без токена")
+                    + (Boolean.TRUE.equals(m.get("forget")) ? ", кэш адреса забыт" : ""));
         } catch (IOException | RuntimeException e) {
             say("файл связи с ПК не прочитан: " + e.getMessage());
         } finally {
@@ -267,22 +468,185 @@ public class BenchActivity extends Activity implements BenchUi {
         }
     }
 
-    private void discover() {
-        say("ищу службу benchd в сети…");
-        final String typed = hostEdit.getText().toString().trim();
+    private String token() {
+        return prefs.getString("token", "");
+    }
+
+    private Map<?, ?> cache() {
+        try {
+            Object o = MiniJson.parse(prefs.getString("cache", "null"));
+            return o instanceof Map ? (Map<?, ?>) o : null;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private int port(String key, int def) {
+        int p = prefs.getInt(key, 0);
+        return p > 0 ? p : def;
+    }
+
+    // --- the search ------------------------------------------------------------------------------------------------
+
+    /** One search for benchd (and the S3) in a worker; the result goes to found(). Never two at once. */
+    private void search(final String why, final boolean skipHints) {
+        if (!searching.compareAndSet(false, true)) {
+            return;
+        }
+        if (mode != MODE_SERVICE) {
+            show(modeView, "ищу ПК… (" + why + ")", COLOR_MUTE);
+        }
+        final BenchFind.Config cfg = config(skipHints);
+        final BenchFind.Binder b = binder();
+        final List<String> s3Targets = s3Targets();
+        final int s3Port = port("s3_port", S3Direct.TAP_PORT);
         net.execute(new Runnable() {
             @Override
             public void run() {
-                final String found = broadcastFind(typed);
+                BenchFind.Result r;
+                List<S3Direct.Seen> s3 = null;
+                try {
+                    r = BenchFind.find(b, cfg, rnd);
+                    if (r.chosen == null && direct == null) {
+                        s3 = S3Direct.find(b, s3Targets, s3Port, 3, 900);
+                    }
+                } finally {
+                    searching.set(false);
+                }
+                final BenchFind.Result fr = r;
+                final List<S3Direct.Seen> fs3 = s3;
                 main.post(new Runnable() {
                     @Override
                     public void run() {
-                        if (found == null) {
-                            say("ПК не найден: benchd запущен с --lan? та же Wi-Fi? брандмауэр пускает UDP " + DISCOVERY_PORT + "?");
-                        } else {
-                            saveConnection(found, tokenEdit.getText().toString().trim());
-                            say("найден ПК " + found);
-                            refreshNow();
+                        found(fr, fs3, cfg);
+                    }
+                });
+            }
+        });
+    }
+
+    private BenchFind.Config config(boolean skipHints) {
+        BenchFind.Config cfg = new BenchFind.Config();
+        cfg.token = token();
+        Map<?, ?> c = cache();
+        if (c != null && c.get("host") instanceof String && c.get("port") instanceof Long) {
+            cfg.cacheHost = c.get("host") + ":" + c.get("port");
+            cfg.cacheId = c.get("id") instanceof String ? (String) c.get("id") : null;
+            cfg.hints.add(cfg.cacheHost);
+        }
+        String hint = BenchFind.hostPort(prefs.getString("hint", ""));
+        if (hint != null && !cfg.hints.contains(hint)) {
+            cfg.hints.add(hint);
+        }
+        cfg.ports.add(port("discovery_port", BenchFind.DISCOVERY_PORT));
+        cfg.targets.addAll(broadcastTargets());
+        cfg.skipHints = skipHints;
+        return cfg;
+    }
+
+    private List<String> s3Targets() {
+        List<String> t = broadcastTargets();
+        String cached = prefs.getString("s3_cache", "");
+        if (!cached.isEmpty()) {
+            t.add(cached);
+        }
+        Object svc = BenchTemplate.resolve("s3.addr", status, null);
+        if (mode == MODE_SERVICE && svc instanceof String && !t.contains(svc)) {
+            t.add((String) svc);
+        }
+        return t;
+    }
+
+    private void found(BenchFind.Result r, List<S3Direct.Seen> s3, BenchFind.Config cfg) {
+        if (!running) {
+            return;
+        }
+        if (s3 != null) {
+            noteS3(s3);
+        }
+        if (r.chosen != null) {
+            boolean wasDirect = direct != null;
+            stopDirect(null);
+            BenchFind.Answer a = r.chosen;
+            svcHost = a.hostPort();
+            svcVerified = BenchFind.OK.equals(a.verdict);
+            Map<String, Object> c = new LinkedHashMap<>();
+            c.put("host", a.addr);
+            c.put("port", (long) a.httpPort);
+            c.put("id", a.id);
+            c.put("name", a.name);
+            c.put("t_ms", System.currentTimeMillis());
+            c.put("via", a.via);
+            prefs.edit().putString("cache", BenchTemplate.jsonStr(c)).apply();
+            failures = 0;
+            pollErrors = 0;
+            setMode(MODE_SERVICE);
+            show(connView, r.line, svcVerified ? COLOR_OK : COLOR_WARN);
+            if (wasDirect) {
+                say(BenchSpec.text("direct_pc_back"));
+            }
+            nextS3At = 0;
+            refreshNow();
+            return;
+        }
+        failures++;
+        // Any benchd that answered (unconfirmed, old, foreign) means a PC is on: never two masters of the S3 (D6).
+        boolean pcOn = r.pcPresent();
+        if (pcOn) {
+            stopDirect("в сети отвечает служба benchd (не подтверждена) — напрямую не работаю");
+        }
+        show(connView, r.line, COLOR_BAD);
+        if (!pcOn && direct == null && s3 != null && !s3.isEmpty()) {
+            startDirect(s3.get(0).addr);
+        }
+        nextSearchAt = System.currentTimeMillis() + (direct != null ? DIRECT_SEARCH_MS : BenchFind.backoffMs(failures));
+        if (direct == null) {
+            setMode(MODE_NONE);
+            show(modeView, "ПК не найден — повтор через " + (nextSearchAt - System.currentTimeMillis()) / 1000
+                    + " с; кнопка «Найти ПК» — сейчас", COLOR_BAD);
+        }
+    }
+
+    private void noteS3(List<S3Direct.Seen> s3) {
+        s3Seen = new ArrayList<>();
+        s3Ms = null;
+        for (S3Direct.Seen x : s3) {
+            s3Seen.add(x.addr);
+            if (s3Ms == null) {
+                s3Ms = x.ms;
+            }
+        }
+        if (!s3Seen.isEmpty()) {
+            prefs.edit().putString("s3_cache", s3Seen.get(0)).apply();
+        }
+        showS3();
+    }
+
+    private void showS3() {
+        if (mode == MODE_DIRECT) {
+            return;
+        }
+        Object addr = BenchTemplate.resolve("s3.addr", status, null);
+        Object fnd = BenchTemplate.resolve("s3.found", status, null);
+        String[] tc = S3Direct.compare(s3Seen, addr instanceof String ? (String) addr : null,
+                mode == MODE_SERVICE && status != null ? Boolean.valueOf(Boolean.TRUE.equals(fnd)) : null, s3Ms);
+        show(s3View, tc[0], color(tc[1]));
+    }
+
+    /** UQ broadcast while the service is there: read only, to compare the S3's address with /status (D5). */
+    private void lookS3() {
+        final BenchFind.Binder b = binder();
+        final List<String> targets = s3Targets();
+        final int port = port("s3_port", S3Direct.TAP_PORT);
+        net.execute(new Runnable() {
+            @Override
+            public void run() {
+                final List<S3Direct.Seen> s3 = S3Direct.find(b, targets, port, 3, 900);
+                main.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (running) {
+                            noteS3(s3);
                         }
                     }
                 });
@@ -290,40 +654,245 @@ public class BenchActivity extends Activity implements BenchUi {
         });
     }
 
-    /** "host:port" of the first benchd that answers "BENCHD?", or null. Also asks the port beside a typed one. */
-    private static String broadcastFind(String typed) {
-        try (DatagramSocket s = new DatagramSocket()) {
-            s.setBroadcast(true);
-            s.setSoTimeout(2500);
-            byte[] q = "BENCHD?".getBytes(StandardCharsets.US_ASCII);
-            InetAddress all = InetAddress.getByName("255.255.255.255");
-            List<Integer> ports = new ArrayList<>();
-            ports.add(DISCOVERY_PORT);
-            int colon = typed.lastIndexOf(':');
-            if (colon > 0) {
-                try {
-                    int http = Integer.parseInt(typed.substring(colon + 1));
-                    if (http != 5080) {
-                        ports.add(http + 2);     // a benchd on a port offset answers there (5080 -> 5082)
+    // --- modes -----------------------------------------------------------------------------------------------------
+
+    private void setMode(int m) {
+        boolean changed = m != mode;
+        mode = m;
+        if (m == MODE_SERVICE) {
+            show(modeView, "через службу на ПК " + svcHost + (svcVerified ? "" : " — только просмотр (не подтверждена)"),
+                    svcVerified ? COLOR_OK : COLOR_WARN);
+        } else if (m == MODE_DIRECT) {
+            show(modeView, "напрямую с S3 " + (direct == null ? "" : direct.addr) + " — ПК не найден", COLOR_WARN);
+        }
+        if (changed) {
+            status = null;
+            applyMode();
+        }
+    }
+
+    /** Panels, fields, feeds and buttons of the current mode (the "via" of the spec). */
+    private void applyMode() {
+        int bit = mode == MODE_DIRECT ? BenchTemplate.VIA_DIRECT : BenchTemplate.VIA_BENCHD;
+        for (Map.Entry<View, Integer> e : panelVia.entrySet()) {
+            e.getKey().setVisibility((e.getValue() & bit) != 0 ? View.VISIBLE : View.GONE);
+        }
+        for (Field f : fields) {
+            View row = f.list != null ? listViews.get(f.id) : fieldRows.get(f.id);
+            if (row != null) {
+                row.setVisibility((f.via & bit) != 0 ? View.VISIBLE : View.GONE);
+            }
+        }
+        for (Action a : actions) {
+            Button b = actionButtons.get(a.id);
+            boolean can = (a.via & bit) != 0;
+            b.setAlpha(can ? 1f : 0.4f);
+            b.setEnabled(mode == MODE_DIRECT || !Boolean.FALSE.equals(routeOk.get(a.id)));
+        }
+        for (Feed f : feeds) {
+            if ("tail".equals(f.kind)) {
+                feedLines.put(f.id, new ArrayList<String>());
+                feedAfter.put(f.id, 0L);
+                feedViews.get(f.id).setText("");
+            }
+        }
+    }
+
+    private void startDirect(String addr) {
+        direct = new DirectRun(addr, port("s3_port", S3Direct.TAP_PORT), port("log_port", S3Direct.LOG_PORT));
+        setMode(MODE_DIRECT);
+        show(s3View, "S3 " + addr + " найдена, работаю напрямую (лог пишется в файл приложения)", COLOR_WARN);
+        new Thread(direct, "bench-direct").start();
+    }
+
+    /** Ends direct mode: LOG0 to the S3, the log file closed. why: a line for the screen, or null. */
+    private void stopDirect(String why) {
+        if (direct == null) {
+            return;
+        }
+        direct.stop = true;
+        direct = null;
+        if (mode == MODE_DIRECT) {
+            mode = MODE_NONE;
+            applyMode();
+        }
+        if (why != null) {
+            say(why);
+        }
+    }
+
+    private interface DirectJob {
+        void run(S3Direct.Link link) throws IOException;
+    }
+
+    /**
+     * Direct mode in its own thread: the only place that talks to the S3 beyond UQ. Every 2 s LOG1 (the S3's log lease is
+     * 10 s) and UQ; between them the log datagrams, into the screen and a file; the jobs of sendDirect in between.
+     */
+    private final class DirectRun implements Runnable {
+        final String addr;
+        final int tap, logPort;
+        volatile boolean stop;
+        final LinkedBlockingQueue<DirectJob> jobs = new LinkedBlockingQueue<>();
+
+        DirectRun(String addr, int tap, int logPort) {
+            this.addr = addr;
+            this.tap = tap;
+            this.logPort = logPort;
+        }
+
+        @Override
+        public void run() {
+            final DirectRun self = this;
+            S3Direct.State st = new S3Direct.State(addr, S3Direct.LOST_MS);
+            SimpleDateFormat iso = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", Locale.ROOT);
+            Writer file = null;
+            final File path = logFile();
+            try (S3Direct.Link link = new S3Direct.Link(binder(), addr, tap, logPort)) {
+                file = path == null ? null : new OutputStreamWriter(new FileOutputStream(path, true), StandardCharsets.UTF_8);
+                long nextLease = 0, nextUq = 0, lastLine = System.currentTimeMillis(), nextHurry = 0;
+                while (!stop) {
+                    long now = System.currentTimeMillis();
+                    if (now >= nextLease) {
+                        link.logLease(3, 3);
+                        nextLease = now + S3Direct.LEASE_REPEAT_MS;
                     }
-                } catch (NumberFormatException ignored) {
-                    // a typed address without a port
+                    if (now >= nextUq) {
+                        long t0 = System.currentTimeMillis();
+                        Map<?, ?> q = link.query();
+                        long t1 = System.currentTimeMillis();
+                        if (q != null) {
+                            st.feedUq(q, t1, t1 - t0, iso.format(new Date()));
+                        }
+                        nextUq = t1 + 2000;
+                        final Map<String, Object> s = st.status(t1);
+                        s.put("direct", directInfo(path, st));
+                        main.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (direct == self) {
+                                    renderStatus(s);
+                                }
+                            }
+                        });
+                        // The log quiet for 3 s while the S3 answers: somebody (benchd starting?) took it. Look now.
+                        if (q != null && now - lastLine > 3000 && now >= nextHurry) {
+                            nextHurry = now + 5000;
+                            main.post(new Runnable() {
+                                @Override
+                                public void run() {
+                                    if (direct == self) {
+                                        search("лог S3 замолчал", false);
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    DirectJob job = jobs.poll();
+                    if (job != null && !stop) {
+                        job.run(link);
+                    }
+                    final List<String> lines = new ArrayList<>();
+                    for (S3Direct.Rec r : link.readLog(150, st)) {
+                        st.feedLine(S3Direct.boardName(r.board), r.text, iso.format(new Date()));
+                        lines.add(S3Direct.redact(S3Direct.formatLine(r, new Date())));
+                    }
+                    if (!lines.isEmpty()) {
+                        lastLine = System.currentTimeMillis();
+                        if (file != null) {
+                            for (String l : lines) {
+                                file.write(l);
+                                file.write('\n');
+                            }
+                            file.flush();
+                        }
+                        main.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (direct == self) {
+                                    directLines(lines);
+                                }
+                            }
+                        });
+                    }
+                }
+                link.logStop();
+            } catch (IOException | RuntimeException e) {
+                final String why = e.getClass().getSimpleName() + ": " + e.getMessage();
+                main.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (direct == self) {
+                            stopDirect("прямой режим остановлен: " + why);
+                        }
+                    }
+                });
+            } finally {
+                if (file != null) {
+                    try {
+                        file.close();
+                    } catch (IOException ignored) {
+                        // nothing more to write
+                    }
                 }
             }
-            for (int p : ports) {
-                s.send(new DatagramPacket(q, q.length, all, p));
-            }
-            byte[] buf = new byte[512];
-            DatagramPacket ans = new DatagramPacket(buf, buf.length);
-            s.receive(ans);
-            Object o = MiniJson.parse(new String(ans.getData(), 0, ans.getLength(), StandardCharsets.UTF_8));
-            Object port = BenchTemplate.resolve("http_port", o, null);
-            if (!BenchTemplate.isNum(port)) {
-                return null;
-            }
-            return ans.getAddress().getHostAddress() + ":" + ((Number) port).longValue();
-        } catch (IOException | RuntimeException e) {
+        }
+    }
+
+    private Map<String, Object> directInfo(File path, S3Direct.State st) {
+        Map<String, Object> d = new LinkedHashMap<>();
+        d.put("log_file", path == null ? null : path.getName());
+        d.put("datagrams", st.datagrams);
+        return d;
+    }
+
+    /** A new file for this stretch of direct mode; the oldest go when the folder is above 20 MB. */
+    private File logFile() {
+        File base = getExternalFilesDir(null);
+        if (base == null) {
             return null;
+        }
+        File dir = new File(base, LOG_DIR);
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            return null;
+        }
+        File[] old = dir.listFiles();
+        if (old != null) {
+            Arrays.sort(old);
+            long total = 0;
+            for (File f : old) {
+                total += f.length();
+            }
+            for (int k = 0; k < old.length && total > LOG_DIR_MAX; k++) {
+                total -= old[k].length();
+                if (!old[k].delete()) {
+                    break;
+                }
+            }
+        }
+        return new File(dir, new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(new Date()) + ".log");
+    }
+
+    private void directLines(List<String> lines) {
+        for (Feed f : feeds) {
+            if (!"tail".equals(f.kind) || (f.via & BenchTemplate.VIA_DIRECT) == 0) {
+                continue;
+            }
+            CheckBox pause = feedPause.get(f.id);
+            if (pause != null && pause.isChecked()) {
+                continue;
+            }
+            List<String> keep = feedLines.get(f.id);
+            keep.addAll(lines);
+            int max = Math.min(f.keep, 300);
+            while (keep.size() > max) {
+                keep.remove(0);
+            }
+            StringBuilder sb = new StringBuilder();
+            for (int k = keep.size() - 1; k >= 0; k--) {
+                sb.append(keep.get(k)).append('\n');
+            }
+            feedViews.get(f.id).setText(sb.toString());
         }
     }
 
@@ -342,14 +911,16 @@ public class BenchActivity extends Activity implements BenchUi {
     }
 
     @Override
-    public void panel(String id, String title) {
+    public void panel(String id, String title, int via) {
         current = new LinearLayout(this);
         current.setOrientation(LinearLayout.VERTICAL);
         current.setPadding(0, 24, 0, 8);
         TextView h = text(title.toUpperCase(Locale.ROOT), 13, true);
         h.setTextColor(COLOR_MUTE);
         current.addView(h);
+        current.setContentDescription("p-" + id);
         root.addView(current);
+        panelVia.put(current, via);
         currentRow = null;
     }
 
@@ -372,6 +943,7 @@ public class BenchActivity extends Activity implements BenchUi {
         v.setContentDescription("f-" + f.id);
         row.addView(v, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.2f));
         fieldViews.put(f.id, v);
+        fieldRows.put(f.id, row);
         current.addView(row);
     }
 
@@ -420,7 +992,7 @@ public class BenchActivity extends Activity implements BenchUi {
     @Override
     public void feed(final Feed f) {
         feeds.add(f);
-        panel("feed-" + f.id, f.title);
+        panel("feed-" + f.id, f.title, f.via);
         LinearLayout filters = hbox();
         if (f.params != null) {
             for (Param p : f.params) {
@@ -609,11 +1181,16 @@ public class BenchActivity extends Activity implements BenchUi {
 
     private void renderStatus(Object st) {
         status = st;
-        show(svcView, BenchTemplate.render(headerTemplate, st, vars), 0);
+        boolean dir = mode == MODE_DIRECT;
+        show(svcView, BenchTemplate.render(dir ? BenchSpec.text("direct_header") : headerTemplate, st, vars), 0);
         Map<String, Object> v = new HashMap<>(vars);
         v.put("time", new SimpleDateFormat("HH:mm:ss", Locale.ROOT).format(new Date()));
         show(updatedView, BenchTemplate.render(BenchSpec.text("updated"), st, v), 0);
+        int bit = dir ? BenchTemplate.VIA_DIRECT : BenchTemplate.VIA_BENCHD;
         for (Field f : fields) {
+            if ((f.via & bit) == 0) {
+                continue;
+            }
             if (f.list != null) {
                 LinearLayout box = listViews.get(f.id);
                 Object items = BenchTemplate.resolve(f.list, st, vars);
@@ -644,6 +1221,14 @@ public class BenchActivity extends Activity implements BenchUi {
         for (Action a : actions) {
             actionViews.get(a.id).setVisibility(BenchTemplate.holds(a.visibleIf, st, vars) ? View.VISIBLE : View.GONE);
         }
+        if (dir) {
+            Object addr = BenchTemplate.resolve("s3.addr", st, null), ms = BenchTemplate.resolve("s3.answer_ms", st, null);
+            Object file = BenchTemplate.resolve("direct.log_file", st, null);
+            show(s3View, "S3 " + addr + (ms == null ? " не отвечает на UQ" : ", ответ " + ms + " мс")
+                    + (file == null ? "" : "; лог в файл " + file), ms == null ? COLOR_BAD : COLOR_OK);
+        } else {
+            showS3();
+        }
     }
 
     // --- HTTP --------------------------------------------------------------------------------------------------------
@@ -654,32 +1239,21 @@ public class BenchActivity extends Activity implements BenchUi {
         String error;
     }
 
-    private String base() {
-        String h = prefs.getString("host", "").trim();
-        if (h.isEmpty()) {
-            return null;
-        }
-        if (!h.startsWith("http://")) {
-            h = "http://" + h;
-        }
-        if (h.lastIndexOf(':') <= 5) {
-            h = h + ":5080";
-        }
-        return h;
-    }
-
     /** One request in a worker thread; the reply (or a readable error) on the main thread. */
     private void call(final String method, final String path, final Map<String, Object> body, final Callback cb) {
-        final String b = base();
-        if (b == null) {
-            cb.done(errorReply("нет адреса ПК: введите его, нажмите «Найти ПК» или bench.py phone-link"));
+        if (mode != MODE_SERVICE || svcHost == null) {
+            cb.done(errorReply(mode == MODE_DIRECT ? BenchSpec.text("direct_unavailable")
+                    : "ПК не найден: нажмите «Найти ПК» или введите адрес вручную"));
             return;
         }
-        final String token = prefs.getString("token", "");
+        final String b = "http://" + svcHost;
+        // The token only to a service that signed our nonce with it (D2).
+        final String token = svcVerified ? token() : "";
+        final BenchFind.Binder bind = binder();
         net.execute(new Runnable() {
             @Override
             public void run() {
-                final Reply r = http(b, method, path, body, token);
+                final Reply r = http(bind, b, method, path, body, token);
                 main.post(new Runnable() {
                     @Override
                     public void run() {
@@ -701,11 +1275,12 @@ public class BenchActivity extends Activity implements BenchUi {
         return r;
     }
 
-    private static Reply http(String base, String method, String path, Map<String, Object> body, String token) {
+    private static Reply http(BenchFind.Binder bind, String base, String method, String path, Map<String, Object> body,
+                              String token) {
         String host = base.substring("http://".length());
         HttpURLConnection c = null;
         try {
-            c = (HttpURLConnection) new URL(base + path).openConnection();
+            c = bind.open(new URL(base + path));
             c.setConnectTimeout(3000);
             c.setReadTimeout("POST".equals(method) ? 30000 : 8000);
             c.setRequestMethod(method);
@@ -732,13 +1307,15 @@ public class BenchActivity extends Activity implements BenchUi {
                 r.data = new LinkedHashMap<String, Object>();
             }
             if (r.code == 401) {
-                r.error = "нужен токен управления (или он неверный): bench.py phone-link на ПК, или введите его выше";
+                r.error = token == null || token.isEmpty()
+                        ? "служба не подтвердила токен — команды недоступны (bench.py phone-link на своём ПК)"
+                        : "токен не принят службой: bench.py phone-link на ПК";
             }
             return r;
         } catch (ConnectException e) {
-            return errorReply("служба benchd не запущена на ПК " + host + " (или не с --lan)");
+            return errorReply("служба benchd не отвечает на ПК " + host);
         } catch (SocketTimeoutException | NoRouteToHostException | UnknownHostException e) {
-            return errorReply("ПК " + host + " не отвечает: телефон в той же Wi-Fi? адрес верный? брандмауэр Windows пускает python?");
+            return errorReply("ПК " + host + " не отвечает");
         } catch (IOException | RuntimeException e) {
             return errorReply("сеть: " + e.getClass().getSimpleName() + ": " + e.getMessage());
         } finally {
@@ -761,9 +1338,17 @@ public class BenchActivity extends Activity implements BenchUi {
     // --- polling -----------------------------------------------------------------------------------------------------
 
     private void refreshNow() {
+        if (mode != MODE_SERVICE) {
+            failures = 0;
+            search("кнопка «Обновить»", false);
+            return;
+        }
         checkRoutes();
         refreshStatus();
         for (Feed f : feeds) {
+            if ((f.via & BenchTemplate.VIA_BENCHD) == 0) {
+                continue;
+            }
             if ("events".equals(f.kind)) {
                 refreshFeed(f);
             } else {
@@ -776,12 +1361,21 @@ public class BenchActivity extends Activity implements BenchUi {
         call("GET", "/status", null, new Callback() {
             @Override
             public void done(Reply r) {
-                if (r.error != null || r.code != 200) {
-                    connView.setText(r.error != null ? r.error : BenchSpec.text("no_service") + " (" + r.code + ")");
-                    svcView.setText(BenchSpec.text("no_service"));
+                if (mode != MODE_SERVICE) {
                     return;
                 }
-                show(connView, "", 0);
+                if (r.error != null || r.code != 200) {
+                    show(connView, r.error != null ? r.error : BenchSpec.text("no_service") + " (" + r.code + ")", COLOR_BAD);
+                    svcView.setText(BenchSpec.text("no_service"));
+                    pollErrors++;
+                    if (BenchFind.searchAfterErrors(pollErrors)) {
+                        pollErrors = 0;
+                        setMode(MODE_NONE);
+                        search("служба не отвечает", false);
+                    }
+                    return;
+                }
+                pollErrors = 0;
                 renderStatus(r.data);
             }
         });
@@ -815,7 +1409,7 @@ public class BenchActivity extends Activity implements BenchUi {
         call("GET", "/api/routes", null, new Callback() {
             @Override
             public void done(Reply r) {
-                if (r.error != null || r.code != 200) {
+                if (r.error != null || r.code != 200 || mode != MODE_SERVICE) {
                     return;
                 }
                 List<String> have = new ArrayList<>();
@@ -830,6 +1424,7 @@ public class BenchActivity extends Activity implements BenchUi {
                     Object name = BenchTemplate.resolve("name", MiniJson.parse(a.bodyJson), null);
                     boolean ok = have.contains(a.method + " " + a.endpoint)
                             && (name == null || (names instanceof Map && ((Map<?, ?>) names).containsKey(name)));
+                    routeOk.put(a.id, ok);
                     actionButtons.get(a.id).setEnabled(ok);
                 }
             }
@@ -868,7 +1463,9 @@ public class BenchActivity extends Activity implements BenchUi {
         feedAfter.put(f.id, 0L);
         feedLines.put(f.id, new ArrayList<String>());
         feedViews.get(f.id).setText("");
-        refreshFeed(f);
+        if (mode == MODE_SERVICE) {
+            refreshFeed(f);
+        }
     }
 
     private void refreshFeed(final Feed f) {
@@ -930,7 +1527,7 @@ public class BenchActivity extends Activity implements BenchUi {
         call("GET", query(f, extra), null, new Callback() {
             @Override
             public void done(Reply r) {
-                if (r.error != null) {
+                if (r.error != null || mode != MODE_SERVICE) {
                     return;
                 }
                 Object err = BenchTemplate.resolve("error", r.data, null);
@@ -980,8 +1577,13 @@ public class BenchActivity extends Activity implements BenchUi {
     // --- actions -----------------------------------------------------------------------------------------------------
 
     private void act(final Action a) {
+        boolean dir = mode == MODE_DIRECT;
+        if (dir && (a.via & BenchTemplate.VIA_DIRECT) == 0) {
+            say(a.directUnavailable != null ? a.directUnavailable : BenchSpec.text("direct_unavailable"));
+            return;
+        }
         if (status == null) {
-            say(BenchSpec.text("no_service"));
+            say(mode == MODE_NONE ? "ПК и S3 не найдены" : BenchSpec.text("no_service"));
             return;
         }
         final Map<String, Object> v = new HashMap<>(vars);
@@ -997,6 +1599,15 @@ public class BenchActivity extends Activity implements BenchUi {
         }
         if (a.confirm2 != null) {
             questions.add(BenchTemplate.render(a.confirm2, status, v));
+        }
+        if (dir) {
+            ask(questions, 0, new Runnable() {
+                @Override
+                public void run() {
+                    sendDirect(a, v);
+                }
+            });
+            return;
         }
         final Map<String, Object> body = BenchTemplate.renderBody(a.bodyJson, status, v);
         body.putAll(param);
@@ -1030,6 +1641,98 @@ public class BenchActivity extends Activity implements BenchUi {
                 })
                 .setNegativeButton("Нет", null)
                 .show();
+    }
+
+    /**
+     * An action in direct mode (D6): first a fresh search for benchd - when any benchd answers, nothing is sent to the S3
+     * and the screen goes back to the service; else the command goes into the direct thread (UC / UX / UQ).
+     */
+    private void sendDirect(final Action a, final Map<String, Object> v) {
+        final DirectRun run = direct;
+        if (run == null) {
+            say(BenchSpec.text("direct_unavailable"));
+            return;
+        }
+        final String[] cmd;
+        try {
+            if ("uc".equals(a.directOp)) {
+                cmd = new String[]{"uc", BenchTemplate.render(a.directText, null, v)};
+            } else if ("ux".equals(a.directOp)) {
+                cmd = new String[]{"ux", null};
+            } else if ("cmd".equals(a.directOp)) {
+                Map<?, ?> p = (Map<?, ?>) v.get("param");
+                cmd = S3Direct.directCommand(String.valueOf(p.get("target")), String.valueOf(p.get("cmd")));
+            } else {
+                say("неизвестное действие прямого режима: " + a.directOp);
+                return;
+            }
+        } catch (IllegalArgumentException e) {
+            say(e.getMessage());
+            return;
+        }
+        say("проверяю, не включился ли ПК…");
+        final BenchFind.Config cfg = config(false);
+        final BenchFind.Binder b = binder();
+        net.execute(new Runnable() {
+            @Override
+            public void run() {
+                final BenchFind.Result r = BenchFind.find(b, cfg, rnd);
+                main.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (r.pcPresent() || r.chosen != null) {
+                            say(BenchSpec.text("direct_pc_back"));
+                            found(r, null, cfg);
+                            return;
+                        }
+                        if (direct != run) {
+                            say(BenchSpec.text("direct_unavailable"));
+                            return;
+                        }
+                        say(BenchSpec.text("busy"));
+                        run.jobs.add(new DirectJob() {
+                            @Override
+                            public void run(S3Direct.Link link) throws IOException {
+                                S3Direct.Reply rep;
+                                if ("uq".equals(cmd[0])) {
+                                    Map<?, ?> q = link.query();
+                                    rep = new S3Direct.Reply();
+                                    rep.status = q == null ? -1 : 0;
+                                    rep.text = q == null ? "" : BenchTemplate.jsonStr(q);
+                                } else if ("ux".equals(cmd[0])) {
+                                    rep = link.ux();
+                                } else {
+                                    rep = link.uc(cmd[1]);
+                                }
+                                final S3Direct.Reply fr = rep;
+                                main.post(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        directReply(fr);
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
+            }
+        });
+    }
+
+    private void directReply(S3Direct.Reply r) {
+        Map<String, Object> v = new HashMap<>(vars);
+        if (r.status < 0) {
+            v.put("why", r.text.isEmpty() ? "нет ответа за " + r.attempts + " попыток" : r.text);
+            say(BenchTemplate.render(BenchSpec.text("direct_failed"), null, v));
+            return;
+        }
+        String head = r.status == 0 ? "" : r.status == 1 ? "неизвестная команда: " : r.status == 3
+                ? "линия к LyraT выключена (no_tx): " : "статус " + r.status + ": ";
+        v.put("reply", head + r.text.trim());
+        say(BenchTemplate.render(BenchSpec.text("direct_done"), null, v));
+        if (jobView != null) {
+            jobView.setText(r.text);
+        }
     }
 
     private void send(final Action a, Map<String, Object> body, final Map<String, Object> v) {

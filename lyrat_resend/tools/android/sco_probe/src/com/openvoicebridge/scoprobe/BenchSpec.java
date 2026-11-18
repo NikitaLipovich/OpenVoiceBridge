@@ -16,6 +16,7 @@ final class BenchSpec {
     static final int POLL_STATUS_MS = 2000;
     static final int POLL_JOB_MS = 2000;
     static final String HEADER = "служба: pid {benchd.pid}, работает {benchd.up_s|int} с, строк {benchd.counts.lines}, диск {benchd.disk.log_bytes|mb1} МБ из {benchd.disk.limit_bytes|mb0}";
+    static final String[] DIRECT_OPS = new String[]{"uc", "ux", "cmd"};
 
     private BenchSpec() {
     }
@@ -44,6 +45,16 @@ final class BenchSpec {
                 return "служба benchd старее пульта: нет {$route}";
             case "busy":
                 return "…";
+            case "direct_header":
+                return "напрямую с S3 {s3.addr}: ПК не найден, замка нет — команды идут мимо службы";
+            case "direct_unavailable":
+                return "только через службу на ПК: ПК сейчас не найден";
+            case "direct_done":
+                return "готово (напрямую): {$reply}";
+            case "direct_failed":
+                return "S3 не ответила: {$why}";
+            case "direct_pc_back":
+                return "ПК снова доступен — команда не послана, повторите через службу";
             default:
                 return key;
         }
@@ -58,7 +69,8 @@ final class BenchSpec {
             },
             new Case[]{
                 new Case(null, "не взят: {error}", ""),
-            });
+            })
+            .via(1, null, null, null);
     static final Action A_RENEW = new Action("renew", "Продлить мой замок (1 ч)", "lock", 1, "POST", "/lock/renew", "{\"ttl_s\":3600}",
             null,
             null, null, false, false,
@@ -68,7 +80,8 @@ final class BenchSpec {
             },
             new Case[]{
                 new Case(null, "нет: {error}", ""),
-            });
+            })
+            .via(1, null, null, null);
     static final Action A_GIVE = new Action("give", "Отдать мой замок", "lock", 1, "POST", "/lock/release", "{}",
             null,
             null, null, false, false,
@@ -79,7 +92,8 @@ final class BenchSpec {
             },
             new Case[]{
                 new Case(null, "нет: {error}", ""),
-            });
+            })
+            .via(1, null, null, null);
     static final Action A_STEAL = new Action("steal", "Снять чужой замок", "lock", 1, "POST", "/lock/release", "{\"force\":true}",
             null,
             "Снять замок «{lock.holder.owner}»?", "Его окно или прошивка могут сломаться. Точно снять?", true, false,
@@ -89,108 +103,116 @@ final class BenchSpec {
             },
             new Case[]{
                 new Case(null, "нет: {error}", ""),
-            });
+            })
+            .via(1, null, null, null);
     static final Action A_REBOOT_LYRAT = new Action("reboot_lyrat", "Перезапуск LyraT", "bench", 1, "POST", "/action", "{\"name\":\"reboot_lyrat\"}",
             null,
             "Точно перезапустить LyraT?", null, true, true,
             null, null, null,
             null,
-            null);
+            null)
+            .via(3, "uc", "reboot 1", null);
     static final Action A_RESTART_S3 = new Action("restart_s3", "Перезапуск S3", "bench", 1, "POST", "/action", "{\"name\":\"restart_s3\"}",
             null,
             "Точно перезапустить S3?", null, true, true,
             null, null, null,
             null,
-            null);
+            null)
+            .via(3, "ux", null, null);
     static final Action A_BT_MODE = new Action("bt_mode", "Режим BT", "bench", 1, "POST", "/action", "{\"name\":\"bt_mode\"}",
             new Param[]{new Param("mode", "режим", "text", null, "", "режим")},
             "Точно сменить режим Bluetooth на «{$param.mode}»?", null, true, true,
             new Cond[]{new Cond("bt_mode", "truthy", null)}, null, null,
             null,
-            null);
+            null)
+            .via(1, null, null, null);
     static final Action A_FLASH_BOTH = new Action("flash_both", "Прошить обе платы", "bench", 2, "POST", "/action", "{\"name\":\"flash_both\"}",
             null,
             "Точно прошить обе платы (fw.py flash --board both)?", null, true, true,
             null, null, null,
             null,
-            null);
+            null)
+            .via(1, null, null, "прошивка — только через службу на ПК: образы лежат на ПК");
     static final Action A_CALL_PROBE = new Action("call_probe", "call_check --probe 1", "bench", 2, "POST", "/action", "{\"name\":\"call_probe\"}",
             null,
             "Точно запустить call_check --probe 1 (без звонка)?", null, true, true,
             null, null, null,
             null,
-            null);
+            null)
+            .via(1, null, null, null);
     static final Action A_OTA = new Action("ota", "Прошить плату", "bench", 3, "POST", "/ota", "{}",
             new Param[]{new Param("board", "плата", "enum", new String[][]{{"lyrat", "LyraT"}, {"s3", "S3"}}, "lyrat", ""), new Param("via", "путь", "enum", new String[][]{{"auto", "сам выберет"}, {"wifi", "Wi-Fi"}, {"uart", "UART"}}, "auto", "")},
             "Точно прошить {$param.board} (fw.py flash, путь {$param.via})?", null, true, true,
             null, null, null,
             null,
-            null);
+            null)
+            .via(1, null, null, "прошивка — только через службу на ПК: образы лежат на ПК");
     static final Action A_CMD = new Action("cmd", "Команда консоли", "bench", 4, "POST", "/cmd", "{}",
             new Param[]{new Param("target", "плата", "enum", new String[][]{{"lyrat", "LyraT"}, {"s3", "S3"}}, "lyrat", ""), new Param("cmd", "команда", "text", null, "", "s, bod, query…")},
             "Послать «{$param.cmd}» на {$param.target}?", null, true, true,
             null, null, null,
             null,
-            null);
+            null)
+            .via(3, "cmd", null, null);
     static final Action[] ACTIONS = {A_TAKE, A_RENEW, A_GIVE, A_STEAL, A_REBOOT_LYRAT, A_RESTART_S3, A_BT_MODE, A_FLASH_BOTH, A_CALL_PROBE, A_OTA, A_CMD};
 
     static void build(BenchUi ui) {
         ui.header(TITLE, HEADER);
-        ui.panel("boards", "Платы");
+        ui.panel("boards", "Платы", 3);
         ui.field(new Field("s3", null, "S3", new Case[]{
             new Case(new Cond[]{new Cond("s3.found", "falsy", null)}, "не найдена", "bad"),
             new Case(new Cond[]{new Cond("s3.lost", "truthy", null)}, "ПРОПАЛА", "bad"),
             new Case(null, "на связи", "ok"),
-        }));
+        }).via(3));
         ui.field(new Field("s3_addr", null, "S3 адрес / boot / аптайм", new Case[]{
             new Case(null, "{s3.addr} / {s3.boot} / {s3.up_s} с", ""),
-        }));
+        }).via(3));
         ui.field(new Field("s3_wifi", null, "S3 Wi-Fi rssi / txp / версия", new Case[]{
             new Case(new Cond[]{new Cond("s3.rssi", "le", Double.valueOf(-80.0))}, "{s3.rssi} дБм / {s3.txp} / {s3.ver}", "bad"),
             new Case(new Cond[]{new Cond("s3.rssi", "le", Double.valueOf(-70.0))}, "{s3.rssi} дБм / {s3.txp} / {s3.ver}", "warn"),
             new Case(null, "{s3.rssi} дБм / {s3.txp} / {s3.ver}", ""),
-        }));
+        }).via(3));
         ui.field(new Field("lyrat", null, "LyraT", new Case[]{
             new Case(new Cond[]{new Cond("lyrat.lost", "truthy", null)}, "ПРОПАЛА", "bad"),
             new Case(null, "на связи", "ok"),
-        }));
+        }).via(3));
         ui.field(new Field("lyrat_up", null, "LyraT аптайм / последний кадр", new Case[]{
             new Case(null, "{lyrat.up_s} с / {lyrat.last_frame_ms} мс", ""),
-        }));
+        }).via(3));
         ui.field(new Field("sco", null, "Канал гарнитуры (SCO)", new Case[]{
             new Case(new Cond[]{new Cond("lyrat.sco_open", "truthy", null)}, "открыт", "warn"),
             new Case(null, "закрыт", ""),
-        }));
+        }).via(3));
         ui.field(new Field("lyrat_ver", null, "LyraT версия", new Case[]{
             new Case(null, "{lyrat.ver}", ""),
-        }));
+        }).via(3));
         ui.field(new Field("phone", null, "Телефон (только чтение)", new Case[]{
             new Case(new Cond[]{new Cond("phone.state", "falsy", null)}, "—", ""),
             new Case(null, "{phone.state}{phone.model|opt_comma}", ""),
-        }));
-        ui.panel("lock", "Замок и задания");
+        }).via(1));
+        ui.panel("lock", "Замок и задания", 1);
         ui.field(new Field("lock", null, "Замок", new Case[]{
             new Case(new Cond[]{new Cond("lock.holder", "truthy", null)}, "у «{lock.holder.owner}» до {lock.holder.until|hhmm} ({lock.holder.left_s|int} с){lock.holder.note|opt_comma}", "warn"),
             new Case(null, "свободен", "ok"),
-        }));
+        }).via(1));
         ui.field(new Field("queue", null, "Очередь", new Case[]{
             new Case(new Cond[]{new Cond("lock.queue", "empty", null)}, "пусто", ""),
             new Case(null, "{lock.queue|owners}", ""),
-        }));
+        }).via(1));
         ui.field(new Field("lan", null, "Управление из сети", new Case[]{
             new Case(new Cond[]{new Cond("lan.control", "truthy", null)}, "включено (с токеном)", "warn"),
             new Case(new Cond[]{new Cond("lan.listen", "truthy", null)}, "только чтение", ""),
             new Case(null, "выключено", ""),
-        }));
+        }).via(1));
         ui.field(new Field("jobs", "jobs", "задание {id}", new Case[]{
             new Case(null, "{kind} ({owner}) идёт", "warn"),
-        }));
+        }).via(1));
         ui.actionRow();
         ui.action(A_TAKE);
         ui.action(A_RENEW);
         ui.action(A_GIVE);
         ui.action(A_STEAL);
-        ui.panel("actions", "Действия");
+        ui.panel("actions", "Действия", 3);
         ui.actionRow();
         ui.action(A_REBOOT_LYRAT);
         ui.action(A_RESTART_S3);
@@ -206,10 +228,10 @@ final class BenchSpec {
         ui.feed(new Feed("events", "events", "События", "GET", "/events", 5000,
                 new Param[]{new Param("from", "за", "enum", new String[][]{{"-10m", "10 мин"}, {"-1h", "час"}, {"-6h", "6 часов"}, {"-1d", "сутки"}}, "-1h", ""), new Param("type", "тип", "text", null, "", "тип: boot,slc_down…")},
                 "{\"limit\":500}", new String[]{"время", "тип", "плата", "подробности"}, new String[]{"t", "type", "board", "board_t_s"}, "lost|down|panic|fail|rollback|bod|gap|expired|overridden",
-                null, null, 0, 0, 0));
+                null, null, 0, 0, 0).via(1));
         ui.feed(new Feed("log", "tail", "Лог", "GET", "/tail", 1000,
                 new Param[]{new Param("board", "плата", "enum", new String[][]{{"", "обе платы"}, {"lyrat", "LyraT"}, {"s3", "S3"}}, "", ""), new Param("grep", "фильтр", "text", null, "", "фильтр (регулярное выражение)")},
                 "{}", null, null, null,
-                "after", "limit", 200, 500, 2000));
+                "after", "limit", 200, 500, 2000).via(3));
     }
 }

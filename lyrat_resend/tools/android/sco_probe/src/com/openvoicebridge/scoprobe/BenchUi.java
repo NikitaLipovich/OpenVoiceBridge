@@ -7,7 +7,8 @@ package com.openvoicebridge.scoprobe;
 interface BenchUi {
     void header(String title, String headerTemplate);
 
-    void panel(String id, String title);
+    /** via: BenchTemplate.VIA_BENCHD | VIA_DIRECT, the modes in which the panel is shown (goal 105). */
+    void panel(String id, String title, int via);
 
     void field(BenchTemplate.Field field);
 

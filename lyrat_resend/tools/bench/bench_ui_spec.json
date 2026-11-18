@@ -15,13 +15,19 @@
   "done": "готово: {$json}",
   "refused": "отказ ({$code}): {error}",
   "unknown_route": "служба benchd старее пульта: нет {$route}",
-  "busy": "…"
+  "busy": "…",
+  "direct_header": "напрямую с S3 {s3.addr}: ПК не найден, замка нет — команды идут мимо службы",
+  "direct_unavailable": "только через службу на ПК: ПК сейчас не найден",
+  "direct_done": "готово (напрямую): {$reply}",
+  "direct_failed": "S3 не ответила: {$why}",
+  "direct_pc_back": "ПК снова доступен — команда не послана, повторите через службу"
  },
  "header": "служба: pid {benchd.pid}, работает {benchd.up_s|int} с, строк {benchd.counts.lines}, диск {benchd.disk.log_bytes|mb1} МБ из {benchd.disk.limit_bytes|mb0}",
  "panels": [
   {
    "id": "boards",
    "title": "Платы",
+   "via": ["benchd", "s3-direct"],
    "fields": [
     {"id": "s3", "label": "S3", "cases": [
      {"if": [{"path": "s3.found", "op": "falsy"}], "text": "не найдена", "color": "bad"},
@@ -43,7 +49,7 @@
      {"text": "закрыт"}]},
     {"id": "lyrat_ver", "label": "LyraT версия", "cases": [
      {"text": "{lyrat.ver}"}]},
-    {"id": "phone", "label": "Телефон (только чтение)", "cases": [
+    {"id": "phone", "label": "Телефон (только чтение)", "via": ["benchd"], "cases": [
      {"if": [{"path": "phone.state", "op": "falsy"}], "text": "—"},
      {"text": "{phone.state}{phone.model|opt_comma}"}]}
    ]
@@ -72,6 +78,7 @@
   {
    "id": "actions",
    "title": "Действия",
+   "via": ["benchd", "s3-direct"],
    "fields": [],
    "actions": "bench",
    "results": true
@@ -103,10 +110,12 @@
    "result": {"ok": [{"text": "замок снят"}], "fail": [{"text": "нет: {error}"}]}},
   {"id": "reboot_lyrat", "label": "Перезапуск LyraT", "group": "bench", "row": 1,
    "method": "POST", "endpoint": "/action", "body": {"name": "reboot_lyrat"},
-   "confirm": "Точно перезапустить LyraT?", "lan_control": true, "requires_lock": true, "danger": true},
+   "confirm": "Точно перезапустить LyraT?", "lan_control": true, "requires_lock": true, "danger": true,
+   "via": ["benchd", "s3-direct"], "direct": {"op": "uc", "text": "reboot 1"}},
   {"id": "restart_s3", "label": "Перезапуск S3", "group": "bench", "row": 1,
    "method": "POST", "endpoint": "/action", "body": {"name": "restart_s3"},
-   "confirm": "Точно перезапустить S3?", "lan_control": true, "requires_lock": true, "danger": true},
+   "confirm": "Точно перезапустить S3?", "lan_control": true, "requires_lock": true, "danger": true,
+   "via": ["benchd", "s3-direct"], "direct": {"op": "ux"}},
   {"id": "bt_mode", "label": "Режим BT", "group": "bench", "row": 1,
    "method": "POST", "endpoint": "/action", "body": {"name": "bt_mode"},
    "params": [{"name": "mode", "label": "режим", "type": "text", "default": "", "placeholder": "режим"}],
@@ -114,7 +123,8 @@
    "confirm": "Точно сменить режим Bluetooth на «{$param.mode}»?", "lan_control": true, "requires_lock": true, "danger": true},
   {"id": "flash_both", "label": "Прошить обе платы", "group": "bench", "row": 2,
    "method": "POST", "endpoint": "/action", "body": {"name": "flash_both"},
-   "confirm": "Точно прошить обе платы (fw.py flash --board both)?", "lan_control": true, "requires_lock": true, "danger": true},
+   "confirm": "Точно прошить обе платы (fw.py flash --board both)?", "lan_control": true, "requires_lock": true, "danger": true,
+   "direct_unavailable": "прошивка — только через службу на ПК: образы лежат на ПК"},
   {"id": "call_probe", "label": "call_check --probe 1", "group": "bench", "row": 2,
    "method": "POST", "endpoint": "/action", "body": {"name": "call_probe"},
    "confirm": "Точно запустить call_check --probe 1 (без звонка)?", "lan_control": true, "requires_lock": true, "danger": true},
@@ -122,12 +132,14 @@
    "method": "POST", "endpoint": "/ota", "body": {},
    "params": [{"name": "board", "label": "плата", "type": "enum", "choices": [["lyrat", "LyraT"], ["s3", "S3"]], "default": "lyrat"},
               {"name": "via", "label": "путь", "type": "enum", "choices": [["auto", "сам выберет"], ["wifi", "Wi-Fi"], ["uart", "UART"]], "default": "auto"}],
-   "confirm": "Точно прошить {$param.board} (fw.py flash, путь {$param.via})?", "lan_control": true, "requires_lock": true, "danger": true},
+   "confirm": "Точно прошить {$param.board} (fw.py flash, путь {$param.via})?", "lan_control": true, "requires_lock": true, "danger": true,
+   "direct_unavailable": "прошивка — только через службу на ПК: образы лежат на ПК"},
   {"id": "cmd", "label": "Команда консоли", "group": "bench", "row": 4,
    "method": "POST", "endpoint": "/cmd", "body": {},
    "params": [{"name": "target", "label": "плата", "type": "enum", "choices": [["lyrat", "LyraT"], ["s3", "S3"]], "default": "lyrat"},
               {"name": "cmd", "label": "команда", "type": "text", "default": "", "placeholder": "s, bod, query…"}],
-   "confirm": "Послать «{$param.cmd}» на {$param.target}?", "lan_control": true, "requires_lock": true, "danger": true}
+   "confirm": "Послать «{$param.cmd}» на {$param.target}?", "lan_control": true, "requires_lock": true, "danger": true,
+   "via": ["benchd", "s3-direct"], "direct": {"op": "cmd"}}
  ],
  "feeds": [
   {"id": "events", "kind": "events", "title": "События", "method": "GET", "endpoint": "/events", "poll_ms": 5000,
@@ -138,7 +150,7 @@
    "columns": ["время", "тип", "плата", "подробности"],
    "hide_keys": ["t", "type", "board", "board_t_s"],
    "bad": "lost|down|panic|fail|rollback|bod|gap|expired|overridden"},
-  {"id": "log", "kind": "tail", "title": "Лог", "method": "GET", "endpoint": "/tail", "poll_ms": 1000,
+  {"id": "log", "kind": "tail", "title": "Лог", "via": ["benchd", "s3-direct"], "method": "GET", "endpoint": "/tail", "poll_ms": 1000,
    "params": [{"name": "board", "label": "плата", "type": "enum", "choices": [["", "обе платы"], ["lyrat", "LyraT"], ["s3", "S3"]], "default": ""},
               {"name": "grep", "label": "фильтр", "type": "text", "default": "", "placeholder": "фильтр (регулярное выражение)"}],
    "cursor": "after", "limit_param": "limit", "first_limit": 200, "limit": 500, "keep": 2000}

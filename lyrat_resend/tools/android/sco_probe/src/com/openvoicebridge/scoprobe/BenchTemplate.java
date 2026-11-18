@@ -58,6 +58,13 @@ final class BenchTemplate {
             this.label = label;
             this.cases = cases;
         }
+
+        int via = VIA_BENCHD;
+
+        Field via(int via) {
+            this.via = via;
+            return this;
+        }
     }
 
     static final class Param {
@@ -73,6 +80,9 @@ final class BenchTemplate {
             this.placeholder = placeholder;
         }
     }
+
+    /** via bits of the spec (goal 105): through benchd, straight to the S3 (the phone without the PC). */
+    static final int VIA_BENCHD = 1, VIA_DIRECT = 2;
 
     static final class Action {
         final String id, label, group, method, endpoint, bodyJson, confirm, confirm2, unavailableText;
@@ -103,6 +113,18 @@ final class BenchTemplate {
             this.ok = ok;
             this.fail = fail;
         }
+
+        /** Through what the action works (VIA_BENCHD | VIA_DIRECT) and how in direct mode (goal 105). */
+        int via = VIA_BENCHD;
+        String directOp, directText, directUnavailable;
+
+        Action via(int via, String directOp, String directText, String directUnavailable) {
+            this.via = via;
+            this.directOp = directOp;
+            this.directText = directText;
+            this.directUnavailable = directUnavailable;
+            return this;
+        }
     }
 
     static final class Feed {
@@ -130,6 +152,13 @@ final class BenchTemplate {
             this.firstLimit = firstLimit;
             this.limit = limit;
             this.keep = keep;
+        }
+
+        int via = VIA_BENCHD;
+
+        Feed via(int via) {
+            this.via = via;
+            return this;
         }
     }
 
