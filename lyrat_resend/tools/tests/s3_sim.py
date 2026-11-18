@@ -19,6 +19,8 @@ Goal 093: UX <boot> (restart of the S3 with a new boot id) and UP [qdbm] (Wi-Fi 
 knows s (print_status of the firmware: bonds, SLC, peers by their last two bytes, heap), reboot [1] (restart after
 REBOOT_DELAY_MS with a new boot id and the boot line "BOOT reset_reason=SW code=3", then "SLC CONNECTED" while it has a
 bond), unpair and ota; its log lines carry the uptime since its own start.
+Goal 097: console "simsco 1|0" opens or closes the headset channel with the firmware's lines (test only); --mic-frame-offset
+puts the mic's counter behind as on the board; --clicks marks both lines at the same bus frame for alignment tests.
 Goal 096: the LyraT is the updater in factory plus the headset firmware in ota_0 (upd_sim.py): every start goes
 through the updater (C rules of upd_mode.c, clock sped up by --upd-scale), "upd [8]" goes there, the updater takes
 images on its own UDP port (--lyrat-port, printed as lyrat_port) and from the relay, the headset firmware has no slot.
@@ -159,6 +161,16 @@ class LyratConsole:
         if word == "tone":
             self.tone = 1 if arg.strip() == "1" else 0
             return ST_OK, "tone = %d" % self.tone
+        if word == "simsco" and self.sim:
+            # Test only (goal 097): the headset channel opens or closes as a call would, with the firmware's log lines.
+            self.sco = 1 if arg.strip() == "1" else 0
+            if self.sco:
+                self.sim.lyrat_log("SCO audio state=2 codec=mSBC", tag="BT")
+                self.sim.lyrat_log("*** SCO OPEN ***", tag="BT")
+            else:
+                self.sim.lyrat_log("SCO audio state=0 codec=mSBC", tag="BT")
+                self.sim.lyrat_log("*** SCO CLOSED ***", tag="BT")
+            return ST_OK, "simsco = %d" % self.sco
         if word == "ns":
             return ST_OK, "ns = %s" % (arg.strip() or "off")
         if word == "ver":
@@ -262,13 +274,16 @@ class Stream:
         self.sent = self.send_fail = self.overflows = self.timeouts = 0
         self.phase = [0.0, 0.0]
 
-    def pcm(self, frames):
+    def pcm(self, frames, clicks=False):
+        """clicks (goal 097): a 2 ms burst every 0.5 s of the bus, at the same bus frame on both lines."""
         out = []
         for i in range(frames):
             pair = []
             for c in range(2):
                 self.phase[c] += 2 * math.pi * self.freqs[c] / RATE
                 pair.append(int(8000 * math.sin(self.phase[c])))
+            if clicks:
+                pair = [20000, 20000] if (self.total + i) % (RATE // 2) < 32 else [v // 8 for v in pair]
             out.append(pair)
         return out
 
@@ -288,6 +303,7 @@ class Sim(s3_emu.Emulator):
         self.lease_until = 0.0
         self.clock = time.monotonic()
         self.loss, self.dup = args.stream_loss, args.stream_dup
+        self.mic_frame_offset, self.clicks = args.mic_frame_offset, args.clicks
         self.rnd_stream = random.Random(11)
         self.console = LyratConsole(self)
         self.lyrat_reboot_at = None
@@ -422,7 +438,7 @@ class Sim(s3_emu.Emulator):
     # --- TAP requests and streams ---------------------------------------------------------------------------------------
     def tap_reply(self, ok):
         c, m = self.streams
-        part = lambda s: {"frames": s.total, "sent": s.sent, "send_fail": s.send_fail, "ovf": s.overflows,  # noqa: E731
+        part = lambda s: {"frames": s.total - (self.mic_frame_offset if s.stream == 1 else 0), "sent": s.sent, "send_fail": s.send_fail, "ovf": s.overflows,  # noqa: E731
                           "timeouts": s.timeouts}
         return {"fw": "s3tap", "ok": int(ok), "boot": self.s3.boot, "up_ms": int((time.monotonic() - self.started) * 1000),
                 "pins_ok": 1, "call": part(c), "mic": part(m)}
@@ -462,7 +478,8 @@ class Sim(s3_emu.Emulator):
             samples = [v for p in pcm for v in p]
         seq = s.seq
         s.seq += 1
-        first = (s.total - len(pcm)) & 0xFFFFFFFF
+        # The mic's I2S channel starts after the call's on the board: its counter is behind by mic_frame_offset.
+        first = (s.total - len(pcm) - (self.mic_frame_offset if s.stream == 1 else 0)) & 0xFFFFFFFF
         head = struct.pack("<2sBBIIHBBII", b"S3", D["PACKET_VERSION"], s.stream, seq, first, self.s3.boot, channels,
                            len(pcm) // 8, s.overflows, s.send_fail)
         return head + struct.pack("<%dh" % len(samples), *samples)
@@ -477,7 +494,7 @@ class Sim(s3_emu.Emulator):
         while now - self.clock >= FRAMES / RATE:
             self.clock += FRAMES / RATE
             for s in self.streams:
-                pcm = s.pcm(FRAMES)
+                pcm = s.pcm(FRAMES, self.clicks)
                 s.total += FRAMES
                 if self.dest and now < self.lease_until:
                     data = self.packet(s, pcm)
@@ -667,6 +684,8 @@ def main(argv=None):
     ap.add_argument("--log-loss", type=float, default=0.0)
     ap.add_argument("--stream-loss", type=float, default=0.0)
     ap.add_argument("--stream-dup", type=float, default=0.0)
+    ap.add_argument("--mic-frame-offset", type=int, default=0, help="the mic's frame counter this far behind the call's (097)")
+    ap.add_argument("--clicks", action="store_true", help="a 2 ms burst every 0.5 s on both lines at one bus frame (097)")
     ap.add_argument("--lyrat-port", type=int, default=0, help="UDP port of the LyraT's updater, 0: any (goal 096)")
     ap.add_argument("--upd-scale", type=float, default=20.0,
                     help="the updater's clock runs this much faster: 10 s window in 0.5 s (goal 096)")

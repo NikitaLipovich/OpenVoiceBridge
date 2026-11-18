@@ -20,12 +20,16 @@ action. Packets without the S3 magic are the LyraT's own stream and are kept apa
 It writes call.wav and mic.wav (16 kHz, 1 or 2 channels as asked) with silence in place of what was lost, so the
 time axis stays real, and DIR/tap.json with, for each stream: packets, unique, duplicates, reordered, lost_packets,
 loss_pct, max_burst, gaps ([first frame, frames] in the WAV), boots, ovf and send_fail (growth during the
-recording, these are losses on the board), rate_hz (samples against the PC clock, least squares over arrival
+recording, these are losses on the board), t0_at (time.monotonic of WAV sample 0 by the lower envelope of the arrivals:
+min of arrival - end of the packet in the WAV; the two files are aligned by it, goal 097), rate_hz (samples against the PC clock, least squares over arrival
 times), frames, seconds, first_at and last_at (time.monotonic of the first and last packet, one clock for all processes
 of this PC), wall_s (first packet to the end of the last, on the PC clock) and marks ([seq, arrival] of every 500th
 packet), floor_rms (per channel, the 10th percentile of the 100 ms level: a voice or music leaves quiet moments, the codec
 noise seen in goal 050 #001 does not); with --forward also forward: target, forwarded, failed for each stream.
-As a module: TapRecorder(slots, forward=..., listen_only=...).start(), .stop(), .save(out_dir).
+As a module: TapRecorder(slots, forward=..., listen_only=..., on_packet=...).start(), .stop(), .save(out_dir).
+on_packet(stream, data, arrival) is called in the receiving thread with the first copy of each packet (header and PCM),
+for a live consumer (call_stream.LivePipeline); it must not block. reply_marks holds (asked_at, replied_at, reply) of the
+newest TAP1 replies: the S3's frame counters at a known PC time, the S3 mark of the latency measurement (goal 097).
 journal_dir= writes every first copy of a packet to DIR/packets.journal as it arrives, so a dead process loses nothing that
 reached the disk: TapRecorder.from_journal(DIR).save(DIR) makes the files from it. bus_gap_s= keeps the time axis real when the
 I2S bus stops, a LyraT reset for one: the S3 sends nothing then and its frame counter stands still, so the stop is measured on
@@ -45,6 +49,7 @@ Based on scripts/udp_capture.py. Recordings stay outside git (bench_runs).
 """
 import argparse
 import array
+import collections
 import json
 import os
 import select
@@ -189,6 +194,7 @@ TAP_REQUEST_S = 1.0
 TAP_SILENT_S = 3.0        # no stream for this long: the board may be back with another address, broadcast again
 TAP_STREAMS = {0: "call", 1: "mic"}
 TAP_PORTS = {"call": 5004, "mic": 5005}
+REPLY_MARKS = 600         # 10 minutes of TAP1 replies
 MARK_EVERY = 500          # about every 7.5 s at 240 frames a packet
 JOURNAL_NAME = "packets.journal"
 JOURNAL_FLUSH_S = 1.0     # to the OS: survives this process
@@ -290,11 +296,14 @@ class _TapStream:
         rates = []
         channels = None
         prev_end_at = None
+        t0_at = first_frame = None
         for boot, packets in self.boots.items():
             seqs = sorted(packets)
             if not seqs:
                 continue
             channels = channels or packets[seqs[0]][1]
+            if first_frame is None:
+                first_frame = packets[seqs[0]][0]
             frame_bytes = channels * 2
             first = packets[seqs[0]]
             last = packets[seqs[-1]]
@@ -332,6 +341,8 @@ class _TapStream:
                 if sys.byteorder == "big":
                     samples.byteswap()
                 pcm.extend(samples)
+                start_at = at - len(pcm) // channels / RATE
+                t0_at = start_at if t0_at is None else min(t0_at, start_at)
                 expect = frame + len(payload) // frame_bytes
                 prev_seq = seq
             prev_end_at = last[2]
@@ -347,7 +358,7 @@ class _TapStream:
                  "rate_hz": round(sum(t * r for t, r in rates) / seconds, 2) if seconds else None,
                  "channels": channels, "frames": len(pcm) // (channels or 1),
                  "seconds": round(len(pcm) / (channels or 1) / RATE, 3), "floor_rms": floor_rms(pcm, channels),
-                 "first_at": self.first_at, "last_at": self.last_at,
+                 "first_at": self.first_at, "last_at": self.last_at, "t0_at": t0_at, "first_frame": first_frame,
                  "wall_s": round(self.last_at - self.first_at + SAMPLES_PER_FRAME / RATE, 3) if self.first_at else None,
                  "marks": [[q, round(p[q][2], 4)] for p in self.boots.values() for q in sorted(p) if q % MARK_EVERY == 0]}
         return channels, pcm, stats
@@ -355,7 +366,7 @@ class _TapStream:
 
 class TapRecorder:
     def __init__(self, slots=("L", "L"), board=None, forward=None, listen_only=False, ports=None, journal_dir=None,
-                 bus_gap_s=None):
+                 bus_gap_s=None, on_packet=None):
         """forward: {"call": (host, port), "mic": (host, port)}. listen_only: never talk to the board, take what
         arrives on ports ({"call": port, "mic": port}): the far end of someone else's forward. journal_dir, bus_gap_s: see
         the top of this file."""
@@ -399,11 +410,15 @@ class TapRecorder:
         self.replies = 0
         self.board_status = None     # the newest reply of the board, parsed
         self.requests = self.broadcasts = 0
+        self.on_packet = on_packet
+        self.asked_at = None
+        self.reply_marks = collections.deque(maxlen=REPLY_MARKS)
         self.t0 = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def _ask(self, now):
+        self.asked_at = time.monotonic()
         fresh = self.board and (self.fixed_board or
                                 any(st.last_at and now - st.last_at < TAP_SILENT_S for st in self.streams.values()))
         for s in self.senders:
@@ -445,6 +460,8 @@ class TapRecorder:
                             self._journal_add(data, now)
                         if first and stream in self.forward:
                             self._pass_on(stream, data)
+                        if first and self.on_packet:
+                            self.on_packet(stream, data, now)
                     else:
                         self.foreign[name].add(data, now)
                 else:
@@ -452,6 +469,8 @@ class TapRecorder:
                     try:
                         self.board_status = json.loads(data.decode("ascii", "replace"))
                         self.board = sender[0]
+                        if self.asked_at is not None:
+                            self.reply_marks.append((self.asked_at, now, self.board_status))
                     except ValueError:
                         pass
 

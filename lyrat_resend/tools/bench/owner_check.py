@@ -626,6 +626,9 @@ def step_rehearsal(args):
                 i, one["result"], one["call_s"], one["channel_s"], one["codec"], one["loss_call"], one["loss_mic"]))
             for line in one["reasons"]:
                 step.say("  - %s" % line)
+            if one.get("discarded"):
+                step.say("Репетиция остановлена: на телефоне настоящий звонок.")
+                break
     finally:
         ch.command("vol 100", timeout=0.5, retries=5)
         ch.close()
@@ -645,6 +648,8 @@ def step_rehearsal(args):
 def rehearsal_one(step, i, tag, args, rnd, call_record, audio_check, np, wave):
     out = step.out / ("try-%02d" % i)
     silent = lambda text: step.log.write(text + "\n")  # noqa: E731
+    # A rehearsal must not keep a real conversation (R3/R6, goal 097): the phone is watched for a real call throughout.
+    guard = oc.RealCallGuard().start()
     rec = call_record.CallRecording(out, port=oc.lyrat_port() if oc.usb_mode() else None, grace=args.grace, say=silent, no_stream=args.control_no_stream).start()
     reasons, opened_at, closed_at = [], None, None
     started = rec.wait_first_packets()
@@ -668,7 +673,7 @@ def rehearsal_one(step, i, tag, args, rnd, call_record, audio_check, np, wave):
         opened_at = time.monotonic()
         rnd.app_command("play", t_tag + "-play", "--es", "wav", rnd.RECORD_WAV)
         hold = opened_at + args.seconds
-        while time.monotonic() < hold and reason is None:
+        while time.monotonic() < hold and reason is None and not guard.tripped:
             reason = rec.tick()
             if args.drop_at and not getattr(rec, "dropped", False) and time.monotonic() - opened_at >= args.drop_at:
                 rec.dropped = True
@@ -677,12 +682,22 @@ def rehearsal_one(step, i, tag, args, rnd, call_record, audio_check, np, wave):
     rnd.app_command("close", t_tag + "-close")
     closed_at = time.monotonic()
     limit = closed_at + args.grace + (call_record.GRACE_AFTER_FAULT_S if args.drop_at else 0) + 15.0
-    while reason is None and time.monotonic() < limit:
+    while reason is None and time.monotonic() < limit and not guard.tripped:
         reason = rec.tick()
         time.sleep(0.1)
+    if guard.tripped:
+        reason = "настоящий звонок: " + guard.tripped
     if reason is None:
         reasons.append("запись сама не остановилась после закрытия канала")
     s = rec.stop(reason or "предел времени репетиции")
+    real_call = guard.stop()
+    if real_call:
+        gone = oc.discard_audio(out)
+        step.say("Попытка %d отброшена: %s. Звук удалён (%d файлов), не анализируется." % (i, real_call, len(gone)))
+        return {"i": i, "result": NOT_CHECKED, "reasons": ["отброшена: " + real_call], "discarded": True, "call_s": None,
+                "mic_s": None, "channel_s": None, "held_s": None, "codec": s.get("codec"), "loss_call": None, "loss_mic": None,
+                "duration_error_s": None, "recorder_ran_s": s["recorder_ran_s"], "stop": reason, "tones_min_db": None,
+                "peak_call": None, "peak_mic": None, "resets": None, "port_drops": None}
     result, judged, _ = call_record.judge(s)
     reasons += judged
     channel_s = sum(c["seconds"] for c in s["channel"]) if s["channel"] else None

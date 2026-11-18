@@ -33,7 +33,7 @@ TOOLS_CMD = "python lyrat_resend/tools/bench/"
 FLASH_BACK = TOOLS_CMD + "fw.py flash --variant mac_b1"
 SDK_TOOLS = Path(os.environ.get("LOCALAPPDATA", "")) / "Android" / "Sdk" / "platform-tools"
 # The tools that hold the bench while they run. A line of a process matches on its script name.
-BENCH_TOOLS = re.compile(r"(?:^|[\\/\s\"])((?:round|voice_check|udp_record|call_record|owner_check|fw|s3|s3_uart|serial_watch|btlog"
+BENCH_TOOLS = re.compile(r"(?:^|[\\/\s\"])((?:round|voice_check|udp_record|call_record|call_check|call_stream|owner_check|fw|s3|s3_uart|serial_watch|btlog"
                          r"|phone|idf|esptool|idf_monitor)\.py)\b|\besptool\b")
 OPEN_ISSUES = [
     ("#004 гоала 057", "обрывы в сторону телефона по 14,6 мс (одна потеря кадра mSBC и её маскировка), около 5-7 в минуту против 0,37 в гоале 045.",
@@ -331,3 +331,73 @@ def worst_of(results):
         if wanted in results:
             return wanted
     return PASS
+
+
+# --- a real call during a run without a call (goal 097) ----------------------------------------------------------------
+
+class RealCallGuard:
+    """Watches the phone for a real call while a run without a call records (rehearsal, call_check --probe). R3/R6: such
+    a run must not keep anything of a real conversation. Trips when a call is ringing or active (telecom calls, or a
+    telephony state other than idle), or when the phone's call history grew since the start: a call that came and went
+    between two looks. Reads counts only (round.telecom_state), never a number. Not for the owner's own call check, where
+    the call is the point. state: a function returning telecom_state()'s dict or None, for tests."""
+
+    def __init__(self, state=None, every=2.0):
+        import threading
+        if state is None:
+            import round as rnd
+            state = rnd.telecom_state
+        self.state, self.every = state, every
+        self.tripped = None             # the reason, in Russian
+        self.unknown = 0
+        self.looks = 0
+        self.first = None
+        self.halt = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def look(self):
+        st = self.state()
+        self.looks += 1
+        if st is None:
+            self.unknown += 1
+            return None
+        if self.first is None:
+            self.first = st
+        if st.get("calls_now") or st.get("telephony_busy"):
+            self.tripped = self.tripped or "на телефоне настоящий звонок (звонит или идёт)"
+        elif st.get("historical_lines", 0) > self.first.get("historical_lines", 0):
+            self.tripped = self.tripped or "на телефоне был звонок во время прогона (история звонков выросла)"
+        return st
+
+    def _run(self):
+        while not self.halt.is_set():
+            try:
+                self.look()
+            except Exception:  # noqa: BLE001  adb gone mid-run: counted as unknown
+                self.unknown += 1
+            self.halt.wait(self.every)
+
+    def start(self):
+        self.look()
+        self.thread.start()
+        return self
+
+    def stop(self):
+        """A last look, so a call in the last seconds is seen too. Returns the reason or None."""
+        self.halt.set()
+        self.thread.join(timeout=self.every + 30)
+        try:
+            self.look()
+        except Exception:  # noqa: BLE001
+            self.unknown += 1
+        return self.tripped
+
+
+def discard_audio(directory):
+    """Every sound file and packet journal of a run folder, gone: what is left are numbers. Returns the names removed."""
+    gone = []
+    for path in Path(directory).rglob("*"):
+        if path.is_file() and path.suffix.lower() in (".wav", ".journal"):
+            path.unlink(missing_ok=True)
+            gone.append(path.name)
+    return gone

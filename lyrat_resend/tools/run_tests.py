@@ -78,6 +78,10 @@ CHECKS = [
     ("usb_free", "the bench without USB vs the simulator: first_flash --dry-run, NetWatch, link trials, round power, "
                  "fw.py/s3.py/s3_uart.py over the network, Wi-Fi power in stat, WAV silence by frame, call_record",
      unittest_cmd("test_usb_free"), TESTS, 1500, "base", True),
+    ("call_check", "the owner's test call vs the simulator: checks, channel seen, both lines aligned, report; quality numbers "
+                   "on synthetic lines (tone, silence, cut pieces, clipping, noise, shifted lines); live pipeline, PCM output "
+                   "and its latency (goal 097)",
+     unittest_cmd("test_call_check"), TESTS, 900, "base", True),
     ("updater", "the LyraT through its updater vs the simulator: image over Wi-Fi, a bad image kept out, no network "
                 "then the UART way, fw.py --via auto, every start through the updater (goal 096)",
      unittest_cmd("test_updater"), TESTS, 1500, "base", True),

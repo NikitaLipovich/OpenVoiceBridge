@@ -24,7 +24,8 @@ state left the recording goes on until Enter: it never stops on not knowing.
 
 Result: PASS only if a channel was seen, the codec is mSBC, both files hold sound, durations agree within 1 s, losses stay
 within the limit of round.py record, and nothing was reset or dropped. A recording with a fault is kept and says so.
-As a module: CallRecording(out, ...).start(), .tick(), .stop(), judge(summary). Exit code: 0 PASS, 1 FAIL, 2 НЕ ПРОВЕРЕНО.
+As a module: CallRecording(out, ..., on_packet=...).start(), .tick(), .stop(), judge(summary); on_packet goes to the
+TapRecorder (call_check.py feeds its live pipeline from it). Exit code: 0 PASS, 1 FAIL, 2 НЕ ПРОВЕРЕНО.
 """
 import argparse
 import json
@@ -170,12 +171,14 @@ class S3View(threading.Thread):
 
 
 class CallRecording:
-    def __init__(self, out, port=None, grace=GRACE_S, only_enter=False, say=print, no_stream=False, listen_ports=None):
+    def __init__(self, out, port=None, grace=GRACE_S, only_enter=False, say=print, no_stream=False, listen_ports=None,
+                 on_packet=None):
         self.out = Path(out)
         self.out.mkdir(parents=True, exist_ok=True)
         self.grace, self.only_enter, self.say = grace, only_enter, say
         self.no_stream = no_stream      # a control: nothing asks the S3 for the stream, as when it is away
         self.listen_ports = listen_ports
+        self.on_packet = on_packet      # a live consumer of the first copy of each packet (call_check, goal 097)
         self.port = port
         self.rec = self.watch = self.s3 = None
         self.halt = threading.Event()
@@ -199,7 +202,7 @@ class CallRecording:
     def start(self):
         self.t_start = time.monotonic()
         self.rec = TapRecorder(SLOTS, journal_dir=self.out, bus_gap_s=BUS_GAP_S, listen_only=self.no_stream,
-                               ports=self.listen_ports)
+                               ports=self.listen_ports, on_packet=self.on_packet)
         self.rec.start()
         if self.port or not usb_mode():
             self.watch = open_watch(self.port, self.out, mixin=CallMixin)
