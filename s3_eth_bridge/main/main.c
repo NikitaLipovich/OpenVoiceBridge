@@ -31,6 +31,8 @@
 //                        USB nothing else restarts the S3
 //   UP [<qdbm>]          Wi-Fi transmit power cap in 0.25 dBm (8..84) now, until the next start; without a value only
 //                        read. "UP <applied qdbm> <esp_err>"; also in the stat line as txp=. -1: no Wi-Fi in this build
+//   UA [scan]            what goes to the LyraT for its AFH map (goal 106) as JSON; "scan" asks for a passive scan
+//                        now: "UA scan <0 started|1 the LyraT has the headset channel|2 busy|3 no Wi-Fi>"
 //   UO <s>               Wi-Fi off in 300 ms for <s> seconds (1..300), then on again by itself with the same power cap
 //                        (goal 100: the LyraT's Bluetooth with no 2.4 GHz transmitter next to it). "UO <s> <err>": 0
 //                        going off, 1 bad value, 2 already off, 3 no Wi-Fi in this build. Nothing is heard meanwhile
@@ -54,6 +56,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "afh_map.h"
 #include "driver/gpio.h"
 #include "driver/i2s_std.h"
 #include "driver/spi_master.h"
@@ -184,6 +187,39 @@ static volatile uint32_t s_ctl_rx_bytes, s_ctl_replies, s_ctl_hb, s_ctl_cmds_sen
     s_ctl_tx_edges;
 static ctl_hb_t s_last_hb;
 static volatile bool s_have_hb;
+
+// Goal 106: what the S3 knows of 2.4 GHz Wi-Fi, for the LyraT's AFH map (afh_map.h). The access point's channel always
+// (the last one known also while not associated: the router stays where it is), a passive scan now and then, never
+// while the LyraT has the headset channel open. Written by the Wi-Fi event and scan tasks, read by the UART task.
+#define SCAN_FIRST_MS       20000       // after the first IP
+#define SCAN_PERIOD_MS      (10 * 60 * 1000)
+#define SCAN_SCO_QUIET_MS   10000       // the headset channel closed at least this long
+#define SCAN_CHECK_MS       5000
+#define SCAN_DWELL_MS       120         // passive, a beacon interval and some
+#define SCAN_HOME_MS        30          // back on the access point's channel between channels
+#define SCAN_RECORDS        24
+static portMUX_TYPE s_afh_mux = portMUX_INITIALIZER_UNLOCKED;
+static afh_report_t s_afh_rep = {.scan_age_s = AFH_SCAN_NONE};
+static int64_t s_afh_scan_us;           // when the last scan ended, 0 none
+static volatile int64_t s_sco_seen_us;  // the last heartbeat with the headset channel open
+static volatile bool s_scan_running, s_scan_asked;
+static uint32_t s_scans, s_scan_fail;
+
+// The report bytes after the two log bytes of the ack, with the scan's age as of now.
+static size_t afh_report_now(uint8_t *out, size_t cap)
+{
+    portENTER_CRITICAL(&s_afh_mux);
+    afh_report_t r = s_afh_rep;
+    int64_t scan_us = s_afh_scan_us;
+    portEXIT_CRITICAL(&s_afh_mux);
+    if (scan_us) {
+        int64_t age = (esp_timer_get_time() - scan_us) / 1000000;
+        r.scan_age_s = age >= AFH_SCAN_NONE ? AFH_SCAN_NONE - 1 : (uint16_t)age;
+    } else {
+        r.scan_age_s = AFH_SCAN_NONE;
+    }
+    return afh_report_encode(&r, out, cap);
+}
 
 static void pins_to_safe_inputs(void)
 {
@@ -359,12 +395,14 @@ static void ctl_on_frame(const ctl_parser_t *p)
         if (ctl_frame_len(p) == sizeof(ctl_hb_t)) {
             memcpy(&s_last_hb, ctl_frame_payload(p), sizeof(s_last_hb));
             s_have_hb = true;
+            if (s_last_hb.flags & 2) s_sco_seen_us = esp_timer_get_time();
         }
         if (s_tx_on) {
-            // The ack carries whether the LyraT sends its log, and at which level.
-            uint8_t ctl[2];
+            // The ack carries whether the LyraT sends its log, and at which level; then the Wi-Fi report (goal 106).
+            uint8_t ctl[AFH_REPORT_MAX];
             uint8_t frame[CTL_HEADER_BYTES + sizeof(ctl) + CTL_CRC_BYTES];
             size_t n = s3_log_lyrat_ctl(ctl);
+            n += afh_report_now(ctl + n, sizeof(ctl) - n);
             uart_write_bytes(CTL_UART, frame, ctl_frame_build(frame, CTL_T_HB_ACK, ctl_frame_seq(p), ctl, n));
         }
     } else if (type == CTL_T_LOG) {
@@ -455,6 +493,7 @@ static int hex_value(char c)
 static int wifi_tx_power(void);
 static esp_err_t wifi_set_tx_power(int qdbm);
 static int wifi_off_for(int seconds);
+static int wifi_scan_ask(void);
 
 static void restart_now(void *arg)
 {
@@ -524,6 +563,24 @@ static bool ctl_request(char *text, int n, const struct sockaddr_in *from, sockl
         esp_err_t err = ESP_OK;
         if (text[2] == ' ') err = wifi_set_tx_power(atoi(text + 3));
         len = snprintf(reply, sizeof(reply), "UP %d %d", wifi_tx_power(), (int)err);
+    } else if (strcmp(text, "UA") == 0) {
+        uint8_t b[AFH_REPORT_MAX];
+        afh_report_t r;
+        b[0] = b[1] = 0;
+        size_t got = 2 + afh_report_now(b + 2, sizeof(b) - 2);
+        if (afh_report_parse(b, got, &r) != 1) memset(&r, 0, sizeof(r));
+        len = snprintf(reply, sizeof(reply),
+                       "{\"ver\":%d,\"gen\":%u,\"ap\":%u,\"second\":%u,\"rssi\":%d,\"assoc\":%d,\"bw40\":%d,"
+                       "\"scan_age\":%u,\"scans\":%" PRIu32 ",\"scan_fail\":%" PRIu32 ",\"scanning\":%d,\"nets\":[",
+                       AFH_REPORT_VER, r.gen, r.ap_primary, r.ap_second, r.ap_rssi, (r.flags & AFH_FLAG_ASSOC) != 0,
+                       (r.flags & AFH_FLAG_BW40) != 0, r.scan_age_s, s_scans, s_scan_fail, s_scan_running);
+        for (int i = 0; i < r.n && len < (int)sizeof(reply) - 24; i++) {
+            len += snprintf(reply + len, sizeof(reply) - len, "%s[%u,%u,%d]", i ? "," : "", r.nets[i].primary,
+                            r.nets[i].second, r.nets[i].rssi);
+        }
+        len += snprintf(reply + len, sizeof(reply) - len, "]}");
+    } else if (strcmp(text, "UA scan") == 0) {
+        len = snprintf(reply, sizeof(reply), "UA scan %d", wifi_scan_ask());
     } else if (strncmp(text, "UO ", 3) == 0) {
         int seconds = atoi(text + 3);
         len = snprintf(reply, sizeof(reply), "UO %d %d", seconds, wifi_off_for(seconds));
@@ -679,6 +736,8 @@ static int wifi_rssi(void) { return 0; }
 static int wifi_tx_power(void) { return -1; }
 static esp_err_t wifi_set_tx_power(int qdbm) { (void)qdbm; return ESP_ERR_NOT_SUPPORTED; }
 static int wifi_off_for(int seconds) { (void)seconds; return 3; }
+static int wifi_scan_ask(void) { return 3; }
+static void wifi_scan_start_task(void) {}
 
 #else
 
@@ -711,6 +770,124 @@ static void wifi_retry(void)
     }
 }
 
+// The access point's channel, secondary and level, and this station's bandwidth, into the report.
+static void afh_ap_update(void)
+{
+    wifi_ap_record_t ap;
+    wifi_bandwidth_t bw = WIFI_BW_HT20;
+    if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) return;
+    esp_wifi_get_bandwidth(WIFI_IF_STA, &bw);
+    portENTER_CRITICAL(&s_afh_mux);
+    bool changed = s_afh_rep.ap_primary != ap.primary || s_afh_rep.ap_second != (uint8_t)ap.second;
+    s_afh_rep.ap_primary = ap.primary;
+    s_afh_rep.ap_second = ap.second <= 2 ? (uint8_t)ap.second : 0;
+    s_afh_rep.ap_rssi = ap.rssi;
+    s_afh_rep.flags = (uint8_t)(AFH_FLAG_ASSOC | (bw == WIFI_BW_HT40 ? AFH_FLAG_BW40 : 0));
+    if (changed) s_afh_rep.gen++;
+    portEXIT_CRITICAL(&s_afh_mux);
+    if (changed) ESP_LOGI(TAG, "afh ap channel=%u second=%u bw=%d", ap.primary, (unsigned)ap.second, (int)bw);
+}
+
+static void afh_scan_done(void *data)
+{
+    static wifi_ap_record_t recs[SCAN_RECORDS];
+    afh_net_t nets[SCAN_RECORDS], top[AFH_REPORT_NETS];
+    const wifi_event_sta_scan_done_t *d = data;
+    uint16_t n = SCAN_RECORDS;
+    int64_t took_ms = s_scan_running ? 0 : -1;
+    s_scan_running = false;
+    if (!d || d->status != 0 || esp_wifi_scan_get_ap_records(&n, recs) != ESP_OK) {
+        esp_wifi_clear_ap_list();
+        s_scan_fail++;
+        ESP_LOGW(TAG, "wifi scan failed");
+        return;
+    }
+    for (uint16_t i = 0; i < n; i++) {
+        nets[i].primary = recs[i].primary;
+        nets[i].second = recs[i].second <= 2 ? (uint8_t)recs[i].second : 0;
+        nets[i].rssi = recs[i].rssi;
+    }
+    size_t k = afh_scan_reduce(nets, n, top, AFH_REPORT_NETS);
+    portENTER_CRITICAL(&s_afh_mux);
+    s_afh_rep.n = (uint8_t)k;
+    memcpy(s_afh_rep.nets, top, k * sizeof(afh_net_t));
+    s_afh_rep.gen++;
+    s_afh_scan_us = esp_timer_get_time();
+    portEXIT_CRITICAL(&s_afh_mux);
+    s_scans++;
+    char text[AFH_REPORT_NETS * 12] = "";
+    int used = 0;
+    for (size_t i = 0; i < k; i++) {
+        used += snprintf(text + used, sizeof(text) - used, "%s%u%s:%d", i ? "," : "", top[i].primary,
+                         top[i].second == 1 ? "+" : top[i].second == 2 ? "-" : "", top[i].rssi);
+    }
+    (void)took_ms;
+    ESP_LOGI(TAG, "wifi scan aps=%u nets=%u top=%s", n, (unsigned)k, k ? text : "-");
+}
+
+// Whether a scan may start now: 0 yes, 1 the LyraT has the headset channel (or had it just now), 2 busy (a scan, an
+// update, the streams, the Wi-Fi off or not up).
+static int wifi_scan_may(void)
+{
+    int64_t now = esp_timer_get_time();
+    if (s_sco_seen_us && now - s_sco_seen_us < SCAN_SCO_QUIET_MS * 1000LL) return 1;
+    bool streaming = s_dest_ip && now < s_lease_until_us;
+    if (s_scan_running || !s_got_ip || s_wifi_off || streaming || s3_ota_busy()) return 2;
+    return 0;
+}
+
+static int wifi_scan_go(void)
+{
+    int why = wifi_scan_may();
+    if (why) return why;
+    wifi_scan_config_t cfg = {
+        .scan_type = WIFI_SCAN_TYPE_PASSIVE,
+        .scan_time.passive = SCAN_DWELL_MS,
+        .home_chan_dwell_time = SCAN_HOME_MS,
+    };
+    s_scan_running = true;
+    esp_err_t err = esp_wifi_scan_start(&cfg, false);
+    if (err != ESP_OK) {
+        s_scan_running = false;
+        s_scan_fail++;
+        ESP_LOGW(TAG, "wifi scan start: %s", esp_err_to_name(err));
+        return 2;
+    }
+    return 0;
+}
+
+static int wifi_scan_ask(void)
+{
+    int why = wifi_scan_may();
+    if (!why) s_scan_asked = true;
+    return why;
+}
+
+// One scan SCAN_FIRST_MS after the first IP, then every SCAN_PERIOD_MS, each when the LyraT has no headset channel.
+static void wifi_scan_task(void *arg)
+{
+    int64_t ip_since = 0, last = 0;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(s_scan_asked ? 100 : SCAN_CHECK_MS));
+        int64_t now = esp_timer_get_time();
+        if (!s_got_ip) {
+            ip_since = 0;
+            continue;
+        }
+        if (!ip_since) ip_since = now;
+        if (s_link_up) afh_ap_update();           // the level now and then; a changed channel bumps gen
+        bool due = s_scan_asked || (last ? now - last >= SCAN_PERIOD_MS * 1000LL : now - ip_since >= SCAN_FIRST_MS * 1000LL);
+        if (!due) continue;
+        if (wifi_scan_go() == 0) last = now;
+        s_scan_asked = false;
+    }
+}
+
+static void wifi_scan_start_task(void)
+{
+    xTaskCreatePinnedToCore(wifi_scan_task, "wifi_scan", 3072, NULL, 3, NULL, 0);
+}
+
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
@@ -721,6 +898,9 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
         s_link_up = true;
         ESP_LOGI(TAG, "wifi associated");
+        afh_ap_update();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_SCAN_DONE) {
+        afh_scan_done(data);
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *d = data;
         if (s_link_up || s_got_ip) ESP_LOGW(TAG, "wifi lost (reason %d), reconnecting", d ? d->reason : -1);
@@ -730,6 +910,9 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         s_link_up = false;
         s_got_ip = false;
         strcpy(s_ip, "-");
+        portENTER_CRITICAL(&s_afh_mux);
+        s_afh_rep.flags &= (uint8_t)~AFH_FLAG_ASSOC;      // the channel stays: the router is still there
+        portEXIT_CRITICAL(&s_afh_mux);
         if (!s_wifi_off) wifi_retry();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *e = data;
@@ -889,6 +1072,7 @@ void app_main(void)
     if (u != ESP_OK) ESP_LOGE(TAG, "uart init failed: %s", esp_err_to_name(u));
     s_pins_ok = pins_check();
     if (s_eth_ok) xTaskCreatePinnedToCore(request_task, "tap_req", 4096, NULL, 5, NULL, 0);
+    if (s_eth_ok) wifi_scan_start_task();
     if (u == ESP_OK) xTaskCreatePinnedToCore(ctl_uart_task, "ctl_uart", 4096, NULL, 5, NULL, 0);
     // The self-test runs without the network too: a new image without the network must roll back.
     s3_ota_start(s_eth_ok);

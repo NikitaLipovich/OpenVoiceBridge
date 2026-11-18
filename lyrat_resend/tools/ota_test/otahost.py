@@ -429,3 +429,147 @@ class CUpdWatch:
 
     def left_s(self, now_ms):
         return lib.upd_watch_left_s(self.w, now_ms & 0xFFFFFFFF)
+
+
+# Goal 106: the AFH map of the LyraT from the S3's view of Wi-Fi (afh_map.c).
+class AfhNet(C.Structure):
+    _fields_ = [("primary", C.c_uint8), ("second", C.c_uint8), ("rssi", C.c_int8)]
+
+
+AFH_NETS = 8
+
+
+class AfhReport(C.Structure):
+    _fields_ = [("gen", C.c_uint8), ("ap_primary", C.c_uint8), ("ap_second", C.c_uint8), ("ap_rssi", C.c_int8),
+                ("flags", C.c_uint8), ("scan_age_s", C.c_uint16), ("n", C.c_uint8), ("nets", AfhNet * AFH_NETS)]
+
+
+lib.afh_report_parse.argtypes = [C.c_char_p, C.c_size_t, C.POINTER(AfhReport)]
+lib.afh_report_encode.argtypes = [C.POINTER(AfhReport), C.c_void_p, C.c_size_t]
+lib.afh_report_encode.restype = C.c_size_t
+lib.afh_scan_reduce.argtypes = [C.POINTER(AfhNet), C.c_size_t, C.POINTER(AfhNet), C.c_size_t]
+lib.afh_scan_reduce.restype = C.c_size_t
+lib.afh_span.argtypes = [C.c_uint8, C.c_uint8, C.c_bool, u8p, u8p]
+lib.afh_span.restype = C.c_bool
+lib.afh_map_count.argtypes = [C.c_char_p]
+lib.afh_map_hex.argtypes = [C.c_char_p, C.c_char_p]
+lib.afh_map_from_hex.argtypes = [C.c_char_p, C.c_void_p]
+lib.afh_map_from_hex.restype = C.c_bool
+lib.afh_build.argtypes = [C.POINTER(AfhReport), C.c_bool, C.c_char_p, C.c_void_p, C.c_char_p, C.c_size_t]
+lib.host_afh_ctl_new.argtypes = [C.c_int]
+lib.host_afh_ctl_new.restype = C.c_void_p
+lib.host_afh_ctl_info.argtypes = [C.c_void_p, C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
+lib.afh_ctl_on_ack.argtypes = [C.c_void_p, C.c_char_p, C.c_size_t, C.c_uint32]
+lib.afh_ctl_target.argtypes = [C.c_void_p, C.c_uint32, C.c_void_p]
+lib.afh_ctl_on_slc.argtypes = [C.c_void_p]
+lib.afh_ctl_set_mode.argtypes = [C.c_void_p, C.c_int, C.c_char_p]
+lib.afh_ctl_poll.argtypes = [C.c_void_p, C.c_uint32, C.c_bool, C.c_void_p, C.POINTER(C.c_int), C.POINTER(C.c_int)]
+lib.afh_ctl_poll.restype = C.c_bool
+lib.afh_ctl_applied.argtypes = [C.c_void_p, C.c_char_p, C.c_int]
+
+AFH_MODES = ("all", "auto", "fixed")
+AFH_SRCS = ("none", "s3", "cmd")
+AFH_WHYS = ("s3", "slc", "sco_end", "stale", "cmd")
+AFH_ALL = bytes([0xFF] * 9 + [0x7F])
+
+
+def afh_report(ap=0, second=0, rssi=0, flags=1, age=0xFFFF, nets=(), gen=0):
+    """An AfhReport; nets: (primary, second, rssi) tuples."""
+    r = AfhReport(gen=gen, ap_primary=ap, ap_second=second, ap_rssi=rssi, flags=flags, scan_age_s=age, n=len(nets))
+    for i, (p, s, q) in enumerate(nets):
+        r.nets[i] = AfhNet(p, s, q)
+    return r
+
+
+def afh_ack(report, log=(1, 3)):
+    """The bytes of a heartbeat ack of a new S3: two log bytes, then the report (afh_report_encode)."""
+    buf = (C.c_uint8 * 64)()
+    n = lib.afh_report_encode(C.byref(report), buf, 64)
+    return bytes(log) + bytes(buf[:n])
+
+
+def afh_parse(ack: bytes):
+    r = AfhReport()
+    return lib.afh_report_parse(ack, len(ack), C.byref(r)), r
+
+
+def afh_span(primary, second=0, wide=False):
+    lo, hi = C.c_uint8(), C.c_uint8()
+    ok = lib.afh_span(primary, second, wide, C.cast(C.byref(lo), u8p), C.cast(C.byref(hi), u8p))
+    return (lo.value, hi.value) if ok else None
+
+
+def afh_hex(m: bytes) -> str:
+    out = C.create_string_buffer(21)
+    lib.afh_map_hex(m, out)
+    return out.value.decode()
+
+
+def afh_from_hex(text: str):
+    m = (C.c_uint8 * 10)()
+    return bytes(m) if lib.afh_map_from_hex(text.encode(), m) else None
+
+
+def afh_count(m: bytes) -> int:
+    return lib.afh_map_count(m)
+
+
+def afh_build(report, scan_ok=True, prev=None):
+    """(map bytes, usable channels, exclusions text)."""
+    out = (C.c_uint8 * 10)()
+    excl = C.create_string_buffer(96)
+    n = lib.afh_build(C.byref(report), scan_ok, prev, out, excl, 96)
+    return bytes(out), n, excl.value.decode()
+
+
+def afh_reduce(nets, maximum=8):
+    arr = (AfhNet * max(1, len(nets)))(*[AfhNet(*t) for t in nets])
+    out = (AfhNet * 42)()
+    n = lib.afh_scan_reduce(arr, len(nets), out, maximum)
+    return [(out[i].primary, out[i].second, out[i].rssi) for i in range(n)]
+
+
+class CAfhCtl:
+    """The LyraT's AFH policy (afh_ctl_*) with the clock given by the caller, in ms."""
+
+    def __init__(self, mode="all"):
+        self.c = lib.host_afh_ctl_new(AFH_MODES.index(mode))
+
+    def __del__(self):
+        if getattr(self, "c", None):
+            lib.host_free(self.c)
+
+    def ack(self, data: bytes, now_ms):
+        return lib.afh_ctl_on_ack(self.c, data, len(data), now_ms & 0xFFFFFFFF)
+
+    def target(self, now_ms):
+        out = (C.c_uint8 * 10)()
+        src = lib.afh_ctl_target(self.c, now_ms & 0xFFFFFFFF, out)
+        return bytes(out), AFH_SRCS[src]
+
+    def slc(self):
+        lib.afh_ctl_on_slc(self.c)
+
+    def set_mode(self, mode, m=None):
+        lib.afh_ctl_set_mode(self.c, AFH_MODES.index(mode), m)
+
+    def poll(self, now_ms, sco=False, apply=True):
+        """None, or (map, src, why) given to the controller (and marked applied unless apply=False)."""
+        out = (C.c_uint8 * 10)()
+        src, why = C.c_int(), C.c_int()
+        if not lib.afh_ctl_poll(self.c, now_ms & 0xFFFFFFFF, sco, out, C.byref(src), C.byref(why)):
+            return None
+        if apply:
+            lib.afh_ctl_applied(self.c, bytes(out), src.value)
+        return bytes(out), AFH_SRCS[src.value], AFH_WHYS[why.value]
+
+    def info(self):
+        v = (C.c_uint32 * 10)()
+        m = (C.c_uint8 * 10)()
+        excl = C.create_string_buffer(96)
+        lib.host_afh_ctl_info(self.c, v, m, excl, 96)
+        keys = ("mode", "have", "applied_src", "force", "deferred", "reports", "bad", "applies", "deferrals", "rep_ms")
+        d = dict(zip(keys, list(v)))
+        d["mode"], d["applied_src"] = AFH_MODES[d["mode"]], AFH_SRCS[d["applied_src"]]
+        d["applied"], d["excl"] = bytes(m), excl.value.decode()
+        return d

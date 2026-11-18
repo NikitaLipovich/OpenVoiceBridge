@@ -1747,7 +1747,8 @@ def loss_brief(window):
             "up_under_20": (up.get("snr_per_second") or {}).get("under_min"),
             "mode": window.get("mode"), "down_events": down.get("events"), "up_events": up.get("events"),
             "tap_loss_pct": (window.get("tap") or {}).get("loss_pct"), "bod_delta": window.get("bod_delta"),
-            "s3_restarted": window.get("s3_restarted"), "board_resets": window.get("board_resets")}
+            "s3_restarted": window.get("s3_restarted"), "board_resets": window.get("board_resets"),
+            "afh": "%(src)s/%(n)s" % window["afh"] if window.get("afh") else None}
 
 
 BPOW_LINE = re.compile(r"bredr tx power min=(-?\d+) max=(-?\d+) err=(-?\d+)")
@@ -1756,6 +1757,7 @@ ESCO_MODE_LINE = re.compile(r"esco mode=(stack|set) pkt=0x([0-9a-f]+) lat=(\d+) 
 ESCO_UP_LINE = re.compile(r"ESCO up st=(\d+) link=(\d+) tesco=(\d+) wesco=(\d+) rx=(\d+) tx=(\d+) air=(\d+)"
                           r" asked=0x([0-9a-f]+)/(\d+)/(\d+)")
 AFH_LINE = re.compile(r"afh host=(\S+)(?: err=(-?\d+))?")
+AFH_STATE_LINE = re.compile(r"afh host=(\S+) map=([0-9a-f]+) n=(\d+) src=(\S+) reports=(\d+) bad=(\d+) applies=(\d+)")
 DURING = "during:"
 
 
@@ -1841,6 +1843,16 @@ def apply_mode(watch, cmds):
             watch.pump(time.monotonic() + 1.0)
             done.append({"cmd": cmd, "ok": None, "reply": lines_since(watch, t)[-1:]})
     return done
+
+
+def afh_state(watch):
+    """The LyraT's AFH host map now (goal 106 firmware: "afh"), None from an older one."""
+    m = board_reply(watch, "afh", AFH_STATE_LINE)
+    if not m:
+        return None
+    g = m.groups()
+    return {"host": g[0], "map": g[1], "n": int(g[2]), "src": g[3], "reports": int(g[4]), "bad": int(g[5]),
+            "applies": int(g[6])}
 
 
 def s3_boot(watch):
@@ -2010,6 +2022,7 @@ def stage_btloss(args):
                                      during=during if modes else None)
                 if modes:
                     window.update(mode_info)
+                    window["afh"] = afh_state(watch)      # goal 106: the map held through the window
                     window["bod_after"] = bod_trips(watch)
                     window["s3_boot_after"] = s3_boot(watch)
                     off_s = wifioff_seconds(during)

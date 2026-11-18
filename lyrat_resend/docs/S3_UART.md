@@ -37,7 +37,11 @@ of the console. Peer addresses are left out of the reply, since it leaves the bo
 the same seq is not run again: the LyraT answers from its copy of the last reply. Without this a repeat after a lost reply
 would flip a toggle such as `hpf` back.
 
-The LyraT sends a heartbeat every second, payload: u32 uptime in seconds, u8 flags (bit 0 SLC, bit 1 SCO), u8 tone. The ack of the S3 carries u8 log on, u8 log level since goal 090 (empty before): whether the LyraT sends its log, see `OTA.md`.
+The LyraT sends a heartbeat every second, payload: u32 uptime in seconds, u8 flags (bit 0 SLC, bit 1 SCO), u8 tone. The ack of the S3 carries u8 log on, u8 log level since goal 090 (empty before): whether the LyraT sends its log, see `OTA.md`. Since goal 106 the ack goes on with the S3's view of 2.4 GHz Wi-Fi for the LyraT's AFH map
+(`main/afh_map.h`): `[2]` version 1, `[3]` gen, `[4]` access point channel (0 none), `[5]` its secondary (0 none, 1 above,
+2 below), `[6]` its rssi, `[7]` flags (bit 0 associated, bit 1 own bandwidth 40), `[8..9]` u16 age of the last scan in s
+(0xFFFF none), `[10]` 0, `[11]` n up to 8, then n x {channel, secondary, rssi} of the passive scan, strongest first. An older
+LyraT reads only the first two bytes; an ack of 0 or 2 bytes (an older S3) carries no report.
 
 ## Who drives GPIO1
 
@@ -62,6 +66,7 @@ The answer goes to the source port of the request.
 | `UW <hex>` | Raw bytes to the LyraT, for tests | `UW <n>`, -1 with the TX off |
 | `UX <boot>` | Restart of the S3 in 0.5 s, only when `<boot>` is its boot id (goal 093) | `UX <boot> 1`; `UX <boot> 0` for another boot id: a repeat after the restart does nothing |
 | `UP [<qdbm>]` | Wi-Fi transmit power cap in 0.25 dBm, 8..84, until the next start; without a value only read (goal 093) | `UP <cap now> <esp_err>`; -1 in a build without Wi-Fi. The `stat` line shows it as `txp=` |
+| `UA [scan]` | What the S3 sends the LyraT for its AFH map (goal 106); `scan` asks for a passive scan now | JSON (`ap`, `second`, `rssi`, `assoc`, `bw40`, `scan_age`, `nets`, `scans`, `scan_fail`, `scanning`); `UA scan <code>`: 0 started, 1 the LyraT has the headset channel, 2 busy, 3 no Wi-Fi |
 
 The PC repeats a `UC` on a timeout with the same seq. There is no authentication: anything in the local network can send these,
 the same as for the streams.
@@ -95,3 +100,13 @@ always settles Wesco 2, EV3 gives Tesco 6/Wesco 4 and more uplink losses. `afh H
 channel n, byte 0 = channels 0..7), `afh all` clears it (default). The S3 control word `UO S` (`s3_uart.Channel.wifi_off`)
 stops the S3 Wi-Fi 0.3 s later for S seconds (1..300) and starts it again by itself; with no IP S + 90 s after the
 command the S3 restarts. On batteries one `UO` of 15 coincided with both boards losing power (goal 100 #001).
+
+Goal 106 (dynamic AFH): the LyraT command `afh auto` builds the host map from the report in the heartbeat ack: the band of
+the S3's access point always, then the strongest networks of the S3's passive scan (from -70 dBm, kept until -76) while 30
+of 79 channels stay usable (Wi-Fi n covers Bluetooth channels 2407 + 5n +- 11 MHz, 40 MHz one side 20 more). A change
+waits for the end of the headset channel; with no report for 30 min the map goes back to all channels; at every link the
+map is given again. Each map given prints `AFH map n= map= src=s3|none|cmd mode= ap= excl= why=s3|slc|sco_end|stale|cmd`
+(benchd event `afh_map`). `afh all` (default of the build `AFH_BOOT_MODE`) and `afh HEX20` as before; `afh` alone prints the
+state. The S3 scans passively (receive only, 120 ms a channel, about 2 s) 20 s after its first IP and then every 10 min,
+only when the LyraT had no headset channel for 10 s, no update, no tap stream and no `UO` is going on; each scan prints
+`wifi scan aps= nets= top=` (benchd event `wifi_scan`).

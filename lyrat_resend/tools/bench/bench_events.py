@@ -10,7 +10,8 @@ rec is a record of udplog.parse_records() (board, boot, seq, text; joined by udp
 
 Types: boot (a new boot id of a board; reason from the LyraT's first line "BOOT reset_reason=X code=N"), slc_up,
 slc_down (after_s, acl_reason), hfp_down, acl_down (reason), sco_open (codec), sco_close, ota_start, ota_done, ota_fail,
-ota_rollback, panic, bod (supply dips: the counter of "bod ... trips=N" grew), net_down, net_up (the S3's Wi-Fi).
+ota_rollback, panic, bod (supply dips: the counter of "bod ... trips=N" grew), net_down, net_up (the S3's Wi-Fi),
+afh_map (n, map, src, mode, ap, excl, why: the LyraT's host map of AFH, goal 106), wifi_scan (aps, nets, top).
 benchd adds board_lost/board_back, log_gap, cmd, lock, job and benchd from its own state.
 """
 import json
@@ -50,6 +51,10 @@ RULES = [
     ("net_down", "s3", re.compile(r"wifi lost \(reason (-?\d+)\)"), (("reason", int),)),
     ("net_down", "s3", re.compile(r"wifi off for (\d+) s"), (("seconds", int),)),
     ("net_up", "s3", re.compile(r"wifi ip \S+"), ()),
+    # Goal 106: each AFH map the LyraT gives its controller, and each passive Wi-Fi scan of the S3.
+    ("afh_map", "lyrat", re.compile(r"AFH map n=(\d+) map=([0-9a-f]+) src=(\S+) mode=(\S+) ap=(\d+) excl=(\S+) why=(\S+)"),
+     (("n", int), ("map", str), ("src", str), ("mode", str), ("ap", int), ("excl", str), ("why", str))),
+    ("wifi_scan", "s3", re.compile(r"wifi scan aps=(\d+) nets=(\d+) top=(\S+)"), (("aps", int), ("nets", int), ("top", str))),
 ]
 
 

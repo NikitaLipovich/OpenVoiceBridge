@@ -26,7 +26,7 @@ typedef enum {
     CTL_T_CMD = 1,      // S3 to LyraT: payload is a console command
     CTL_T_REPLY = 2,    // LyraT to S3: same seq, payload is a status byte and the text of the command
     CTL_T_HB = 3,       // LyraT to S3 every second, see ctl_hb_t
-    CTL_T_HB_ACK = 4,   // S3 to LyraT: same seq; payload u8 log on, u8 log level (none from an S3 before goal 090)
+    CTL_T_HB_ACK = 4,   // S3 to LyraT: same seq; payload u8 log on, u8 log level (none from an S3 before goal 090), then the Wi-Fi report of afh_map.h (goal 106)
     CTL_T_LOG = 5,      // LyraT to S3: log records of dbg_log.h, docs/OTA.md
     CTL_T_OTA = 6,      // S3 to LyraT: an ota_link request, docs/OTA.md
     CTL_T_OTA_ACK = 7,  // LyraT to S3: an ota_link reply

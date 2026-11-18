@@ -61,6 +61,8 @@ CHECKS = [
     ("c_dbg_log", "log ring in C: long lines in parts and their join, ring full mid-line, repeats; old and new stat line; "
                   "a failed UDP send keeps its lines",
      unittest_cmd("test_dbg_log"), TESTS, 120, "base", False),
+    ("c_afh_map", "the AFH map of the LyraT from the S3's Wi-Fi: bands, floor, hysteresis, the ack report, the policy",
+     unittest_cmd("test_afh_map"), TESTS, 120, "base", False),
     ("fw_review", "findings of the review of goal 094: soft limiter in C, Wi-Fi retry pause, self-test only once, "
                   "UX delay in any build, noise mode at start",
      unittest_cmd("test_fw_review"), TESTS, 120, "base", False),
