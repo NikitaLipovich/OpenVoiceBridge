@@ -46,6 +46,10 @@ static const char *TAG = "s3ota";
 #define STATUS_EVERY_MS     10000
 #define VERIFY_POLL_MS      2000
 #define BAUD_PROBE_MS       3000
+#define RELAY_POLL_MS       5
+// At least one tick: with CONFIG_FREERTOS_HZ=100 pdMS_TO_TICKS(5) is 0, and vTaskDelay(0) never lets the lower tasks
+// of CPU0 run (log, self-test, app_main's stat line, IDLE0: task watchdog every 5 s). Goal 095, incident 003.
+#define RELAY_POLL_TICKS    (pdMS_TO_TICKS(RELAY_POLL_MS) > 0 ? pdMS_TO_TICKS(RELAY_POLL_MS) : 1)
 #define NVS_NS              "ota"
 #define NVS_FAILTEST        "failtest"
 
@@ -320,7 +324,7 @@ static void relay_task(void *arg)
     uint32_t tx_wait_since = 0, next_status = 0, verify_until = 0, baud_since = 0;
     bool baud_fallback = false;
     for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(5));
+        vTaskDelay(RELAY_POLL_TICKS);
         uint32_t now = now_ms();
         reply_msg_t m;
         while (xQueueReceive(s_replies, &m, 0) == pdTRUE) {

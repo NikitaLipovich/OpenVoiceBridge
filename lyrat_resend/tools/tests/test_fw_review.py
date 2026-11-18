@@ -150,5 +150,64 @@ class NoiseModeAtStart(unittest.TestCase):
         self.assertIn("s_web[mode] != NULL", rule)
 
 
+IDF_DEFAULT_HZ = 100      # ESP-IDF's CONFIG_FREERTOS_HZ when sdkconfig.defaults does not set it
+
+
+def project_hz(project_dir):
+    m = re.search(r"^CONFIG_FREERTOS_HZ=(\d+)", read(project_dir / "sdkconfig.defaults"), flags=re.M)
+    return int(m.group(1)) if m else IDF_DEFAULT_HZ
+
+
+def defines(src):
+    return {m.group(1): m.group(2) for m in re.finditer(r"^#define\s+(\w+)\s+\(?\s*(\d+)\s*\)?", src, flags=re.M)}
+
+
+def zero_tick_delays(project_dir):
+    """vTaskDelay(pdMS_TO_TICKS(X)) whose X is below one tick: that is vTaskDelay(0), a task that never lets the lower
+    ones of its core run. X is a number or a #define of the same file; other expressions are not judged."""
+    hz = project_hz(project_dir)
+    found = []
+    for path in sorted((project_dir / "main").glob("*.c")):
+        src = strip_comments(read(path))
+        consts = defines(src)
+        for m in re.finditer(r"vTaskDelay\(\s*pdMS_TO_TICKS\(\s*(\w+)\s*\)\s*\)", src):
+            arg = m.group(1)
+            ms = int(arg) if arg.isdigit() else int(consts[arg]) if arg in consts else None
+            if ms is not None and ms * hz // 1000 == 0:
+                found.append("%s:%d vTaskDelay(pdMS_TO_TICKS(%s)) = 0 ticks at %d Hz"
+                             % (path.name, src.count("\n", 0, m.start()) + 1, arg, hz))
+    return found
+
+
+class NoZeroTickDelay(unittest.TestCase):
+    """Goal 095 #003: relay_task of the S3 slept vTaskDelay(pdMS_TO_TICKS(5)); the S3 runs at 100 Hz, so that was 0
+    ticks and the task at priority 4 starved CPU0: no UDP log, no stat line, no self-test, task watchdog every 5 s."""
+
+    def test_s3(self):
+        self.assertEqual(project_hz(REPO / "s3_eth_bridge"), 100)
+        self.assertEqual(zero_tick_delays(REPO / "s3_eth_bridge"), [])
+
+    def test_lyrat(self):
+        self.assertEqual(zero_tick_delays(REPO / "lyrat_resend"), [])
+
+    def test_relay_poll_has_a_floor(self):
+        src = strip_comments(read(S3_OTA))
+        self.assertIn("vTaskDelay(RELAY_POLL_TICKS)", block(src, "static void relay_task(void *arg)", "\n}\n"))
+        self.assertRegex(src, r"#define RELAY_POLL_TICKS .*: 1\)")
+
+    def test_the_check_finds_the_old_bug(self):
+        old = "#define POLL_MS 5\nvoid t(void) { vTaskDelay(pdMS_TO_TICKS(5)); vTaskDelay(pdMS_TO_TICKS(POLL_MS)); " \
+              "vTaskDelay(pdMS_TO_TICKS(10)); }\n"
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / "main").mkdir()
+            (p / "main" / "x.c").write_text(old, encoding="utf-8")
+            (p / "sdkconfig.defaults").write_text("", encoding="utf-8")
+            self.assertEqual(len(zero_tick_delays(p)), 2)
+            (p / "sdkconfig.defaults").write_text("CONFIG_FREERTOS_HZ=1000\n", encoding="utf-8")
+            self.assertEqual(zero_tick_delays(p), [])
+
+
 if __name__ == "__main__":
     unittest.main()
