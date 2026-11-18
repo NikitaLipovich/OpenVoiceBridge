@@ -89,7 +89,9 @@ class Benchd:
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read() or b"{}")
 
-    def wait(self, cond, timeout=10.0, step=0.2):
+    def wait(self, cond, timeout=25.0, step=0.2):
+        """cond() until it gives something; the times are generous: under a parallel run_tests the simulator and
+        benchd answer several times slower (goal 106 #002), and a passing test never waits for them."""
         end = time.monotonic() + timeout
         while time.monotonic() < end:
             got = cond()
@@ -289,7 +291,7 @@ class Service(unittest.TestCase):
         cls.sim = simproc.Sim()
         cls.home = TMP / "home"
         cls.d = Benchd(cls.home)
-        ok = cls.d.wait(lambda: cls.d.api("GET", "/status")[1]["benchd"]["counts"]["lines"] > 20, 10)
+        ok = cls.d.wait(lambda: cls.d.api("GET", "/status")[1]["benchd"]["counts"]["lines"] > 20, 40)
         if not ok:
             raise RuntimeError("benchd wrote no lines")
 
@@ -302,8 +304,10 @@ class Service(unittest.TestCase):
         self.d.api("POST", "/lock/release", {"owner": "test", "force": True})
 
     def test_a_log_files_status_and_mac_hidden(self):
-        st = self.d.wait(lambda: (lambda s: s if s["s3"]["net"] else None)(self.d.api("GET", "/status")[1]), 12)
-        self.assertTrue(st, "no stat line of the S3")
+        # The stat line (net) comes in the log, the boot id with UQ and "not lost" after both: wait for all of them.
+        st = self.d.wait(lambda: (lambda s: s if s["s3"]["net"] and s["s3"]["boot"] is not None and not s["s3"]["lost"]
+                                  and not s["lyrat"]["lost"] else None)(self.d.api("GET", "/status")[1]), 40)
+        self.assertTrue(st, "no stat line, boot id or live boards: %s" % self.d.api("GET", "/status")[1]["s3"])
         self.assertEqual((st["s3"]["addr"], st["s3"]["found"], st["s3"]["lost"], st["lyrat"]["lost"]),
                          ("127.0.0.1", True, False, False))
         self.assertEqual(st["s3"]["net"], "wifi")
@@ -332,10 +336,10 @@ class Service(unittest.TestCase):
         self.assertEqual([(c["cmd"], c["owner"], c["status"]) for c in cmds], [("simsco 1", "t103", 0),
                                                                                ("simsco 0", "t103", 0)])
         self.d.api("POST", "/action", {"name": "reboot_lyrat", "owner": "t103"})
-        boot = self.d.wait(lambda: self.d.events("boot", t), 10)
+        boot = self.d.wait(lambda: self.d.events("boot", t), 30)
         self.assertTrue(boot)
         self.assertEqual((boot[0]["board"], boot[0]["reason"]), ("lyrat", "SW"))
-        self.assertTrue(self.d.wait(lambda: [e for e in self.d.events("slc_up", t) if e["t"] > boot[0]["t"]], 10))
+        self.assertTrue(self.d.wait(lambda: [e for e in self.d.events("slc_up", t) if e["t"] > boot[0]["t"]], 30))
         code, r = self.d.api("POST", "/cmd", {"target": "s3", "cmd": "query"})
         self.assertEqual((code, r["reply"]["fw"]), (200, "s3tap"))
         self.assertEqual(self.d.api("POST", "/cmd", {"target": "s3", "cmd": "format flash"})[0], 400)
@@ -411,8 +415,7 @@ class Service(unittest.TestCase):
             got["r"] = self.d.api("POST", "/lock", {"owner": "g2", "wait_s": 8})
         th = threading.Thread(target=waiter)
         th.start()
-        time.sleep(1.0)
-        self.assertEqual([q["owner"] for q in self.d.api("GET", "/lock")[1]["queue"]], ["g2"])
+        self.assertTrue(self.d.wait(lambda: [q["owner"] for q in self.d.api("GET", "/lock")[1]["queue"]] == ["g2"], 7))
         self.assertEqual(self.d.api("POST", "/lock/release", {"owner": "g3"})[0], 409)          # not the holder
         self.assertEqual(self.d.api("POST", "/lock/release", {"owner": "g1", "token": a["token"]})[0], 200)
         th.join(12)
@@ -421,7 +424,7 @@ class Service(unittest.TestCase):
         # Expiry: a lock not renewed goes after its time.
         self.d.api("POST", "/lock/release", {"owner": "g2"})
         self.assertEqual(self.d.api("POST", "/lock", {"owner": "g4", "ttl_s": 5})[0], 200)
-        self.assertTrue(self.d.wait(lambda: not self.d.api("GET", "/lock")[1]["holder"], 9, 0.5))
+        self.assertTrue(self.d.wait(lambda: not self.d.api("GET", "/lock")[1]["holder"], 25, 0.5))
         # A dead holder: its pid goes, the lock goes with it.
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         try:
@@ -431,7 +434,7 @@ class Service(unittest.TestCase):
         finally:
             child.kill()
             child.wait()
-        self.assertTrue(self.d.wait(lambda: not self.d.api("GET", "/lock")[1]["holder"], 5))
+        self.assertTrue(self.d.wait(lambda: not self.d.api("GET", "/lock")[1]["holder"], 25))
         whys = [e.get("why") for e in self.d.events("lock") if e["action"] == "expired"]
         self.assertIn("ttl", whys)
         self.assertTrue(any(w and w.startswith("pid") for w in whys))
@@ -526,23 +529,21 @@ class Service(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertTrue(r["lines"] and all(" s3 " in ln for ln in r["lines"]))
         last = r["last_id"]
-        time.sleep(1.5)
-        r2 = self.d.api("GET", "/tail?after=%d" % last)[1]
-        self.assertTrue(r2["lines"])
+        self.assertTrue(self.d.wait(lambda: self.d.api("GET", "/tail?after=%d" % last)[1]["lines"], 20))
         self.assertEqual(self.d.api("GET", "/tail?grep=(")[0], 400)
 
     def test_z_lost_s3_and_its_return(self):
         t = now_iso()
         ports = self.sim.ports
         self.sim.close()
-        lost = self.d.wait(lambda: [e for e in self.d.events("board_lost", t) if e["board"] == "s3"], 10, 0.5)
+        lost = self.d.wait(lambda: [e for e in self.d.events("board_lost", t) if e["board"] == "s3"], 40, 0.5)
         self.assertTrue(lost)
         self.assertTrue(self.d.api("GET", "/status")[1]["s3"]["lost"])
         type(self).sim = simproc.Sim()                         # the same ports: the S3 is back with a new boot id
         self.assertEqual(self.sim.ports["log_port"], ports["log_port"])
-        back = self.d.wait(lambda: [e for e in self.d.events("board_back", t) if e["board"] == "s3"], 10, 0.5)
+        back = self.d.wait(lambda: [e for e in self.d.events("board_back", t) if e["board"] == "s3"], 40, 0.5)
         self.assertTrue(back)
-        self.assertTrue(self.d.wait(lambda: [e for e in self.d.events("boot", t) if e["board"] == "s3"], 8))
+        self.assertTrue(self.d.wait(lambda: [e for e in self.d.events("boot", t) if e["board"] == "s3"], 40))
 
 
 def lan_address():
