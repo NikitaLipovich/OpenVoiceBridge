@@ -187,6 +187,13 @@ def main():
                 msg = by_desc(nodes, "msg-bar")
                 check("the answer on the screen", msg and msg["text"] == "стенд ваш на 1 час", msg and msg["text"])
                 give = by_desc(nodes, "a-give")
+                for _ in range(4):           # goal 105: three more lines on top, the button may be below the screen
+                    if give:
+                        break
+                    phone.scroll()
+                    time.sleep(1)
+                    nodes = phone.dump(out / "screen_give.xml")
+                    give = by_desc(nodes, "a-give")
                 if give:
                     phone.tap(give)
                     time.sleep(3)

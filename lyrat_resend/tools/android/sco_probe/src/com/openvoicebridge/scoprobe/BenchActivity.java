@@ -98,6 +98,7 @@ public class BenchActivity extends Activity implements BenchUi {
     private static final int COLOR_MUTE = Color.rgb(0x66, 0x70, 0x7c);
     private static final long S3_LOOK_MS = 15000;           // UQ broadcast while the service is there (read only)
     private static final long DIRECT_SEARCH_MS = 5000;      // a search for benchd this often in direct mode
+    private static final int DIRECT_AFTER_FAILURES = 2;     // fruitless searches in a row before direct mode (#004)
     private static final int MODE_NONE = 0, MODE_SERVICE = 1, MODE_DIRECT = 2;
 
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -590,13 +591,20 @@ public class BenchActivity extends Activity implements BenchUi {
             return;
         }
         failures++;
+        if (mode == MODE_SERVICE) {
+            // A round that missed (broadcasts get lost in bursts, #004) does not drop a service that still answers its
+            // polls; when it stops answering, two failed polls start a search of their own.
+            show(connView, "поиск в сети не дал ответа, работаю с прежней службой " + svcHost, COLOR_WARN);
+            return;
+        }
         // Any benchd that answered (unconfirmed, old, foreign) means a PC is on: never two masters of the S3 (D6).
         boolean pcOn = r.pcPresent();
         if (pcOn) {
             stopDirect("в сети отвечает служба benchd (не подтверждена) — напрямую не работаю");
         }
         show(connView, r.line, COLOR_BAD);
-        if (!pcOn && direct == null && s3 != null && !s3.isEmpty()) {
+        // Direct mode only after two fruitless searches in a row: one round can fall into a burst of lost broadcasts.
+        if (!pcOn && direct == null && s3 != null && !s3.isEmpty() && failures >= DIRECT_AFTER_FAILURES) {
             startDirect(s3.get(0).addr);
         }
         nextSearchAt = System.currentTimeMillis() + (direct != null ? DIRECT_SEARCH_MS : BenchFind.backoffMs(failures));

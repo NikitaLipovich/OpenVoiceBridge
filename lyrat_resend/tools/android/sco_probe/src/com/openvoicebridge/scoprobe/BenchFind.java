@@ -25,13 +25,17 @@ import javax.crypto.spec.SecretKeySpec;
  * JVM against the real benchd; BenchActivity runs it on the phone with a Binder that ties the sockets to the Wi-Fi.
  *
  * Order (DECISIONS D1): every hint (the cached address, then a typed or linked one) by GET /api/whoami?nonce=, then a
- * broadcast round "BENCHD? 2 <nonce>" to the discovery ports (3 sends to 255.255.255.255 and the subnet's broadcast:
- * a single broadcast was lost in about 1 of 5 tries on this Wi-Fi). An answer counts only when it carries this round's
+ * broadcast round "BENCHD? 2 <nonce>" to the discovery ports: 5 sends spread over 2.4 s to 255.255.255.255 and the
+ * subnet's broadcast, answers for 3 s (on this Wi-Fi a broadcast is lost in 1 of 3-5 tries, and in bursts of 2-3 s:
+ * 3 sends in 0.8 s all fell into one burst, goal 105 #004); it ends 0.4 s after the first answer that counts.
+ * An answer counts only when it carries this round's
  * nonce and, when the phone holds the LAN token, a valid HMAC-SHA256 signature keyed by the token (D2): the token itself
  * is never sent anywhere before the service proved it holds it. benchd_client.verify_answer() is the reference.
  */
 final class BenchFind {
     static final int PROTO = 2;
+    /** When the sends of a round go out, ms from its start (spread over a burst of losses, #004). */
+    static final int[] SEND_AT_MS = {0, 400, 900, 1600, 2400};
     static final int DISCOVERY_PORT = 5082;
     static final int HTTP_PORT = 5080;
     static final String OK = "ok", UNSIGNED = "unsigned", BAD_SIG = "bad_sig", WRONG_NONCE = "wrong_nonce",
@@ -115,7 +119,8 @@ final class BenchFind {
         String cacheId, cacheHost;
         final List<Integer> ports = new ArrayList<>();         // discovery ports
         final List<String> targets = new ArrayList<>();        // broadcast addresses
-        int sends = 3, windowMs = 1200, probeMs = 1500;
+        int[] sendAtMs = SEND_AT_MS;
+        int windowMs = 3000, probeMs = 1500, graceMs = 400;
         boolean skipHints;
     }
 
@@ -361,68 +366,78 @@ final class BenchFind {
         }
     }
 
-    /** Every benchd that answers one broadcast round, verdicts filled in. */
+    /** Every benchd that answers one broadcast round, verdicts filled in. The round ends at windowMs, or graceMs after
+     * the first answer acceptable with this token. */
     static List<Answer> broadcast(Binder b, List<String> targets, List<Integer> ports, String token, String nonce,
-                                  int sends, int windowMs) {
+                                  int[] sendAtMs, int windowMs, int graceMs) {
         List<Answer> out = new ArrayList<>();
         byte[] q = request(nonce).getBytes(StandardCharsets.US_ASCII);
         // The plain request of goal 104 too: an old benchd answers only that, and any answer means the PC is on.
         byte[] old = "BENCHD?".getBytes(StandardCharsets.US_ASCII);
         long t0 = System.nanoTime();
+        long end = t0 + windowMs * 1000000L;
+        int next = 0;
         try (DatagramSocket s = new DatagramSocket()) {
             b.bind(s);
             s.setBroadcast(true);
             byte[] buf = new byte[1024];
-            for (int k = 0; k < sends; k++) {
-                for (String t : targets) {
-                    InetAddress to;
-                    try {
-                        to = InetAddress.getByName(t);
-                    } catch (IOException e) {
-                        continue;
-                    }
-                    for (int p : ports) {
+            while (true) {
+                long now = System.nanoTime();
+                if (now >= end) {
+                    break;
+                }
+                if (next < sendAtMs.length && now >= t0 + sendAtMs[next] * 1000000L) {
+                    next++;
+                    for (String t : targets) {
+                        InetAddress to;
                         try {
-                            s.send(new DatagramPacket(q, q.length, to, p));
-                            s.send(new DatagramPacket(old, old.length, to, p));
-                        } catch (IOException ignored) {
-                            // one target may be unreachable; the others still count
+                            to = InetAddress.getByName(t);
+                        } catch (IOException e) {
+                            continue;
+                        }
+                        for (int p : ports) {
+                            try {
+                                s.send(new DatagramPacket(q, q.length, to, p));
+                                s.send(new DatagramPacket(old, old.length, to, p));
+                            } catch (IOException ignored) {
+                                // one target may be unreachable; the others still count
+                            }
                         }
                     }
                 }
-                long end = t0 + (long) (k + 1) * windowMs * 1000000L / sends;
-                while (true) {
-                    long left = (end - System.nanoTime()) / 1000000L;
-                    if (left <= 0) {
+                long until = next < sendAtMs.length ? Math.min(end, t0 + sendAtMs[next] * 1000000L) : end;
+                long left = (until - System.nanoTime()) / 1000000L;
+                if (left <= 0) {
+                    continue;
+                }
+                s.setSoTimeout((int) Math.max(1, left));
+                DatagramPacket p = new DatagramPacket(buf, buf.length);
+                try {
+                    s.receive(p);
+                } catch (SocketTimeoutException e) {
+                    continue;
+                }
+                String text = new String(p.getData(), 0, p.getLength(), StandardCharsets.UTF_8);
+                Answer a = parse(text, p.getAddress().getHostAddress(), (System.nanoTime() - t0) / 1000000L, "broadcast");
+                if (NOT_BENCHD.equals(a.verdict)) {
+                    continue;
+                }
+                a.verdict = verify(a, token, nonce);
+                int seen = -1;
+                for (int i = 0; i < out.size(); i++) {
+                    if (out.get(i).hostPort().equals(a.hostPort())) {
+                        seen = i;
                         break;
                     }
-                    s.setSoTimeout((int) Math.max(1, left));
-                    DatagramPacket p = new DatagramPacket(buf, buf.length);
-                    try {
-                        s.receive(p);
-                    } catch (SocketTimeoutException e) {
-                        break;
-                    }
-                    String text = new String(p.getData(), 0, p.getLength(), StandardCharsets.UTF_8);
-                    Answer a = parse(text, p.getAddress().getHostAddress(), (System.nanoTime() - t0) / 1000000L,
-                            "broadcast");
-                    if (NOT_BENCHD.equals(a.verdict)) {
-                        continue;
-                    }
-                    a.verdict = verify(a, token, nonce);
-                    int seen = -1;
-                    for (int i = 0; i < out.size(); i++) {
-                        if (out.get(i).hostPort().equals(a.hostPort())) {
-                            seen = i;
-                            break;
-                        }
-                    }
-                    if (seen < 0) {
-                        out.add(a);
-                    } else if (OLD.equals(out.get(seen).verdict) && !OLD.equals(a.verdict)) {
-                        a.ms = out.get(seen).ms;
-                        out.set(seen, a);            // a new benchd answers both: its signed answer counts
-                    }
+                }
+                if (seen < 0) {
+                    out.add(a);
+                } else if (OLD.equals(out.get(seen).verdict) && !OLD.equals(a.verdict)) {
+                    a.ms = out.get(seen).ms;
+                    out.set(seen, a);            // a new benchd answers both: its signed answer counts
+                }
+                if (acceptable(a.verdict, token)) {
+                    end = Math.min(end, System.nanoTime() + graceMs * 1000000L);   // others may still answer
                 }
             }
         } catch (IOException e) {
@@ -448,7 +463,8 @@ final class BenchFind {
                 }
             }
         }
-        List<Answer> got = broadcast(b, cfg.targets, cfg.ports, cfg.token, newNonce(rnd), cfg.sends, cfg.windowMs);
+        List<Answer> got = broadcast(b, cfg.targets, cfg.ports, cfg.token, newNonce(rnd), cfg.sendAtMs, cfg.windowMs,
+                cfg.graceMs);
         r.all.addAll(got);
         List<Answer> ok = new ArrayList<>();
         for (Answer a : got) {
