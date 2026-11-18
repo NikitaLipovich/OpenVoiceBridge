@@ -141,6 +141,8 @@ public class BenchActivity extends Activity implements BenchUi {
     private volatile Network wifi;
     private volatile String wifiIp;
     private volatile int wifiPrefix;
+    private volatile String netKey;          // "network/ip" of the Wi-Fi now
+    private String svcNetKey;                // ... when the service in use was found
     private ConnectivityManager cm;
     private ConnectivityManager.NetworkCallback netCallback;
     private List<String> s3Seen = new ArrayList<>();
@@ -277,6 +279,12 @@ public class BenchActivity extends Activity implements BenchUi {
             if (!running) {
                 return;
             }
+            if (wifi != null && mode == MODE_SERVICE && (svcNetKey == null || svcNetKey.equals(netKey))) {
+                // The network as it was when the service was found (or not known yet then: the first event after
+                // registering the callback): no change, no search.
+                svcNetKey = netKey;
+                return;
+            }
             failures = 0;
             if (wifi == null) {
                 stopDirect("нет Wi-Fi: телефон не в сети ПК");
@@ -305,13 +313,12 @@ public class BenchActivity extends Activity implements BenchUi {
                         prefix = la.getPrefixLength();
                     }
                 }
-                // The first event after registering is the network as it is, not a change: it only starts a search
-                // when nothing is connected yet (the search of onResume ran before the Wi-Fi was known).
-                boolean changed = key.isEmpty() ? mode != MODE_SERVICE : !(n + "/" + ip).equals(key);
+                boolean changed = !(n + "/" + ip).equals(key);
                 wifi = n;
                 wifiIp = ip;
                 wifiPrefix = prefix;
                 key = n + "/" + ip;
+                netKey = key;
                 if (changed) {
                     main.removeCallbacks(networkChanged);
                     main.postDelayed(networkChanged, 1000);        // one search for a burst of events
@@ -324,6 +331,7 @@ public class BenchActivity extends Activity implements BenchUi {
                     wifi = null;
                     wifiIp = null;
                     key = "";
+                    netKey = null;
                     main.removeCallbacks(networkChanged);
                     main.postDelayed(networkChanged, 1000);
                 }
@@ -573,6 +581,7 @@ public class BenchActivity extends Activity implements BenchUi {
             BenchFind.Answer a = r.chosen;
             svcHost = a.hostPort();
             svcVerified = BenchFind.OK.equals(a.verdict);
+            svcNetKey = netKey;
             Map<String, Object> c = new LinkedHashMap<>();
             c.put("host", a.addr);
             c.put("port", (long) a.httpPort);
