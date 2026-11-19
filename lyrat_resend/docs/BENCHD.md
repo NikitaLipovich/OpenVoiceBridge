@@ -75,8 +75,6 @@ pythonw.exe C:\Users\Admin\workspace\phone_stream\esp32s3_phone_stream\lyrat_res
 | `panic` | Guru Meditation, abort, brownout reset, переполнение стека |
 | `bod` | вырос счётчик `bod … trips=N` (просадки питания LyraT) |
 | `net_down` / `net_up` | Wi-Fi S3 (`wifi lost`, `wifi off`, `wifi ip`) |
-| `afh_map` | LyraT дала контроллеру карту AFH (`AFH map`: `n`, `map`, `src`, `mode`, `ap`, `excl`, `why`; гоал 106) |
-| `wifi_scan` | пассивный скан Wi-Fi S3 (`wifi scan`: `aps`, `nets`, `top`; гоал 106) |
 
 Свои события службы: `board_lost` / `board_back` (S3 не отвечает на `UQ` и молчит в логе; LyraT — нет кадров по UART
 дольше `--lost-s`), `log_gap` (потери строк: на плате / в пути), `cmd` (команды через службу: кто, что, итог), `lock`

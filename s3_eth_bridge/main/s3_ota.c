@@ -643,9 +643,3 @@ void s3_ota_start(bool network)
     xTaskCreatePinnedToCore(udp_task, "ota_udp", 6144, (void *)(intptr_t)sock, 4, NULL, 0);
     xTaskCreatePinnedToCore(relay_task, "ota_relay", 4096, NULL, 4, NULL, 0);
 }
-
-// Goal 106: an update of this board or of the LyraT is going on (the Wi-Fi scan waits).
-bool s3_ota_busy(void)
-{
-    return s_ota_open || s_relay_busy();
-}

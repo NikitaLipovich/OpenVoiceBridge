@@ -166,16 +166,6 @@ class Channel:
         got = self._ask("UO %d" % seconds, lambda d: d.startswith(b"UO "))
         return int(got.split()[2]) if got else None
 
-    def afh(self, scan=False):
-        """What the S3 sends the LyraT for its AFH map ("UA", goal 106) as a dict (ap, second, rssi, assoc, bw40,
-        scan_age, nets [[primary, second, rssi]], scans, ...), or with scan=True asks for a passive scan now and returns
-        the code (0 started, 1 the LyraT has the headset channel, 2 busy, 3 no Wi-Fi). None without an answer."""
-        if scan:
-            got = self._ask("UA scan", lambda d: d.startswith(b"UA scan "))
-            return int(got.split()[2]) if got else None
-        got = self._ask("UA", lambda d: d.startswith(b"{") and b'"nets"' in d)
-        return json.loads(got) if got else None
-
     def restart_s3(self, timeout=20.0):
         """Restart of the S3 over the network ("UX <boot>": a repeat after the restart is refused by the new boot id).
         Returns the new boot id once the S3 answers again, None when it did not restart or come back. Goal 093."""

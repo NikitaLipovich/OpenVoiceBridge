@@ -27,7 +27,6 @@ void s3_health(s3_health_t *h);
 void s3_ota_start(bool network);                            // self-test always; with the network UDP 5007 and the relay
 void s3_ota_on_lyrat_reply(const uint8_t *payload, size_t len);   // a frame CTL_T_OTA_ACK came
 const char *s3_ota_selftest_name(void);
-bool s3_ota_busy(void);                                     // goal 106: an update runs
 
 // --- s3_dbglog.c ----------------------------------------------------------------------------------------------------
 

@@ -108,23 +108,5 @@ int16_t host_soft_limit(int32_t s) { return call_soft_limit(s); }
 #include "upd_mode.h"
 upd_watch_t *host_watch_new(void) { return (upd_watch_t *)calloc(1, sizeof(upd_watch_t)); }
 
-// Goal 106: the AFH map policy of the LyraT (afh_map.c) as an opaque object.
-#include "afh_map.h"
-afh_ctl_t *host_afh_ctl_new(int mode)
-{
-    afh_ctl_t *c = (afh_ctl_t *)calloc(1, sizeof(afh_ctl_t));
-    afh_ctl_init(c, (afh_mode_t)mode);
-    return c;
-}
-
-// mode, have, applied_src, force, deferred, reports, bad, applies, deferrals, rep_ms; applied map into map10, the
-// exclusions of the last target into excl
-void host_afh_ctl_info(const afh_ctl_t *c, uint32_t *v, uint8_t *map10, char *excl, size_t cap)
-{
-    v[0] = c->mode; v[1] = c->have; v[2] = c->applied_src; v[3] = c->force; v[4] = c->deferred; v[5] = c->reports;
-    v[6] = c->bad; v[7] = c->applies; v[8] = c->deferrals; v[9] = c->rep_ms;
-    memcpy(map10, c->applied, AFH_MAP_BYTES);
-    snprintf(excl, cap, "%s", c->excl);
-}
 // goal 102: the size of the mode state, so that Python allocates it
 size_t host_sizeof_hfm(void) { return sizeof(hfm_t); }

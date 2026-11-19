@@ -27,9 +27,8 @@ Variants compile bench switches through the ignored main/bench_variant.h:
   mac_b<I>p<N>                     byte I of the address plus N, for bench experiments that may burn an address (goal 055)
   no_ctl_uart                      the control UART task is not started (goal 057 #004); commands through the S3 stop working
   bredr_p9, bredr_p6, bredr_p3, bredr_n12   fixed BR/EDR transmit power, dBm, the boot log prints it, goals 062, 063: more current in transmit
-  afh_N, afhassess_N, esco_pkt_xNNN, esco_lat_N  goal 063, only in its sandbox build: Wi-Fi channels the host marks bad (bit 0 ch 1, bit 1 ch 6, bit 2 ch 11),
-                                   the controller's own assessment of channels on or off,
-                                   packet types and latency the board allows when the phone opens the channel
+  esco_pkt_xNNN, esco_lat_N       goal 063, only in its sandbox build: packet types and latency the board allows when the
+                                   phone opens the channel (the AFH variants went with goal 109)
   no_first_sniff                   the board does not ask for sniff before the phone, as before goal 055: burns addresses, comparison only
   no_wbs   CONFIG_BT_HFP_WBS_ENABLE=n in sdkconfig: the phone can only choose CVSD; any other variant restores =y
   fdrop    test build: console commands fdrop P B and fdstat replace frames with a marked loss, see goal 045
@@ -69,8 +68,8 @@ MACROS = {"no_pa": ("BENCH_NO_PA", 1), "no_bt": ("BENCH_NO_BT", 1),
           "bredr_p9": ("BENCH_BREDR_POWER", 7), "bredr_p6": ("BENCH_BREDR_POWER", 6), "bredr_p3": ("BENCH_BREDR_POWER", 5),
           "bredr_n12": ("BENCH_BREDR_POWER", 0), "pc": ("BENCH_DEFAULT_MODE_PC", 1)}
 MAC_SHIFT = re.compile(r"^mac_b([0-5])p([1-9][0-9]?)$")
-BENCH_NUMBER = re.compile(r"^(afhassess|afh|esco_pkt|esco_lat)_(x[0-9a-f]+|[0-9]+)$")   # hex only with x
-BENCH_NUMBER_MACROS = {"afhassess": "BENCH_AFH_ASSESS", "afh": "BENCH_AFH_BLOCK", "esco_pkt": "BENCH_ESCO_PKT", "esco_lat": "BENCH_ESCO_LAT"}
+BENCH_NUMBER = re.compile(r"^(esco_pkt|esco_lat)_(x[0-9a-f]+|[0-9]+)$")   # hex only with x
+BENCH_NUMBER_MACROS = {"esco_pkt": "BENCH_ESCO_PKT", "esco_lat": "BENCH_ESCO_LAT"}
 
 
 def macro_of(name: str):

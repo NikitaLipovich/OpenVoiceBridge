@@ -48,13 +48,11 @@ class FwVariants(unittest.TestCase):
     def test_known_names(self):
         self.assertEqual(fw.macro_of("bredr_p6"), ("BENCH_BREDR_POWER", 6))
         self.assertEqual(fw.macro_of("mac_b3p2"), ("BENCH_MAC_PATCH", 3 * 256 + 2))
-        self.assertEqual(fw.macro_of("afh_5"), ("BENCH_AFH_BLOCK", 5))
         self.assertEqual(fw.macro_of("esco_pkt_x3c8"), ("BENCH_ESCO_PKT", 0x3C8))
-        self.assertEqual(fw.macro_of("afhassess_0"), ("BENCH_AFH_ASSESS", 0))
         self.assertEqual(fw.macro_of("esco_lat_10"), ("BENCH_ESCO_LAT", 10))
 
     def test_hex_without_x_is_unknown_not_a_crash(self):      # goal 092 #003
-        for name in ("afh_1f", "esco_pkt_3c8", "afh_", "afh_x", "mac_b6p1", "nothing"):
+        for name in ("esco_lat_1f", "esco_pkt_3c8", "esco_lat_", "esco_pkt_x", "mac_b6p1", "nothing"):
             self.assertIsNone(fw.macro_of(name), name)
 
 

@@ -100,7 +100,7 @@ class Variant(unittest.TestCase):
         self.check("#pragma once\n#define BENCH_MAC_PATCH 257\n", "CONFIG_BT_HFP_WBS_ENABLE=y\n", "mac_b1")
         self.check("#define BENCH_MAC_PATCH 517\n#define BENCH_FRAME_DROP 1\n", "", "mac_b2p5+fdrop")
         self.check("#define BENCH_MAC_PATCH 257\n", "# CONFIG_BT_HFP_WBS_ENABLE is not set\n", "mac_b1+no_wbs")
-        self.check("#define BENCH_AFH_BLOCK 5\n", "", "afh_5")
+        self.check("#define BENCH_ESCO_LAT 5\n", "", "esco_lat_5")
 
     def test_round_trip_through_set_variant_names(self):
         import fw

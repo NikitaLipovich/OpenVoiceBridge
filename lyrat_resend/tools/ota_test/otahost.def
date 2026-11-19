@@ -65,24 +65,6 @@ EXPORTS
     upd_watch_left_s
     upd_command
     host_watch_new
-    afh_report_parse
-    afh_report_encode
-    afh_scan_reduce
-    afh_span
-    afh_map_all
-    afh_map_count
-    afh_map_hex
-    afh_map_from_hex
-    afh_build
-    afh_ctl_init
-    afh_ctl_on_ack
-    afh_ctl_target
-    afh_ctl_on_slc
-    afh_ctl_set_mode
-    afh_ctl_poll
-    afh_ctl_applied
-    host_afh_ctl_new
-    host_afh_ctl_info
     hfm_init
     hfm_on_paired
     hfm_on_slc
