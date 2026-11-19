@@ -521,3 +521,54 @@ class CHfm:
 def hfm_short(bda):
     out = C.create_string_buffer(16)
     return lib.hfm_addr_short(_addr(bda), out, 16).decode()
+
+# --- the LyraT's microphone mute: the rules of mic_mute.c (goal 111) ---------------------------------------------------
+
+lib.host_sizeof_mm.restype = C.c_size_t
+lib.mm_init.argtypes = [C.c_void_p]
+lib.mm_key_poll.argtypes = [C.c_void_p, C.c_int, C.c_uint32]
+lib.mm_set.argtypes = [C.c_void_p, C.c_int]
+lib.mm_command.argtypes = [C.c_void_p, C.c_char_p, C.c_char_p, C.c_size_t]
+lib.mm_apply.argtypes = [C.c_void_p, C.c_void_p, C.c_size_t]
+lib.mm_state_name.argtypes = [C.c_int]
+lib.mm_state_name.restype = C.c_char_p
+MM_OFF, MM_ON, MM_TOGGLE = 0, 1, 2
+MM_KEY = ("none", "toggle", "long")
+
+
+class CMicMute:
+    """mm_t of mic_mute.c: key debounce, the command "mute" and the ramp of the samples to the phone."""
+
+    class _S(C.Structure):
+        _fields_ = [("muted", C.c_uint8), ("key_down", C.c_uint8), ("key_count", C.c_uint8), ("pad", C.c_uint8),
+                    ("down_ms", C.c_uint32), ("gain", C.c_int32)]
+
+    def __init__(self):
+        assert C.sizeof(self._S) == lib.host_sizeof_mm(), "mm_t layout changed: update CMicMute._S"
+        self.s = self._S()
+        lib.mm_init(C.byref(self.s))
+
+    @property
+    def muted(self):
+        return bool(self.s.muted)
+
+    @property
+    def gain(self):
+        return self.s.gain
+
+    def key(self, pressed, now_ms):
+        return MM_KEY[lib.mm_key_poll(C.byref(self.s), int(bool(pressed)), now_ms & 0xFFFFFFFF)]
+
+    def set(self, how):
+        return bool(lib.mm_set(C.byref(self.s), how))
+
+    def command(self, args):
+        out = C.create_string_buffer(64)
+        rc = lib.mm_command(C.byref(self.s), args.encode(), out, 64)
+        return rc, out.value.decode()
+
+    def apply(self, samples):
+        """samples: a list or array of int16; returns the processed list."""
+        buf = (C.c_int16 * len(samples))(*[int(v) for v in samples])
+        lib.mm_apply(C.byref(self.s), buf, len(samples))
+        return list(buf)

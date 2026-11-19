@@ -76,3 +76,10 @@ EXPORTS
     hfm_slc_name
     hfm_addr_short
     host_sizeof_hfm
+    mm_init
+    mm_key_poll
+    mm_set
+    mm_command
+    mm_apply
+    mm_state_name
+    host_sizeof_mm

@@ -10,7 +10,8 @@ rec is a record of udplog.parse_records() (board, boot, seq, text; joined by udp
 
 Types: boot (a new boot id of a board; reason from the LyraT's first line "BOOT reset_reason=X code=N"), slc_up,
 slc_down (after_s, acl_reason), hfp_down, acl_down (reason), sco_open (codec), sco_close, ota_start, ota_done, ota_fail,
-ota_rollback, panic, bod (supply dips: the counter of "bod ... trips=N" grew), net_down, net_up (the S3's Wi-Fi).
+ota_rollback, panic, bod (supply dips: the counter of "bod ... trips=N" grew), net_down, net_up (the S3's Wi-Fi),
+mic_mute (state on|off, src key|cmd|boot: the LyraT's mic, goal 111).
 benchd adds board_lost/board_back, log_gap, cmd, lock, job and benchd from its own state.
 """
 import json
@@ -50,6 +51,7 @@ RULES = [
     ("net_down", "s3", re.compile(r"wifi lost \(reason (-?\d+)\)"), (("reason", int),)),
     ("net_down", "s3", re.compile(r"wifi off for (\d+) s"), (("seconds", int),)),
     ("net_up", "s3", re.compile(r"wifi ip \S+"), ()),
+    ("mic_mute", "lyrat", re.compile(r"MIC MUTE (on|off) src=(\w+)"), (("state", str), ("src", str))),
 ]
 
 

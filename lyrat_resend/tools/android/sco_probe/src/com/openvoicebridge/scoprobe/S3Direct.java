@@ -320,6 +320,7 @@ final class S3Direct {
             ly.put("ver", verLyrat);
             ly.put("last_line", lastLyrat);
             ly.put("sco_open", flags instanceof Long && (Long) flags >= 0 ? ((Long) flags & 2) != 0 : null);
+            ly.put("mic_muted", flags instanceof Long && (Long) flags >= 0 ? ((Long) flags & 4) != 0 : null);   // goal 111
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("mode", "s3-direct");
             out.put("s3", s3);

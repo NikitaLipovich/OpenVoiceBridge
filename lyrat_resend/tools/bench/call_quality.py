@@ -124,6 +124,8 @@ def verdict(r):
         if not m:
             continue
         name = names[key]
+        if key == "up" and (r.get("mute") or {}).get("whole"):
+            continue            # goal 111: the owner kept the mic off the whole call: its silence is no defect
         if m.get("silent"):
             p.append("%s: линия молчит, в записи нет звука." % name)
             continue

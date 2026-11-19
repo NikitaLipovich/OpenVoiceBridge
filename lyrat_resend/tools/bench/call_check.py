@@ -238,6 +238,8 @@ class CallCheck:
         text = "%02d:%02d %s | вниз %6s дБ %s | вверх %6s дБ %s | потеряно %d/%d пак. | обрывов %d | задержка %s мс" % (
             int(t) // 60, int(t) % 60, state, show(down), bar(down), show(up),
             bar(up), self.counter.lost("call"), self.counter.lost("mic"), breaks, lat_ms)
+        # Goal 111: the LyraT's mic muted (key Rec, command, panel): the phone gets silence, the up line here is before it.
+        text += mute_mark(self.rec.muted)
         if sys.stdout.isatty():
             sys.stdout.write("\r" + text + "   ")
             sys.stdout.flush()
@@ -307,7 +309,8 @@ class CallCheck:
     # --- after the call --------------------------------------------------------------------------------------------------
 
     def finish(self, s, tap, consumer=None):
-        files = build_files(self.out, self.prefix, tap, self.rec.intervals, keep_raw=self.args.keep_raw)
+        muted = self.rec.mute_intervals(self.rec.t_start + (s.get("recorder_ran_s") or 0))
+        files = build_files(self.out, self.prefix, tap, self.rec.intervals, keep_raw=self.args.keep_raw, muted=muted)
         self.files = files      # start_at: the PC time of sample 0 of the files (call_check --compare needs it)
         closed = [iv for iv in self.rec.intervals if iv[1] is not None]
         latency = self.latency.summary(within=closed) if closed else self.latency.summary()
@@ -350,7 +353,44 @@ def mono(x):
     return x[:, 0].copy() if x.shape[1] == 1 else ((x[:, 0].astype(np.int32) + x[:, 1].astype(np.int32)) >> 1).astype(np.int16)
 
 
-def build_files(out, prefix, tap, intervals, keep_raw=False):
+def mute_mark(muted):
+    """The live line's mark of the LyraT's mic (goal 111)."""
+    return " | МИКРОФОН ВЫКЛ" if muted else ""
+
+
+def zero_muted(x, muted_s, rate=RATE):
+    """A copy of x with the muted stretches [[from_s, to_s]] (seconds of x) set to 0: the phone got silence there."""
+    y = np.array(x, dtype=np.int16, copy=True)
+    for a, b in muted_s:
+        y[max(int(round(a * rate)), 0):max(int(round(b * rate)), 0)] = 0
+    return y
+
+
+def mute_gaps(muted_s, rate=RATE):
+    """The muted stretches as gaps [start, length] in samples, the form call_quality.line_metrics takes."""
+    return [[int(round(a * rate)), int(round((b - a) * rate))] for a, b in muted_s if b > a]
+
+
+def cut_muted(x, gaps, muted_s, rate=RATE):
+    """x without its muted stretches, and the gaps moved to the cut line (those inside a muted stretch go): the quality
+    of the up line is judged only where the mic was on (goal 111)."""
+    keep = np.ones(len(x), dtype=bool)
+    for a, b in muted_s:
+        keep[max(int(round(a * rate)), 0):max(int(round(b * rate)), 0)] = False
+    if keep.all():
+        return x, gaps
+    pos = np.cumsum(keep) - 1          # index in the cut line of each kept sample
+    moved = []
+    for start, length in gaps:
+        s0, s1 = max(start, 0), min(start + length, len(x))
+        if s1 <= s0 or not keep[s0:s1].any():
+            continue
+        idx = np.nonzero(keep[s0:s1])[0]
+        moved.append([int(pos[s0 + idx[0]]), int(idx.size)])
+    return x[keep], moved
+
+
+def build_files(out, prefix, tap, intervals, keep_raw=False, muted=None):
     """down, up and both on one time line. Each WAV of the recorder starts at its own first packet; t0_at (the lower
     envelope of the arrivals) is the PC time of its sample 0, so the shift between them is (t0 mic - t0 call)."""
     out = Path(out)
@@ -374,6 +414,10 @@ def build_files(out, prefix, tap, intervals, keep_raw=False):
     length = max(int(round((tb - ta) * RATE)), 0)
     sc, sm = int(round((ta - t0c) * RATE)), int(round((ta - t0m) * RATE))
     down, up = _take(down_all, sc, length), _take(up_all, sm, length)
+    # Goal 111: the muted stretches in seconds of the files; up is zeroed there, as the phone got it.
+    muted_s = [[round(max(a - ta, 0.0), 2), round(min(b - ta, length / RATE), 2)] for a, b in (muted or [])
+               if b - ta > 0 and a - ta < length / RATE]
+    up = zero_muted(up, muted_s)
     paths = {k: out / ("%s_%s.wav" % (prefix, k)) for k in ("down", "up", "both")}
     _write(paths["down"], down, 1)
     _write(paths["up"], up, 1)
@@ -388,7 +432,8 @@ def build_files(out, prefix, tap, intervals, keep_raw=False):
     if call.get("first_frame") is not None and mic.get("first_frame") is not None and call.get("t0_at") and mic.get("t0_at"):
         offset = int(round((t0m - t0c) * RATE)) - (mic["first_frame"] - call["first_frame"])
     return {"paths": {k: str(v) for k, v in paths.items()}, "down": down, "up": up, "gaps": gaps, "sco": sco,
-            "start_at": ta, "seconds": round(length / RATE, 2), "shift_ms": round((t0m - t0c) * 1000, 2), "counter_offset": offset}
+            "start_at": ta, "seconds": round(length / RATE, 2), "shift_ms": round((t0m - t0c) * 1000, 2), "counter_offset": offset,
+            "muted": muted_s}
 
 
 # --- report ------------------------------------------------------------------------------------------------------------------
@@ -403,8 +448,18 @@ def _speech_part(x, gaps, sco):
 
 def build_report(s, tap, files, pipe, latency, versions, checks, consumer=None, dropped=None):
     lines = {}
+    muted = files.get("muted") or []
+    mute = {"intervals": muted, "seconds": round(sum(b - a for a, b in muted), 2), "count": len(muted), "whole": False}
     for key in ("down", "up"):
         part, gaps = _speech_part(files[key], files["gaps"][key], files["sco"])
+        if key == "up" and muted:
+            # Goal 111: silence while the owner muted the mic is no defect: only the rest of the line is judged.
+            off = files["sco"][0][0] if files["sco"] else 0.0
+            n = len(part)
+            in_part = [[max(a - off, 0.0), min(b - off, n / RATE)] for a, b in muted if b - off > 0 and a - off < n / RATE]
+            part, gaps = cut_muted(part, gaps, in_part)
+            mute["in_channel_s"] = round(sum(b - a for a, b in in_part), 2)
+            mute["whole"] = n > 0 and len(part) < RATE // 2      # under 0.5 s left with the mic on
         lines[key] = cq.line_metrics(part, gaps)
     stream = {}
     for key, name in (("down", "call"), ("up", "mic")):
@@ -431,6 +486,7 @@ def build_report(s, tap, files, pipe, latency, versions, checks, consumer=None, 
         "live": {k: pipe.get(k) for k in ("blocks", "blocks_no_down", "blocks_no_up", "late", "breaks", "relocks", "segments",
                                           "segment_log", "consumer_errors")},
         "pcm_dropped": dropped,
+        "mute": mute,
     }
     ok, problems = cq.verdict(report)
     report["verdict"] = {"ok": ok, "problems": problems, "line": cq.verdict_line(ok, problems)}
@@ -481,6 +537,12 @@ def render_md(r):
     a = r["alignment"]
     out.append("Выравнивание линий: сдвиг файлов %s мс, сдвиг счётчиков по файлам %s, по живому потоку %s кадров." % (
         a["file_shift_ms"], a["counter_offset_files"], a["counter_offset_live"]))
+    mu = r.get("mute") or {}
+    if mu.get("count"):
+        out += ["", "## Микрофон выключался (кнопка Rec, команда mute, пульт)", "",
+                "%d раз, всего %.1f с: %s. В эти интервалы телефон получал тишину; линия `up` в файлах там обнулена, и "
+                "качество микрофона считается только по остальному времени — тишина при выключенном микрофоне не дефект." % (
+                    mu["count"], mu["seconds"], ", ".join("%.1f–%.1f с" % (a, b) for a, b in mu["intervals"]))]
     if r["verdict"]["problems"]:
         out += ["", "## Проблемы", ""] + ["- %s" % p for p in r["verdict"]["problems"]]
     out += ["", "## Что не видно в записи", "",
@@ -504,6 +566,10 @@ def explain(step, r):
     step.num("Потери S3 -> ПК", "вниз %s %%, вверх %s %%" % (r["stream"]["down"]["loss_pct"], r["stream"]["up"]["loss_pct"]))
     step.num("Уровни в речи, дБFS", "вниз %s, вверх %s" % (r["lines"]["down"]["rms_dbfs"], r["lines"]["up"]["rms_dbfs"]))
     step.num("Задержка живого потока, мс", "медиана %s, макс %s" % (lat.get("median_ms"), lat.get("max_ms")))
+    mu = r.get("mute") or {}
+    if mu.get("count"):
+        step.num("Микрофон выключен", "%d раз, %.1f с: %s" % (mu["count"], mu["seconds"], ", ".join(
+            "%.1f–%.1f с" % (a, b) for a, b in mu["intervals"])))
 
 
 # --- the self-run without a call -------------------------------------------------------------------------------------------
@@ -944,7 +1010,8 @@ def remake(directory):
     tap = json.loads((directory / "tap.json").read_text(encoding="utf-8"))
     origin = tap["call"].get("first_at") or tap["mic"].get("first_at") or 0.0
     intervals = [[origin + c["from_s"], origin + c["to_s"]] for c in s.get("channel") or []]
-    files = build_files(directory, directory.name, tap, intervals, keep_raw=True)
+    muted = [[origin + c["from_s"], origin + c["to_s"]] for c in s.get("mic_mute") or []]
+    files = build_files(directory, directory.name, tap, intervals, keep_raw=True, muted=muted)
     old = json.loads((directory / "report.json").read_text(encoding="utf-8")) if (directory / "report.json").exists() else {}
     pipe = {"align_frames": (old.get("alignment") or {}).get("counter_offset_live"), "rtt_min_ms": (old.get("latency") or {}).get("rtt_min_ms")}
     report = build_report(s, tap, files, pipe, (old.get("latency") or {}).get("pipeline") or {}, old.get("versions") or {},

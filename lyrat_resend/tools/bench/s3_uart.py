@@ -293,6 +293,11 @@ def mode_command(want=None, force=False):
     return "mode" if not want else "mode %s%s" % (want, " 1" if force else "")
 
 
+def mute_command(want=None):
+    """Console text of the LyraT's "mute" (goal 111): show, or on|off|toggle."""
+    return "mute ?" if not want else "mute %s" % want
+
+
 def mode_reply_ok(status, text):
     """The LyraT took the request: a show ("mode=..."), a switch ("saved") or the same mode ("unchanged")."""
     t = (text or "").strip()
@@ -314,6 +319,8 @@ def main():
     p = sub.add_parser("mode")
     p.add_argument("want", nargs="?", choices=["phone", "pc"])
     p.add_argument("--force", action="store_true", help="switch even with SCO open (the call or Zoom audio drops)")
+    p = sub.add_parser("mute")
+    p.add_argument("want", nargs="?", choices=["on", "off", "toggle"])
     p = sub.add_parser("linecheck")
     p.add_argument("--baud", type=int, default=9600)
     p.add_argument("--seconds", type=float, default=6.0)
@@ -347,6 +354,11 @@ def main():
         print(redact(got["text"] or ""))
         print(json.dumps({k: got[k] for k in ("status", "attempts", "ms")}))
         return 0 if mode_reply_ok(got["status"], got["text"]) else 1
+    elif args.action == "mute":
+        got = channel.command(mute_command(args.want))
+        print(got["text"] or "")
+        print(json.dumps({k: got[k] for k in ("status", "attempts", "ms")}))
+        return 0 if got["status"] == ST_OK and (got["text"] or "").startswith("mute=") else 1
     elif args.action == "reboot":
         got = channel.command("reboot 1", retries=2)
         print(redact(got["text"] or ""))

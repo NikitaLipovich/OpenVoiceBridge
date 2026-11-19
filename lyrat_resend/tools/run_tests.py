@@ -102,6 +102,10 @@ CHECKS = [
                   "pushy phone, first pairing, unknown AG, reboot, build pc), the phone mode line for line as phone-bringup, "
                   "the audio path byte for byte, hfp_states.py on those logs",
      unittest_cmd("test_dual_mode"), TESTS, 300, "base", False),
+    ("mic_mute", "the LyraT's mic mute (goal 111): the C rules of mic_mute.c (key Rec debounce vs the GPIO36 erratum, toggle on "
+                 "release, the command, the 10 ms ramp), the glue in main.c, events, benchd, panel, call_check mute "
+                 "spans, and s3_uart/call_check against the simulator",
+     unittest_cmd("test_mic_mute"), TESTS, 300, "base", True),
     ("updater", "the LyraT through its updater vs the simulator: image over Wi-Fi, a bad image kept out, no network "
                 "then the UART way, fw.py --via auto, every start through the updater (goal 096)",
      unittest_cmd("test_updater"), TESTS, 1500, "base", True),

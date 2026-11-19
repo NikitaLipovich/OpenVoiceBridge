@@ -150,6 +150,7 @@ class LyratConsole:
         self.last_reply = None
         self.cmds = self.dups = self.replies = self.hb = self.acks = 0
         self.tone = 0
+        self.muted = False      # goal 111: a boot starts with the mic on
         self.slc = 1
         self.sco = 0
         self.hfm = None         # the mode rules of goal 102, made at the first "mode"
@@ -165,6 +166,17 @@ class LyratConsole:
         if word == "tone":
             self.tone = 1 if arg.strip() == "1" else 0
             return ST_OK, "tone = %d" % self.tone
+        if word == "mute":
+            # Goal 111: main.c's "mute" with its log line; the state goes up in the heartbeat flags (bit 2).
+            a, was = arg.strip(), self.muted
+            if a in ("on", "off", "toggle"):
+                self.muted = (not was) if a == "toggle" else (a == "on")
+                if self.muted != was and self.sim:
+                    self.sim.lyrat_log("MIC MUTE %s src=cmd sco=%d" % ("on" if self.muted else "off", self.sco), tag="AUDIO")
+                return ST_OK, "mute=%s (was %s)" % ("on" if self.muted else "off", "on" if was else "off")
+            if a in ("", "?"):
+                return ST_OK, "mute=%s" % ("on" if self.muted else "off")
+            return ST_OK, "usage: mute on|off|toggle|?"
         if word == "simsco" and self.sim:
             # Test only (goal 097): the headset channel opens or closes as a call would, with the firmware's log lines.
             self.sco = 1 if arg.strip() == "1" else 0
@@ -242,7 +254,7 @@ class LyratConsole:
 
     def heartbeat(self):
         self.hb += 1
-        flags = (1 if self.slc else 0) | (2 if self.sco else 0)
+        flags = (1 if self.slc else 0) | (2 if self.sco else 0) | (4 if self.muted else 0)
         return struct.pack("<IBB", int(time.monotonic() - self.start), flags, self.tone)
 
 

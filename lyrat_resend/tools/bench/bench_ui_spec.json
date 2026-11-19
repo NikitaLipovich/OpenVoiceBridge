@@ -47,6 +47,10 @@
     {"id": "sco", "label": "Канал гарнитуры (SCO)", "cases": [
      {"if": [{"path": "lyrat.sco_open", "op": "truthy"}], "text": "открыт", "color": "warn"},
      {"text": "закрыт"}]},
+    {"id": "mic", "label": "Микрофон LyraT (кнопка Rec)", "cases": [
+     {"if": [{"path": "lyrat.mic_muted", "op": "truthy"}], "text": "ВЫКЛЮЧЕН — собеседник вас не слышит", "color": "bad"},
+     {"if": [{"path": "lyrat.mic_muted", "op": "eq", "value": false}], "text": "включён", "color": "ok"},
+     {"text": "—"}]},
     {"id": "lyrat_ver", "label": "LyraT версия", "cases": [
      {"text": "{lyrat.ver}"}]},
     {"id": "phone", "label": "Телефон (только чтение)", "via": ["benchd"], "cases": [
@@ -108,6 +112,16 @@
    "confirm": "Снять замок «{lock.holder.owner}»?", "confirm2": "Его окно или прошивка могут сломаться. Точно снять?",
    "lan_control": true, "requires_lock": false, "danger": true,
    "result": {"ok": [{"text": "замок снят"}], "fail": [{"text": "нет: {error}"}]}},
+  {"id": "mic_off", "label": "Выключить микрофон", "group": "bench", "row": 0,
+   "method": "POST", "endpoint": "/action", "body": {"name": "mic_mute", "mode": "on"},
+   "available_if": [{"path": "lyrat.mic_muted", "op": "ne", "value": true}], "unavailable_text": "микрофон уже выключен",
+   "lan_control": true, "requires_lock": true, "danger": false,
+   "via": ["benchd", "s3-direct"], "direct": {"op": "uc", "text": "mute on"}},
+  {"id": "mic_on", "label": "Включить микрофон", "group": "bench", "row": 0,
+   "method": "POST", "endpoint": "/action", "body": {"name": "mic_mute", "mode": "off"},
+   "available_if": [{"path": "lyrat.mic_muted", "op": "ne", "value": false}], "unavailable_text": "микрофон уже включён",
+   "lan_control": true, "requires_lock": true, "danger": false,
+   "via": ["benchd", "s3-direct"], "direct": {"op": "uc", "text": "mute off"}},
   {"id": "reboot_lyrat", "label": "Перезапуск LyraT", "group": "bench", "row": 1,
    "method": "POST", "endpoint": "/action", "body": {"name": "reboot_lyrat"},
    "confirm": "Точно перезапустить LyraT?", "lan_control": true, "requires_lock": true, "danger": true,

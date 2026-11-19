@@ -121,6 +121,7 @@ ACTIONS = {
     "bt_mode": {"params": {"mode": "str"}, "needs": "--bt-mode-cmd", "what": "a Bluetooth mode command on the LyraT"},
     "flash_both": {"params": {}, "what": "fw.py flash --board both as a job"},
     "call_probe": {"params": {}, "what": "call_check.py --probe 1 as a job (no call)"},
+    "mic_mute": {"params": {"mode": ["on", "off", "toggle"]}, "what": "the LyraT's mic muted or not (console mute, goal 111)"},
 }
 
 
@@ -860,7 +861,7 @@ class Benchd:
                    "log": self.s3["relay_state"]},
             "lyrat": {"lost": self.lyrat["lost"], "up_s": uq.get("lyrat_up_s"), "last_frame_ms": self.lyrat["last_frame_ms"],
                       "ver": self.lyrat["ver"], "last_line": self.lyrat["last_line"],
-                      "sco_open": self.index.sco_open},
+                      "sco_open": self.index.sco_open, "mic_muted": flag_muted(uq.get("lyrat_flags"))},
             "log_counts": self.tracker.summary(),
             "phone": {k: v for k, v in self.phone.items() if k != "checked"},
             "lock": self.lock.view(),
@@ -1178,6 +1179,18 @@ def bt_mode(svc, body, owner):
     return svc.command("lyrat", svc.args.bt_mode_cmd.format(mode=mode), owner)
 
 
+def flag_muted(flags):
+    """Goal 111: bit 2 of the LyraT's heartbeat flags (S3 query lyrat_flags); None when there is no heartbeat."""
+    return bool(flags & 4) if isinstance(flags, int) and flags >= 0 else None
+
+
+def mic_mute(svc, body, owner):
+    mode = str(body.get("mode", ""))
+    if mode not in ("on", "off", "toggle"):
+        return 400, {"error": "mode: on, off or toggle"}
+    return svc.command("lyrat", "mute " + mode, owner)
+
+
 ACTION_RUN = {
     "reboot_lyrat": lambda svc, body, owner: svc.command("lyrat", "reboot 1", owner),
     "restart_s3": lambda svc, body, owner: svc.command("s3", "restart", owner),
@@ -1185,6 +1198,7 @@ ACTION_RUN = {
     "flash_both": lambda svc, body, owner: ota_job(svc, {"board": "both"}, owner),
     "call_probe": lambda svc, body, owner: (202, svc.jobs.start("call_probe", [str(BENCH / "call_check.py"), "--probe",
                                                                                 "1"], owner)),
+    "mic_mute": mic_mute,
 }
 assert set(ACTION_RUN) == set(ACTIONS), "benchd ACTIONS and ACTION_RUN differ"
 

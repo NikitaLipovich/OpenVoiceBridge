@@ -85,7 +85,8 @@ class DirectState:
             "lyrat": {"lost": quiet or lf is None or lf < 0 or lf > max(3000, self.lost_s * 1000),
                       "up_s": uq.get("lyrat_up_s"), "last_frame_ms": lf, "ver": self.ver["lyrat"],
                       "last_line": self.last_line["lyrat"],
-                      "sco_open": bool(flags & 2) if isinstance(flags, int) and flags >= 0 else None},
+                      "sco_open": bool(flags & 2) if isinstance(flags, int) and flags >= 0 else None,
+                      "mic_muted": bool(flags & 4) if isinstance(flags, int) and flags >= 0 else None},
         }
 
 

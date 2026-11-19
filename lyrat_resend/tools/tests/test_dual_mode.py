@@ -366,7 +366,13 @@ class Source(unittest.TestCase):
             self.fail("no origin/phone-bringup in this repo: %s" % ref.stderr.strip())
         old = ref.stdout
 
+        # Goal 111 put the mic mute into mic_rx_task on purpose (after the tone, before the ring to Bluetooth; its own
+        # tests are test_mic_mute.Glue). That block is taken out of both sides, the rest stays byte for byte.
+        mute_block = ("        // Goal 111: the mute, after the tone and everything else; the frames keep going, only the samples "
+                      "ramp to 0\n        mm_apply(&s_mm, mono_buf, n);\n\n")
+
         def body(src, name):
+            src = src.replace("\r\n", "\n").replace(mute_block, "")
             i = src.index(name)
             j = src.index("\n}\n", i)
             return src[i:j]

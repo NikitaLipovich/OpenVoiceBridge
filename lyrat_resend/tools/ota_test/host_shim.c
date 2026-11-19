@@ -2,6 +2,7 @@
 // and opaque constructors for the sender, the receiver and the log ring. Made by goal 090.
 #define __attribute__(x)
 #include "hf_mode.h"
+#include "mic_mute.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -110,3 +111,5 @@ upd_watch_t *host_watch_new(void) { return (upd_watch_t *)calloc(1, sizeof(upd_w
 
 // goal 102: the size of the mode state, so that Python allocates it
 size_t host_sizeof_hfm(void) { return sizeof(hfm_t); }
+
+size_t host_sizeof_mm(void) { return sizeof(mm_t); }   // goal 111: CMicMute checks its layout

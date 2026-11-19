@@ -105,6 +105,20 @@ final class BenchSpec {
                 new Case(null, "нет: {error}", ""),
             })
             .via(1, null, null, null);
+    static final Action A_MIC_OFF = new Action("mic_off", "Выключить микрофон", "bench", 0, "POST", "/action", "{\"name\":\"mic_mute\",\"mode\":\"on\"}",
+            null,
+            null, null, false, true,
+            null, new Cond[]{new Cond("lyrat.mic_muted", "ne", Boolean.TRUE)}, "микрофон уже выключен",
+            null,
+            null)
+            .via(3, "uc", "mute on", null);
+    static final Action A_MIC_ON = new Action("mic_on", "Включить микрофон", "bench", 0, "POST", "/action", "{\"name\":\"mic_mute\",\"mode\":\"off\"}",
+            null,
+            null, null, false, true,
+            null, new Cond[]{new Cond("lyrat.mic_muted", "ne", Boolean.FALSE)}, "микрофон уже включён",
+            null,
+            null)
+            .via(3, "uc", "mute off", null);
     static final Action A_REBOOT_LYRAT = new Action("reboot_lyrat", "Перезапуск LyraT", "bench", 1, "POST", "/action", "{\"name\":\"reboot_lyrat\"}",
             null,
             "Точно перезапустить LyraT?", null, true, true,
@@ -154,7 +168,7 @@ final class BenchSpec {
             null,
             null)
             .via(3, "cmd", null, null);
-    static final Action[] ACTIONS = {A_TAKE, A_RENEW, A_GIVE, A_STEAL, A_REBOOT_LYRAT, A_RESTART_S3, A_BT_MODE, A_FLASH_BOTH, A_CALL_PROBE, A_OTA, A_CMD};
+    static final Action[] ACTIONS = {A_TAKE, A_RENEW, A_GIVE, A_STEAL, A_MIC_OFF, A_MIC_ON, A_REBOOT_LYRAT, A_RESTART_S3, A_BT_MODE, A_FLASH_BOTH, A_CALL_PROBE, A_OTA, A_CMD};
 
     static void build(BenchUi ui) {
         ui.header(TITLE, HEADER);
@@ -182,6 +196,11 @@ final class BenchSpec {
         ui.field(new Field("sco", null, "Канал гарнитуры (SCO)", new Case[]{
             new Case(new Cond[]{new Cond("lyrat.sco_open", "truthy", null)}, "открыт", "warn"),
             new Case(null, "закрыт", ""),
+        }).via(3));
+        ui.field(new Field("mic", null, "Микрофон LyraT (кнопка Rec)", new Case[]{
+            new Case(new Cond[]{new Cond("lyrat.mic_muted", "truthy", null)}, "ВЫКЛЮЧЕН — собеседник вас не слышит", "bad"),
+            new Case(new Cond[]{new Cond("lyrat.mic_muted", "eq", Boolean.FALSE)}, "включён", "ok"),
+            new Case(null, "—", ""),
         }).via(3));
         ui.field(new Field("lyrat_ver", null, "LyraT версия", new Case[]{
             new Case(null, "{lyrat.ver}", ""),
@@ -213,6 +232,9 @@ final class BenchSpec {
         ui.action(A_GIVE);
         ui.action(A_STEAL);
         ui.panel("actions", "Действия", 3);
+        ui.actionRow();
+        ui.action(A_MIC_OFF);
+        ui.action(A_MIC_ON);
         ui.actionRow();
         ui.action(A_REBOOT_LYRAT);
         ui.action(A_RESTART_S3);

@@ -65,6 +65,28 @@ SCO_PKT = re.compile(r"SCO pkt: rx_total=(\d+) rx_correct=(\d+) rx_err=(\d+) rx_
 SCO_PKT_KEYS = ("rx_total", "rx_correct", "rx_err", "rx_none", "rx_lost", "tx_total", "tx_discarded")
 BT_RATE = re.compile(r"SCO\s+= (\w+) bt_rate=(\d+)")
 RATE_CODEC = {16000: "mSBC", 8000: "CVSD"}
+MIC_MUTE = re.compile(r"MIC MUTE (on|off) src=(\w+)")       # goal 111: the LyraT's mic muted (key Rec or command)
+FLAG_MUTED = 4                                               # goal 111: bit 2 of the heartbeat flags
+
+
+def mute_spans(marks, end):
+    """[[from, to]] of the muted stretches from marks [(t, muted, ...)] in time order; an open one ends at end."""
+    out = []
+    for mark in marks:
+        t, muted = mark[0], mark[1]
+        if muted and (not out or out[-1][1] is not None):
+            out.append([t, None])
+        elif not muted and out and out[-1][1] is None:
+            out[-1][1] = t
+    if out and out[-1][1] is None:
+        out[-1][1] = end
+    return out
+
+
+def mic_mute_of(line):
+    """("on"|"off", src) of a LyraT line "MIC MUTE on|off src=key|cmd|boot", else None."""
+    m = MIC_MUTE.search(line or "")
+    return (m.group(1), m.group(2)) if m else None
 
 
 class CallMixin:
@@ -77,11 +99,14 @@ class CallMixin:
         self.codecs = []
         self.pkt = None
         self.notes = []             # (monotonic, kind)
+        self.mic_muted = None       # goal 111: None until a MIC MUTE line (or a reset: the board starts with the mic on)
+        self.mute_src = None
 
     def add_reset(self, source, reason=None):
         super().add_reset(source, reason)
         self.notes.append((time.monotonic(), "console_reset"))
         self.sco_open = False
+        self.mic_muted = False
 
     def feed(self, raw):
         drops = self.slc_drops
@@ -97,6 +122,9 @@ class CallMixin:
         m = SCO_PKT.search(line)
         if m:
             self.pkt = dict(zip(SCO_PKT_KEYS, map(int, m.groups())))
+        mm = mic_mute_of(line)
+        if mm:
+            self.mic_muted, self.mute_src = mm[0] == "on", mm[1]
         if self.slc_drops > drops:
             self.notes.append((time.monotonic(), "slc_drop"))
 
@@ -168,6 +196,13 @@ class S3View(threading.Thread):
                 return None
             return bool(self.flags & 2)
 
+    def says_muted(self):
+        """Goal 111: the LyraT's mic muted by its heartbeat; None when the heartbeat is old."""
+        with self.lock:
+            if self.fresh_at is None or self.flags is None or                     time.monotonic() - self.fresh_at > FRESH_HB_MS / 1000.0 + QUERY_PERIOD_S:
+                return None
+            return bool(self.flags & FLAG_MUTED)
+
     def says_slc(self):
         with self.lock:
             return None if self.flags is None else bool(self.flags & 1)
@@ -199,6 +234,8 @@ class CallRecording:
         self.next_progress = 0.0
         self.noise_warned = 0
         self.saved = None
+        self.muted = None               # goal 111: the LyraT's mic muted now (True/False/None unknown)
+        self.mute_marks = []            # [(monotonic, True|False, source)] each change seen
 
     # --- start ------------------------------------------------------------------------------------------------------
 
@@ -238,6 +275,15 @@ class CallRecording:
         # The console is immediate; the heartbeat is up to 2 s old, so it speaks only when the console cannot.
         console = self.console_says()
         return console if console is not None else self.s3.says_open()
+
+    def mute_now(self):
+        # Goal 111: as for the channel, the console first (immediate), else the heartbeat (up to 2 s old).
+        console = self.watch.mic_muted if self.watch and self.watch.sp is not None else None
+        return console if console is not None else self.s3.says_muted()
+
+    def mute_intervals(self, end=None):
+        """[[from, to]] in monotonic time while the mic was muted; an open one ends at `end` (default now)."""
+        return mute_spans(self.mute_marks, end if end is not None else time.monotonic())
 
     def _note(self, kind, now):
         texts = {"console_reset": "LyraT перезагрузилась (консоль)", "lyrat_reset": "LyraT перезагрузилась (сердцебиение через S3)",
@@ -293,6 +339,14 @@ class CallRecording:
         if view is False and self.view and self.intervals and self.intervals[-1][1] is None:
             self.intervals[-1][1] = now
         self.view = view
+
+        muted = self.mute_now()
+        if muted is not None and muted != self.muted:
+            src = self.watch.mute_src if self.watch and self.watch.mic_muted is not None else "сердцебиение"
+            if self.muted is not None or muted:
+                self.say("%s: микрофон LyraT %s (%s)." % (self.at(now), "ВЫКЛЮЧЕН" if muted else "включён", src))
+            self.mute_marks.append((now, muted, src))
+            self.muted = muted
 
         if now >= self.next_progress:
             self.next_progress = now + PROGRESS_S
@@ -369,6 +423,9 @@ class CallRecording:
             "slc_drops": serial["slc_drops"] if serial else None, "stream_silences": self.silences,
             "heartbeat_answers": "%d of %d" % (s3.answered, s3.queries), "pins_ok": s3.pins_ok,
             "noise_warnings": self.noise_warned, "journal_error": self.rec.journal_error, "files": {},
+            "mic_mute": [{"from_s": round(a - origin, 2), "to_s": round(b - origin, 2), "seconds": round(b - a, 2)}
+                         for a, b in self.mute_intervals(stopped)],
+            "mic_mute_marks": [{"t_s": round(t - origin, 2), "muted": m, "src": src} for t, m, src in self.mute_marks],
         }
         ok = True
         for name, stats in (("call", call), ("mic", mic)):

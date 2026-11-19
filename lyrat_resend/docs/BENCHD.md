@@ -75,6 +75,7 @@ pythonw.exe C:\Users\Admin\workspace\phone_stream\esp32s3_phone_stream\lyrat_res
 | `panic` | Guru Meditation, abort, brownout reset, переполнение стека |
 | `bod` | вырос счётчик `bod … trips=N` (просадки питания LyraT) |
 | `net_down` / `net_up` | Wi-Fi S3 (`wifi lost`, `wifi off`, `wifi ip`) |
+| `mic_mute` | микрофон LyraT выключен/включён (гоал 111): `state` on/off, `src` key (кнопка Rec) / cmd / boot, из строки `MIC MUTE on|off src=…` |
 
 Свои события службы: `board_lost` / `board_back` (S3 не отвечает на `UQ` и молчит в логе; LyraT — нет кадров по UART
 дольше `--lost-s`), `log_gap` (потери строк: на плате / в пути), `cmd` (команды через службу: кто, что, итог), `lock`
@@ -265,7 +266,7 @@ bench.py lock run --owner 104 --ttl 900 --wait 300 -- <команда>
 
 | Запрос | Ответ |
 |---|---|
-| `GET /status` | `benchd` (pid, аптайм, файл, счётчики, диск), `s3` (addr, lost, boot, up_s, rssi, net, txp, ver, …), `lyrat` (lost, up_s, last_frame_ms, ver, sco_open), `log_counts` (потери по платам), `phone`, `lock`, `jobs`, `events_last_hour`, `relay_port`, `subscribers` |
+| `GET /status` | `benchd` (pid, аптайм, файл, счётчики, диск), `s3` (addr, lost, boot, up_s, rssi, net, txp, ver, …), `lyrat` (lost, up_s, last_frame_ms, ver, sco_open, mic_muted — бит 2 флагов сердцебиения, null без него, гоал 111), `log_counts` (потери по платам), `phone`, `lock`, `jobs`, `events_last_hour`, `relay_port`, `subscribers` |
 | `GET /logs?from=&to=&board=&grep=&limit=2000` | строки из файлов; при обрезке — последние `limit` и `truncated: true` |
 | `GET /tail?after=ID&board=&grep=&limit=500` | новые строки из памяти (последние 5000) и `last_id` |
 | `GET /events?from=&to=&type=a,b&limit=1000` | события |
