@@ -72,6 +72,7 @@
 
 #include "aec.h"
 #include "call_limit.h"
+#include "call_agc.h"
 #include "spectral_ns.h"
 #include "msbc_codec.h"
 #include "plc.h"
@@ -155,7 +156,8 @@ typedef struct {
     volatile int limiter_on;    // Soft limiter on call audio
     volatile int sns_on;        // Spectral noise suppression
     volatile int mic_gain;      // Mic SW gain (1-8)
-    volatile int call_gain;     // Call audio SW gain (1-8)
+    volatile int call_gain;     // Call audio SW gain (1-8); with agc on, the starting gain
+    volatile int agc_on;        // Goal 113: automatic gain of the call audio (call_agc.c) instead of call_gain + clip
 } dsp_cfg_t;
 
 static dsp_cfg_t s_dsp = {
@@ -168,7 +170,12 @@ static dsp_cfg_t s_dsp = {
     .sns_on     = 0,    // Step 7 mirrors the mode of voice_ns.c, the default there is not sns
     .mic_gain   = 3,    // Step 2: ×3 AFTER SNS (target ~45% full scale)
     .call_gain  = 2,
+    .agc_on     = 1,
 };
+
+// Goal 113: the call AGC. Its state belongs to i2s_tx_task; the console only asks for a reset.
+static call_agc_t s_agc;
+static volatile int s_agc_reset_req = 1;
 
 // Noise gate parameters
 #define NOISE_GATE_OPEN   450   // RMS threshold to open
@@ -1053,6 +1060,7 @@ static void i2s_tx_task(void *arg)
                 continue;
             }
             starting = false;
+            call_agc_drop_delay(&s_agc);    // the frame left from the last stream is not sent
         }
         size_t   received = 0;
         uint8_t *data     = (uint8_t *)xRingbufferReceiveUpTo(
@@ -1075,18 +1083,28 @@ static void i2s_tx_task(void *arg)
 
         size_t n = SAMPLES_PER_FRAME;
 
-        // Apply call gain + optional soft limiter
+        // Goal 113: the AGC (one frame late, no clipping by construction), or the old call gain + optional limiter
         int gain = s_dsp.call_gain;
         int use_limiter = s_dsp.limiter_on;
+        int use_agc = s_dsp.agc_on;
+
+        if (s_agc_reset_req) {
+            s_agc_reset_req = 0;
+            call_agc_init(&s_agc, (float)gain);
+        }
+        if (use_agc) call_agc_process(&s_agc, mono_buf, mono_buf, (int)n);
 
         for (size_t i = 0; i < n; i++) {
-            int32_t s = (int32_t)mono_buf[i] * gain;
+            int32_t s = mono_buf[i];
 
-            if (use_limiter) {
-                s = call_soft_limit(s);
-            } else {
-                if (s > 32767)  s = 32767;
-                if (s < -32768) s = -32768;
+            if (!use_agc) {
+                s *= gain;
+                if (use_limiter) {
+                    s = call_soft_limit(s);
+                } else {
+                    if (s > 32767)  s = 32767;
+                    if (s < -32768) s = -32768;
+                }
             }
 
             mono_buf[i] = (int16_t)s;
@@ -1109,8 +1127,8 @@ static void i2s_tx_task(void *arg)
         esp_codec_dev_write(s_codec_dev, stereo_buf, (int)(n * 2 * sizeof(int16_t)));
 
         if (++frame_cnt % 50 == 0) {
-            ESP_LOGI(TAG_AUDIO, "TX  frame=%"PRIu32" peak=%d gain=%d lim=%d",
-                     frame_cnt, peak, gain, use_limiter);
+            ESP_LOGI(TAG_AUDIO, "TX  frame=%"PRIu32" peak=%d gain=%d lim=%d agc=%d agc_db=%.1f",
+                     frame_cnt, peak, gain, use_limiter, use_agc, (double)call_agc_gain_db(&s_agc));
             peak = 0;
         }
     }
@@ -1866,6 +1884,7 @@ static void print_status(void)
     CMD_OUT("  limiter = %d", s_dsp.limiter_on);
     CMD_OUT("  mic_gain  = %d", s_dsp.mic_gain);
     CMD_OUT("  call_gain = %d", s_dsp.call_gain);
+    CMD_OUT("  agc = %d gain_db=%.1f", s_dsp.agc_on, (double)call_agc_gain_db(&s_agc));
     CMD_OUT("  tone=%d", s_tone_on);
     CMD_OUT("  mute=%s key_presses=%"PRIu32" key_long=%"PRIu32" key_now=%d", mm_state_name(s_mm.muted), s_mm_key_presses, s_mm_key_long, gpio_get_level(MM_KEY_PIN) == 0);
     {
@@ -1950,7 +1969,8 @@ static void print_help(void)
     CMD_OUT("  nscal  — sns takes a new noise profile, stay quiet for a second");
     CMD_OUT("=== Other ===");
     CMD_OUT("  lim    — Soft limiter (call)");
-    CMD_OUT("  cg N   — Call gain (1-8)");
+    CMD_OUT("  cg N   — Call gain (1-8); with agc on, the starting gain");
+    CMD_OUT("  agc on|off|? — automatic call gain, no clipping (default on); ? = gain, level, floor, guard, clips");
     CMD_OUT("  vol N  — ES8388 output vol (0-100)");
     CMD_OUT("  tone 1|2|0 — 400/1000/1800 Hz, 1 s each (2: only 1800 Hz), instead of the mic");
     CMD_OUT("  mute on|off|toggle|? — silence to the phone (frames go on); key Rec toggles, green LED = muted");
@@ -2176,6 +2196,20 @@ static void process_cmd(char *line)
             spectral_ns_set_floor_gain((float)val / 100.0f);
         }
         CMD_OUT("sns floor gain — use 'snsg N' where N=1..100 (percent)");
+    } else if (strcmp(cmd, "agc") == 0) {
+        // Goal 113: on restarts it from call_gain, off is the old call_gain + clip (lim) path
+        const char *a = line + 3;
+        while (*a == ' ') a++;
+        if (strcmp(a, "on") == 0) {
+            s_agc_reset_req = 1;
+            s_dsp.agc_on = 1;
+        } else if (strcmp(a, "off") == 0) {
+            s_dsp.agc_on = 0;
+        }
+        const call_agc_t *g = &s_agc;
+        CMD_OUT("agc=%d gain_db=%.1f level_db=%.1f floor_db=%.1f target_db=%.0f frames=%"PRIu32" speech=%"PRIu32
+                " guard=%"PRIu32" clips=%"PRIu32, s_dsp.agc_on, (double)call_agc_gain_db(g), (double)call_agc_level_db(g),
+                (double)call_agc_floor_db(g), (double)g->target_db, g->frames, g->speech_frames, g->lim_frames, g->clips);
     } else if (strcmp(cmd, "limiter") == 0 || strcmp(cmd, "lim") == 0) {
         CMD_OUT("limiter = %d", toggle(&s_dsp.limiter_on, val));
     } else if (strcmp(cmd, "esco") == 0) {
@@ -2717,6 +2751,8 @@ void app_main(void)
     lyrat_ota_init();
 
     // Tasks on Core 1 (Core 0 = BT stack)
+    call_agc_init(&s_agc, (float)s_dsp.call_gain);    // goal 113: readable by "agc ?" before the first frame
+    s_agc_reset_req = 0;
     xTaskCreatePinnedToCore(i2s_tx_task,       "i2s_tx",    4096, NULL, 15, NULL, 1);
     xTaskCreatePinnedToCore(mic_rx_task,        "mic_rx",    8192, NULL, 14, NULL, 1);
     xTaskCreatePinnedToCore(console_task,       "console",   4096, NULL,  5, NULL, 1);

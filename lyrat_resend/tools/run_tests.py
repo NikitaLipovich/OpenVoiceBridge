@@ -156,6 +156,10 @@ CHECKS = [
                   "first use) on a tone and voice, against ffmpeg; frames placed on the up line's clock, lost frames, muted "
                   "spans; the payload layout of both firmwares read from the source",
        "test_sent_tap", TESTS, 300, 2),
+    ut("call_agc", "the call AGC toward the headphones (goal 113): the firmware's call_agc.c on the PC (agchost.dll, built on first "
+                  "use): no sample over the guard on hostile input, level to the target, gain held in pauses and steady "
+                  "noise, no steps; the glue in main.c",
+       "test_call_agc", TESTS, 300, 2),
     ut("updater", "the LyraT through its updater vs the simulator: image over Wi-Fi, a bad image kept out, no network "
                   "then the UART way, fw.py --via auto, every start through the updater (goal 096)",
        "test_updater", TESTS, 1500, 74, images=True,
