@@ -422,7 +422,7 @@ class Sim(s3_emu.Emulator):
                 "bad_hdr": c["bad_header"], "bad_crc": c["bad_crc"], "trunc": c["truncated"], "noise": c["noise"],
                 "replies": self.relayed, "sent": self.cmds_sent, "refused": self.refused, "hb": self.hb_seen,
                 "last_frame_ms": int((now - self.last_frame) * 1000) if self.last_frame else -1,
-                "lyrat_up_s": hb[0] if hb else -1, "lyrat_flags": hb[1] if hb else -1}
+                "lyrat_up_s": hb[0] if hb else -1, "lyrat_flags": hb[1] if hb else -1, "sent_rx": 0, "sent_udp": 0, "sent_fail": 0}
 
     def handle_ctl(self, text, peer):
         """ctl_request(): True when the text was a control word."""

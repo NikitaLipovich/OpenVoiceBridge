@@ -32,6 +32,7 @@ typedef enum {
     CTL_T_OTA_ACK = 7,  // LyraT to S3: an ota_link reply
     CTL_T_MODE = 8,     // reserved for R21 (goal 095): relay to node, u8 mode, u8 flags, ...; not implemented yet
     CTL_T_MODE_ACK = 9, // reserved for R21: node to relay, u8 status (0 ok, 2 unsupported), u8 mode
+    CTL_T_SENT = 10,    // LyraT to S3 (goal 112): copies of the mSBC frames to the phone, forwarded to UDP 5009
 } ctl_type_t;
 
 typedef enum {

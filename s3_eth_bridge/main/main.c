@@ -120,6 +120,7 @@ static const char *TAG = "s3eth";
 #define PORT_CALL       5004
 #define PORT_MIC        5005
 #define PORT_REQUEST    5006
+#define PORT_SENT       5009           // goal 112: the LyraT's mSBC frames to the phone (CTL_T_SENT)
 #define LEASE_MS        5000
 #define HEADER_BYTES    24
 #define PACKET_VERSION  1
@@ -348,6 +349,39 @@ static void ctl_reply_to_pc(const ctl_parser_t *p)
     s_ctl_replies++;
 }
 
+// Goal 112: a CTL_T_SENT frame of the LyraT goes to the PC of the stream as it is, behind a header: "S3", version 1,
+// stream 2, u32 sequence, u32 mic frame counter at its arrival (the clock of the up line), u16 boot id, u16 length.
+static volatile uint32_t s_sent_rx, s_sent_udp, s_sent_fail;
+static void sent_forward(const ctl_parser_t *p)
+{
+    static uint32_t seq;
+    static int sock = -1;
+    static uint8_t packet[HEADER_BYTES + CTL_MAX_PAYLOAD];
+    s_sent_rx++;
+    if (!s_dest_ip || esp_timer_get_time() >= s_lease_until_us) return;
+    if (sock < 0) sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        s_sent_fail++;
+        return;
+    }
+    uint16_t len = (uint16_t)ctl_frame_len(p);
+    uint32_t n = seq++, at = s_mic.total_frames;
+    memset(packet, 0, 16);
+    packet[0] = 'S';
+    packet[1] = '3';
+    packet[2] = PACKET_VERSION;
+    packet[3] = 2;
+    memcpy(packet + 4, &n, 4);
+    memcpy(packet + 8, &at, 4);
+    memcpy(packet + 12, &s_boot_id, 2);
+    memcpy(packet + 14, &len, 2);
+    memcpy(packet + 16, ctl_frame_payload(p), len);
+    struct sockaddr_in to = {.sin_family = AF_INET, .sin_port = htons(PORT_SENT)};
+    to.sin_addr.s_addr = s_dest_ip;
+    if (sendto(sock, packet, 16 + len, MSG_DONTWAIT, (struct sockaddr *)&to, sizeof(to)) < 0) s_sent_fail++;
+    else s_sent_udp++;
+}
+
 static void ctl_on_frame(const ctl_parser_t *p)
 {
     s_last_frame_us = esp_timer_get_time();
@@ -371,6 +405,8 @@ static void ctl_on_frame(const ctl_parser_t *p)
         s3_log_relay(ctl_frame_payload(p), ctl_frame_len(p));
     } else if (type == CTL_T_OTA_ACK) {
         s3_ota_on_lyrat_reply(ctl_frame_payload(p), ctl_frame_len(p));
+    } else if (type == CTL_T_SENT) {
+        sent_forward(p);
     }
 }
 
@@ -476,7 +512,7 @@ static void restart_later(void)
 // Handles the control words of the request port; false when the text is not one of them.
 static bool ctl_request(char *text, int n, const struct sockaddr_in *from, socklen_t from_len, int sock)
 {
-    static char reply[420];
+    static char reply[560];    // UQ is the longest, about 470 with the goal 112 counters
     static uint8_t frame[CTL_MAX_FRAME];
     int len = -1;
     if (strncmp(text, "UC ", 3) == 0) {
@@ -533,12 +569,12 @@ static bool ctl_request(char *text, int n, const struct sockaddr_in *from, sockl
             "{\"fw\":\"s3tap\",\"boot\":%u,\"up_ms\":%lld,\"pins_ok\":%d,\"tx_mode\":%d,\"tx_on\":%d,\"tx_edges\":%" PRIu32
             ",\"baud\":%d,\"rx_level\":%d,\"tx_level\":%d,\"rx_bytes\":%" PRIu32 ",\"frames\":%" PRIu32 ",\"bad_hdr\":%" PRIu32
             ",\"bad_crc\":%" PRIu32 ",\"trunc\":%" PRIu32 ",\"noise\":%" PRIu32 ",\"replies\":%" PRIu32 ",\"sent\":%" PRIu32
-            ",\"refused\":%" PRIu32 ",\"hb\":%" PRIu32 ",\"last_frame_ms\":%lld,\"lyrat_up_s\":%" PRId64 ",\"lyrat_flags\":%d}",
+            ",\"refused\":%" PRIu32 ",\"hb\":%" PRIu32 ",\"last_frame_ms\":%lld,\"lyrat_up_s\":%" PRId64 ",\"lyrat_flags\":%d,\"sent_rx\":%" PRIu32 ",\"sent_udp\":%" PRIu32 ",\"sent_fail\":%" PRIu32 "}",
             s_boot_id, now / 1000, s_pins_ok, s_tx_mode, s_tx_on, s_ctl_tx_edges, s_ctl_baud, gpio_get_level(PIN_UART_RX),
             gpio_get_level(PIN_UART_TX), s_ctl_rx_bytes, s_ctl_parser.frames, s_ctl_parser.bad_header, s_ctl_parser.bad_crc,
             s_ctl_parser.truncated, s_ctl_parser.noise, s_ctl_replies, s_ctl_cmds_sent, s_ctl_refused, s_ctl_hb,
             s_last_frame_us ? (now - s_last_frame_us) / 1000 : -1LL, s_have_hb ? (int64_t)s_last_hb.up_s : -1LL,
-            s_have_hb ? s_last_hb.flags : -1);
+            s_have_hb ? s_last_hb.flags : -1, s_sent_rx, s_sent_udp, s_sent_fail);
     } else {
         return false;
     }

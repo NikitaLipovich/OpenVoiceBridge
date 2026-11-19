@@ -21,7 +21,7 @@ Code: `main/ctl_frame.h`, used by both firmwares. Little endian.
 | Offset | Field |
 |---|---|
 | 0 | `A5 5A` |
-| 2 | type: 1 command, 2 reply, 3 heartbeat, 4 heartbeat ack, 5 log, 6 OTA request, 7 OTA reply (5-7: `OTA.md`), 8 mode, 9 mode ack (reserved for R21: `PLATFORM_OTA.md`) |
+| 2 | type: 1 command, 2 reply, 3 heartbeat, 4 heartbeat ack, 5 log, 6 OTA request, 7 OTA reply (5-7: `OTA.md`), 8 mode, 9 mode ack (reserved for R21: `PLATFORM_OTA.md`), 10 sent audio (goal 112, below) |
 | 3 | u16 seq |
 | 5 | u16 payload length, at most 1024 |
 | 7 | xor of bytes 2 to 6 |
@@ -81,6 +81,18 @@ Radio power and supply (goal 098): `bpow` reads the BR/EDR transmit power (`bred
 Two modes (goal 102, `DUAL_MODE.md`): `mode` shows `mode=phone|pc src=nvs|build phone=..:aa:bb pc=..:cc:dd link=<role>`; `mode phone|pc` switches (`mode pc saved, was phone[, dropping the link to phone]`, `mode pc unchanged`), refused during SCO (`mode refused: SCO active, 'mode pc 1' forces`); `mode forget phone|pc` empties a slot. The mode is kept in NVS; every switch and refusal is also a log line `mode cmd: ...`. `s3_uart.py mode [phone|pc] [--force]` wraps it (exit 1 on a refusal). `unpair` also empties both slots.
 
 Noise suppression of the microphone: `ns off|sns|web0|web1|web2` switches the mode with the channel open, the reply is `ns = <mode>`, status 1 for a name that does not exist. It takes effect on the next frame, with a fade of 5 ms on both sides. `status` shows `ns=<asked> applied=<running> switches=<count>` and the time of a frame. `nscal` makes `sns` take a new noise profile. `cpu` prints the load of every task since its last call. Anyone in the local network can send these, as all commands here. How to compare the modes by ear: `VOICE_CHECK.md`.
+
+## Sent audio (goal 112)
+
+`senttap on [S]` (default 600 s, at most 3600; `off`; no word shows the counters) makes the LyraT copy every mSBC frame it
+hands to Bluetooth into a ring of 64 frames; its UART task packs them into frames of type 10, 8 to 16 frames each
+(about 7.9 KB/s of the 11.5 KB/s of 115200 baud) and polls every 10 ms while it is on, so a command waits behind one
+batch at most (about 80 ms). The audio callback never writes the UART: a full ring drops the frame and counts it. Payload:
+u32 index of the first frame (frames encoded since start), u16 mSBC channels opened, u8 frames, u8 flags (bit 0 mic
+muted, bit 1 SCO), u32 drops so far, then 57-byte frames (no H2 header). The S3 forwards each to the PC of the stream
+(TAP lease) on UDP 5009 behind a header: `S3`, version 1, stream 2, u32 sequence, u32 mic frame counter at arrival,
+u16 boot id, u16 length. `UQ` counts them: `sent_rx`, `sent_udp`, `sent_fail`. `call_check.py` turns it on for the
+call and writes `_sent.wav` (`tools/bench/sent_tap.py`, decoder `tools/bench/msbc.py`).
 
 ## Tools
 

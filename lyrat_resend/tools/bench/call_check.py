@@ -20,6 +20,9 @@ Files in goals_harness/bench_runs/calls/<stamp>/, outside git (R6):
   <stamp>_down.wav   what the phone sends to the headphones: the other party. 16 kHz mono
   <stamp>_up.wav     the headset mic line before the board's processing (both ADC channels averaged, as the board does)
   <stamp>_both.wav   stereo, left down, right up, aligned in time
+  <stamp>_sent.wav   what the LyraT sent to the phone: its mSBC frames after the board's processing, before the air, decoded
+                     (goal 112, sent_tap.py: `senttap` on the LyraT, UDP 5009 from the S3); lost frames are silence
+  <stamp>_sent_both.wav   stereo, left up (before processing), right sent, on one time line
   report.md, report.json   duration, codec, S3 stream losses and gaps, channel and link breaks, levels, floor, clipping,
                      drop-outs, latency, and one line "качество: норм" or "качество: есть проблемы: ..."
   call_summary.json, tap.json, serial.log    what call_record.py writes
@@ -50,6 +53,7 @@ import call_quality as cq  # noqa: E402
 import call_record  # noqa: E402
 import call_stream as cs  # noqa: E402
 import owner_common as oc  # noqa: E402
+import sent_tap  # noqa: E402
 from owner_common import FAIL, NOT_CHECKED, PASS  # noqa: E402
 from udp_record import MIC_FLOOR_WARN, floor_too_high  # noqa: E402
 
@@ -111,6 +115,7 @@ class CallCheck:
         self.checks = []
         self.live_last = 0.0
         self.sco_breaks = 0
+        self.sent = None            # goal 112: the frames the LyraT sends to the phone
 
     # --- before the call ----------------------------------------------------------------------------------------------
 
@@ -199,6 +204,8 @@ class CallCheck:
                 (rtt or 0) * 1000, align, (align or 0) / RATE * 1000) if ok else "часы S3 и ПК не сведены за %.0f с" % CLOCK_WAIT_S,
                 "S3 не отвечает на запросы потока или одна линия не идёт; перезапустите команду"):
             return False
+        if not getattr(self.args, "no_sent", False):
+            self.start_sent()
         loss = {k: self.counter.lost(k) for k in ("call", "mic")}
         self.check(not any(loss.values()), "потерь в первые секунды нет" if not any(loss.values()) else "потери в первые секунды: %s" % loss,
                    "Wi-Fi слабый? Поставьте коробку ближе к роутеру", hard=False)
@@ -206,6 +213,23 @@ class CallCheck:
         self.check(not floor_too_high(floors), "фон микрофона в норме (%s)" % floors,
                    "шум на линии микрофона (#005 гоала 057): лучше подождать пару минут и запустить снова", hard=False)
         return True
+
+    def start_sent(self):
+        """Goal 112: the LyraT copies its frames to the phone up to the PC. Not needed for the call: a soft check."""
+        try:
+            self.sent = sent_tap.SentTap(self.out).start()
+        except OSError as e:
+            self.sent = None
+            self.check(False, "приём отправленного телефону (UDP %d) не открылся: %s" % (sent_tap.PORT, e),
+                       "порт занят другой записью; звонок пишется и без _sent.wav", hard=False)
+            return
+        try:
+            ok, text = self.sent.enable()
+        except OSError as e:
+            ok, text = False, str(e)
+        self.check(ok, "LyraT отдаёт копию отправленного телефону (senttap): %s" % text if ok else
+                   "LyraT не включила копию отправленного (senttap): %s" % (text or "нет ответа"),
+                   "прошивка LyraT до гоала 112? Запись идёт без _sent.wav", hard=False)
 
     def phone_checks(self):
         """The phone over adb is a help, not a need: the owner may call with the cable out."""
@@ -270,6 +294,8 @@ class CallCheck:
                 time.sleep(0.1)
                 now = time.monotonic()
                 reason = self.rec.tick()
+                if getattr(self, "sent", None):
+                    self.sent.tick(now)
                 if driver:
                     driver.tick(now)
                 if not self.rec.intervals:
@@ -301,6 +327,8 @@ class CallCheck:
         # The live stream ends with the recording: saving the files takes seconds, and blocks given out meanwhile would
         # only be the deadline's zeros.
         self.pipe.stop()
+        if getattr(self, "sent", None):
+            self.sent.stop()
         s = self.rec.stop(reason)
         tap = json.loads((self.out / "tap.json").read_text(encoding="utf-8"))
         self.pipe_summary = self.pipe.summary()
@@ -317,8 +345,9 @@ class CallCheck:
         latency["all_blocks"] = self.latency.summary()
         latency["all_blocks"].pop("over_100ms_at_s", None)
         latency["scope"] = "канал открыт" if closed else "вся запись"
+        sent = build_sent(self.out, self.prefix, files, sent_tap.read_journal(self.out / "sent.bin")) if getattr(self, "sent", None) else None
         report = build_report(s, tap, files, self.pipe_summary, latency, self.versions, self.checks, consumer,
-                              self.server.dropped if self.server else None)
+                              self.server.dropped if self.server else None, sent=sent)
         write_json(self.out / "report.json", report)
         (self.out / "report.md").write_text(render_md(report), encoding="utf-8")
         return report
@@ -433,7 +462,31 @@ def build_files(out, prefix, tap, intervals, keep_raw=False, muted=None):
         offset = int(round((t0m - t0c) * RATE)) - (mic["first_frame"] - call["first_frame"])
     return {"paths": {k: str(v) for k, v in paths.items()}, "down": down, "up": up, "gaps": gaps, "sco": sco,
             "start_at": ta, "seconds": round(length / RATE, 2), "shift_ms": round((t0m - t0c) * 1000, 2), "counter_offset": offset,
-            "muted": muted_s}
+            "muted": muted_s, "sm": sm, "mic_first_frame": mic.get("first_frame")}
+
+
+def build_sent(out, prefix, files, packets):
+    """Goal 112: _sent.wav and _sent_both.wav on the time line of the files; the summary for the report."""
+    if not packets:
+        return {"enabled": True, "packets": 0, "seconds": 0, "why": "кадров от LyraT не пришло"}
+    r = sent_tap.build(out, prefix, packets, files["mic_first_frame"], files["sm"], len(files["up"]), files["up"])
+    pcm = r.pop("pcm")
+    files["sent"] = pcm
+    files["paths"].update(r.get("paths") or {})
+    r["dominant_hz"] = dominant_hz(pcm[pcm != 0])
+    r["enabled"] = True
+    r["packets"] = r["stats"]["packets"]
+    r["file_start"] = {"sm": files["sm"], "mic_first_frame": files["mic_first_frame"]}
+    return r
+
+
+def dominant_hz(x):
+    """The strongest frequency of a line, for the probe's tone (None under 0.5 s)."""
+    if len(x) < RATE // 2:
+        return None
+    f = np.abs(np.fft.rfft(x.astype(np.float64) * np.hanning(len(x))))
+    f[:int(len(f) * 50 / (RATE / 2))] = 0      # below 50 Hz
+    return round(float(np.argmax(f)) * RATE / len(x), 1)
 
 
 # --- report ------------------------------------------------------------------------------------------------------------------
@@ -446,7 +499,7 @@ def _speech_part(x, gaps, sco):
     return x[a:b], [[g[0] - a, g[1]] for g in gaps if g[0] + g[1] > a and g[0] < b]
 
 
-def build_report(s, tap, files, pipe, latency, versions, checks, consumer=None, dropped=None):
+def build_report(s, tap, files, pipe, latency, versions, checks, consumer=None, dropped=None, sent=None):
     lines = {}
     muted = files.get("muted") or []
     mute = {"intervals": muted, "seconds": round(sum(b - a for a, b in muted), 2), "count": len(muted), "whole": False}
@@ -487,6 +540,7 @@ def build_report(s, tap, files, pipe, latency, versions, checks, consumer=None, 
                                           "segment_log", "consumer_errors")},
         "pcm_dropped": dropped,
         "mute": mute,
+        "sent": sent,
     }
     ok, problems = cq.verdict(report)
     report["verdict"] = {"ok": ok, "problems": problems, "line": cq.verdict_line(ok, problems)}
@@ -543,6 +597,7 @@ def render_md(r):
                 "%d раз, всего %.1f с: %s. В эти интервалы телефон получал тишину; линия `up` в файлах там обнулена, и "
                 "качество микрофона считается только по остальному времени — тишина при выключенном микрофоне не дефект." % (
                     mu["count"], mu["seconds"], ", ".join("%.1f–%.1f с" % (a, b) for a, b in mu["intervals"]))]
+    out += sent_md(r.get("sent"))
     if r["verdict"]["problems"]:
         out += ["", "## Проблемы", ""] + ["- %s" % p for p in r["verdict"]["problems"]]
     out += ["", "## Что не видно в записи", "",
@@ -550,6 +605,27 @@ def render_md(r):
             "телефона (#004 гоала 057) здесь не видны.",
             "- Версии: S3 %s, LyraT %s." % (r["versions"].get("s3"), r["versions"].get("lyrat")), ""]
     return "\n".join(out)
+
+
+def sent_md(se):
+    """The report's part on what the LyraT sent to the phone (goal 112)."""
+    if not se:
+        return []
+    out = ["", "## Отправлено телефону (после обработки платы, до Bluetooth)", ""]
+    if not se.get("seconds"):
+        return out + ["Файла нет: %s." % (se.get("why") or "кадров нет")]
+    st, lv, lu, al = se["stats"], se["levels"], se["levels_unmuted"], se["align"]
+    how = ("по содержимому, обработка платы отстаёт на %.1f мс (совпадение %.2f)" % (al["lag_ms"], al["xcorr_peak"])
+           if al["method"] == "xcorr" else "по отметкам S3 (содержимое не совпало: тон платы, тишина или выключен микрофон)")
+    out += ["- файл: `%s`; стерео (слева микрофон до обработки, справа отправлено): `%s`" % (
+                se["paths"]["sent"], se["paths"]["sent_both"]),
+            "- %.1f с, кадров %d, потеряно %d (%s %%, %.0f мс тишиной в файле), из них отброшено на LyraT %d" % (
+                se["seconds"], st["frames"], st["lost_frames"], se["loss_pct"], se["lost_ms"], st["lyrat_drops"]),
+            "- уровень %s дБFS, пик %s дБFS; с включённым микрофоном %s дБFS" % (
+                _f(lv["rms_dbfs"]), _f(lv["peak_dbfs"]), _f(lu["rms_dbfs"])),
+            "- выравнивание с `up`: %s" % how,
+            "- микрофон выключен по кадрам: %s" % (", ".join("%.1f–%.1f с" % (a, b) for a, b in se["muted"]) or "нет")]
+    return out
 
 
 def explain(step, r):
@@ -560,12 +636,21 @@ def explain(step, r):
     step.say("  собеседник: %s" % r["files"]["down"])
     step.say("  микрофон:   %s" % r["files"]["up"])
     step.say("  оба:        %s" % r["files"]["both"])
+    se = r.get("sent") or {}
+    if se.get("seconds"):
+        step.say("  отправлено телефону: %s" % se["paths"]["sent"])
     step.say("Отчёт: %s" % (Path(r["files"]["down"]).parent / "report.md"))
     lat = r["latency"]["pipeline"]
     step.num("Канал", "%d раз, %.1f с, кодек %s" % (r["sco"]["opens"], r["sco"]["seconds"], r["sco"]["codec"]))
     step.num("Потери S3 -> ПК", "вниз %s %%, вверх %s %%" % (r["stream"]["down"]["loss_pct"], r["stream"]["up"]["loss_pct"]))
     step.num("Уровни в речи, дБFS", "вниз %s, вверх %s" % (r["lines"]["down"]["rms_dbfs"], r["lines"]["up"]["rms_dbfs"]))
     step.num("Задержка живого потока, мс", "медиана %s, макс %s" % (lat.get("median_ms"), lat.get("max_ms")))
+    if se.get("seconds"):
+        step.num("Отправлено телефону", "%.1f с, потеряно кадров %d (%s %%), уровень %s дБFS, выравнивание %s %s мс" % (
+            se["seconds"], se["stats"]["lost_frames"], se["loss_pct"], se["levels"]["rms_dbfs"], se["align"]["method"],
+            se["align"]["lag_ms"]))
+    elif se:
+        step.num("Отправлено телефону", "нет: %s" % (se.get("why") or "кадров нет"))
     mu = r.get("mute") or {}
     if mu.get("count"):
         step.num("Микрофон выключен", "%d раз, %.1f с: %s" % (mu["count"], mu["seconds"], ", ".join(
@@ -745,9 +830,14 @@ def probe_one(step, out, args, tag, guard_state=None):
     if consumer and (not consumer.get("blocks") or consumer.get("index_gaps")):
         reasons.append("потребитель PCM: %s" % {k: consumer.get(k) for k in ("blocks", "index_gaps")})
     # A rehearsal keeps nothing of the room (R15): the mic line and the stereo go once judged.
+    se = report.get("sent")
+    if se is not None and not se.get("seconds"):
+        reasons.append("_sent.wav пуст: %s" % (se.get("why") or "кадров нет"))
     if not args.keep:
-        for key in ("up", "both"):
-            Path(report["files"][key]).unlink(missing_ok=True)
+        for key in ("up", "both", "sent", "sent_both"):
+            if key in report["files"]:
+                Path(report["files"][key]).unlink(missing_ok=True)
+        (Path(out) / "sent.bin").unlink(missing_ok=True)
     result = PASS if not reasons else FAIL
     sub.finish(result, "; ".join(reasons) or "прогон без замечаний; %s" % report["verdict"]["line"])
     lat = report["latency"]["pipeline"]
@@ -1014,8 +1104,10 @@ def remake(directory):
     files = build_files(directory, directory.name, tap, intervals, keep_raw=True, muted=muted)
     old = json.loads((directory / "report.json").read_text(encoding="utf-8")) if (directory / "report.json").exists() else {}
     pipe = {"align_frames": (old.get("alignment") or {}).get("counter_offset_live"), "rtt_min_ms": (old.get("latency") or {}).get("rtt_min_ms")}
+    sent = build_sent(directory, directory.name, files, sent_tap.read_journal(directory / "sent.bin")) \
+        if (directory / "sent.bin").exists() else None
     report = build_report(s, tap, files, pipe, (old.get("latency") or {}).get("pipeline") or {}, old.get("versions") or {},
-                          old.get("checks") or [])
+                          old.get("checks") or [], sent=sent)
     write_json(directory / "report.json", report)
     (directory / "report.md").write_text(render_md(report), encoding="utf-8")
     print(report["verdict"]["line"])
@@ -1032,6 +1124,7 @@ def main(argv=None):
     ap.add_argument("--pcm-port", type=int, default=cs.PCM_PORT, help="live PCM on 127.0.0.1 for a transcriber")
     ap.add_argument("--no-pcm", action="store_true", help="no live PCM output")
     ap.add_argument("--no-phone", action="store_true", help="do not look at the phone over adb (tests on the PC)")
+    ap.add_argument("--no-sent", action="store_true", help="do not ask the LyraT for the frames it sends (no _sent.wav)")
     ap.add_argument("--keep-raw", action="store_true", help="keep the recorder's call.wav and mic.wav (needed by --report)")
     ap.add_argument("--probe", type=int, metavar="N", help="N runs without a call, the channel from sco_probe")
     ap.add_argument("--keep", action="store_true", help="--probe: keep the mic and stereo files")

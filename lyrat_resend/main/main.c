@@ -838,6 +838,40 @@ static void cvsd_packet_in(const uint8_t *data, uint32_t bytes, bool bad, bool r
     }
 }
 
+// Goal 112: a copy of every mSBC frame sent to the phone, up the control UART to the S3 and on to the PC (docs/S3_UART.md,
+// "Sent audio"). The audio callback only copies into this ring; the UART task packs and writes, never the other way.
+#define ST_SLOTS          64        // 480 ms of frames
+#define ST_BATCH_MAX      16        // frames per UART frame: 12 + 16 * 57 = 924 bytes of payload
+#define ST_BATCH_MIN      8         // 60 ms: below this a batch waits, unless its oldest frame waited ST_WAIT_MS
+#define ST_WAIT_MS        40
+#define ST_HEAD_BYTES     12
+#define ST_DEFAULT_S      600
+#define ST_MAX_S          3600
+static uint8_t s_st_buf[ST_SLOTS][MSBC_FRAME_BYTES];
+static uint32_t s_st_idx[ST_SLOTS];
+static int64_t s_st_at[ST_SLOTS];
+static volatile uint32_t s_st_head, s_st_tail;     // head: the audio callback; tail: the UART task
+static volatile int64_t s_st_until_us;             // 0: off
+static volatile uint32_t s_st_count;               // frames encoded since start, the index on the PC
+static volatile uint32_t s_st_drops, s_st_sent, s_st_batches;
+static volatile uint16_t s_st_sco;                 // mSBC channels opened since start
+
+static void senttap_push(const uint8_t *frame)
+{
+    uint32_t idx = s_st_count++;
+    if (!s_st_until_us) return;
+    uint32_t h = s_st_head;
+    if (h - s_st_tail >= ST_SLOTS) {
+        s_st_drops++;               // the UART is behind: the PC sees the hole in the index
+        return;
+    }
+    memcpy(s_st_buf[h % ST_SLOTS], frame, MSBC_FRAME_BYTES);
+    s_st_idx[h % ST_SLOTS] = idx;
+    s_st_at[h % ST_SLOTS] = esp_timer_get_time();
+    __sync_synchronize();
+    s_st_head = h + 1;
+}
+
 static bool msbc_frame_out(uint8_t *frame)
 {
     static int16_t pcm[MSBC_PCM_SAMPLES];
@@ -845,6 +879,7 @@ static bool msbc_frame_out(uint8_t *frame)
         return false;
     }
     msbc_encode(pcm, frame);
+    senttap_push(frame);
     return true;
 }
 
@@ -934,6 +969,7 @@ static void sco_frame_in(esp_hf_sync_conn_hdl_t handle, esp_hf_audio_buff_t *buf
         plc_reset(s_bt_8k ? PLC_CVSD : PLC_MSBC);
         if (!s_bt_8k) {
             msbc_codec_reset();
+            s_st_sco++;
         }
         mic_ring_flush();       // old sound must not sit in the queue of the link for the whole conversation
     }
@@ -1925,6 +1961,7 @@ static void print_help(void)
     CMD_OUT("  esco [0|PKT LAT RTX] — eSCO answer to the phone from the next link, 0 as the stack; read the settled one");
     CMD_OUT("  cpu    — load of every task since the last call");
     CMD_OUT("  ustat  — counters of the control UART to the S3");
+    CMD_OUT("  senttap on [S]|off — copy of the mSBC frames to the phone up that UART to the PC (UDP 5009), S s (600)");
     CMD_OUT("  ubaud N — baud rate of that UART, for the line check");
     CMD_OUT("  ugarb N — N bytes of noise onto that UART, for the test of the S3's parser");
     CMD_OUT("  ota    — running image, its state, the receiver of new firmware");
@@ -2255,6 +2292,22 @@ static void process_cmd(char *line)
             mm_command(&view, a, text, sizeof(text));
         }
         CMD_OUT("%s", text);
+    } else if (strcmp(cmd, "senttap") == 0) {
+        // Goal 112: copy of the mSBC frames to the phone, to the PC through the S3 (UDP 5009); `on [S]` for S seconds
+        const char *a = line + 7;
+        while (*a == ' ') a++;
+        if (strncmp(a, "on", 2) == 0) {
+            int s = atoi(a + 2);
+            if (s <= 0) s = ST_DEFAULT_S;
+            if (s > ST_MAX_S) s = ST_MAX_S;
+            s_st_until_us = esp_timer_get_time() + (int64_t)s * 1000000;
+        } else if (strcmp(a, "off") == 0) {
+            s_st_until_us = 0;
+        }
+        int64_t left = s_st_until_us ? (s_st_until_us - esp_timer_get_time()) / 1000000 : 0;
+        CMD_OUT("senttap on=%d left_s=%d idx=%" PRIu32 " sco=%u sent=%" PRIu32 " batches=%" PRIu32 " drops=%" PRIu32 " baud=%d",
+                s_st_until_us ? 1 : 0, (int)(left > 0 ? left : 0), s_st_count, s_st_sco, s_st_sent, s_st_batches,
+                s_st_drops, lyrat_ctl_get_baud());
     } else if (strcmp(cmd, "mode") == 0) {
         // Phone or PC (goal 102): show, switch, forget a slot. Refused during SCO unless forced.
         char text[160];
@@ -2476,6 +2529,44 @@ int lyrat_ctl_get_baud(void) { return s_ctl_baud; }
 int lyrat_ctl_set_baud(int baud) { return ctl_uart_set_baud(baud); }
 void lyrat_ctl_wait_tx(void) { uart_wait_tx_done(CTL_UART, pdMS_TO_TICKS(200)); }
 
+// Packs the frames of senttap_push into CTL_T_SENT frames: u32 index of the first, u16 channel count, u8 frames,
+// u8 flags (bit 0 mic muted, bit 1 SCO), u32 drops so far, then the frames. Only consecutive indices in one.
+static void senttap_drain(void)
+{
+    if (s_st_until_us && esp_timer_get_time() > s_st_until_us) s_st_until_us = 0;
+    if (!s_st_until_us) {
+        s_st_tail = s_st_head;      // nothing old is sent when it comes back on
+        return;
+    }
+    uint8_t frame[CTL_HEADER_BYTES + ST_HEAD_BYTES + ST_BATCH_MAX * MSBC_FRAME_BYTES + CTL_CRC_BYTES];
+    static uint8_t payload[ST_HEAD_BYTES + ST_BATCH_MAX * MSBC_FRAME_BYTES];
+    for (;;) {
+        uint32_t t = s_st_tail, h = s_st_head;
+        __sync_synchronize();
+        uint32_t have = h - t;
+        if (have == 0) return;
+        if (have < ST_BATCH_MIN && esp_timer_get_time() - s_st_at[t % ST_SLOTS] < ST_WAIT_MS * 1000) return;
+        uint32_t first = s_st_idx[t % ST_SLOTS];
+        uint32_t n = 0;
+        while (n < have && n < ST_BATCH_MAX && s_st_idx[(t + n) % ST_SLOTS] == first + n) {
+            memcpy(payload + ST_HEAD_BYTES + n * MSBC_FRAME_BYTES, s_st_buf[(t + n) % ST_SLOTS], MSBC_FRAME_BYTES);
+            n++;
+        }
+        __sync_synchronize();
+        s_st_tail = t + n;
+        uint16_t sco = s_st_sco;
+        uint32_t drops = s_st_drops;
+        memcpy(payload, &first, 4);
+        memcpy(payload + 4, &sco, 2);
+        payload[6] = (uint8_t)n;
+        payload[7] = (uint8_t)((s_mm.muted ? 1 : 0) | (s_sco_active ? 2 : 0));
+        memcpy(payload + 8, &drops, 4);
+        ctl_send(frame, ctl_frame_build(frame, CTL_T_SENT, 0, payload, ST_HEAD_BYTES + n * MSBC_FRAME_BYTES));
+        s_st_sent += n;
+        s_st_batches++;
+    }
+}
+
 static void ctl_uart_task(void *arg)
 {
     QueueHandle_t events = NULL;
@@ -2501,7 +2592,8 @@ static void ctl_uart_task(void *arg)
     uint16_t hb_seq = 0;
     for (;;) {
         uart_event_t ev;
-        if (xQueueReceive(events, &ev, pdMS_TO_TICKS(CTL_POLL_MS)) == pdTRUE) {
+        // With senttap on the frames leave every 10 ms; a command waits behind one batch at most (about 80 ms at 115200).
+        if (xQueueReceive(events, &ev, pdMS_TO_TICKS(s_st_until_us ? 10 : CTL_POLL_MS)) == pdTRUE) {
             switch (ev.type) {
             case UART_BREAK:
                 s_ctl_breaks++;
@@ -2522,6 +2614,7 @@ static void ctl_uart_task(void *arg)
         size_t available = 0;
         if (uart_get_buffered_data_len(CTL_UART, &available) == ESP_OK && available) ctl_rx_bytes(available);
         lyrat_log_drain();
+        senttap_drain();
         int64_t now = esp_timer_get_time();
         if (now >= next_hb) {
             next_hb = now + CTL_HB_MS * 1000LL;
