@@ -34,6 +34,7 @@ sys.path.insert(0, str(HERE))
 import call_listen as cl  # noqa: E402
 import call_stream as cs  # noqa: E402
 import speech_synth as ss  # noqa: E402
+from tiers import full_only  # noqa: E402
 
 RATE, BLOCK = cl.RATE, cl.BLOCK
 TMP = Path(tempfile.mkdtemp(prefix="t101_"))
@@ -593,6 +594,7 @@ class EndToEndTest(unittest.TestCase):
         self.assertLess(s["latency_ms"]["onset_decision"]["median"], 300)
         self.assertLess(s["latency_ms"]["end_decision"]["median"], 450 + 300)
 
+    @full_only("the same scenario with 3 % loss; loss in the cutting is LossTest, the scenario itself is in fast")
     def test_scenario_with_losses_on_the_way(self):
         """3 % of the S3's packets lost: the gaps come as missing sound, utterances stay whole, the loss is counted."""
         s, truth, e_down, e_up, utt = self.run_scene("e2e_loss", "--stream-loss", "0.03")

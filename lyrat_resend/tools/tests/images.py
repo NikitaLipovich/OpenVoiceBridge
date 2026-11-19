@@ -13,6 +13,7 @@ Made by goal 092.
 import argparse
 import hashlib
 import json
+import os
 import struct
 import sys
 from pathlib import Path
@@ -93,8 +94,11 @@ def variant(data: bytes, version: str, elf_seed: str = None):
     return _seal(buf)
 
 
-def synthetic(board: str, version: str, size: int = 200_000):
-    """A whole image of about size bytes for the board, with no code in it: for the protocol, never for a board."""
+def synthetic(board: str, version: str, size: int = None):
+    """A whole image of about size bytes for the board, with no code in it: for the protocol, never for a board.
+    Default 200 KB; BENCH_SYNTH_IMAGE_BYTES changes it (run_tests.py --fast: small, the modelled UART is quick)."""
+    if size is None:
+        size = int(os.environ.get("BENCH_SYNTH_IMAGE_BYTES") or 200_000)
     chip, project, _ = BOARDS[board]
     desc = bytearray(256)
     struct.pack_into("<I", desc, 0, DESC_MAGIC)

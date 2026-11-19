@@ -29,6 +29,7 @@ sys.path.insert(0, str(HERE))
 import call_check  # noqa: E402
 import call_quality as cq  # noqa: E402
 import call_stream as cs  # noqa: E402
+from tiers import full_only  # noqa: E402
 
 RATE = 16000
 TMP = Path(tempfile.mkdtemp(prefix="t097_"))
@@ -359,6 +360,7 @@ class EndToEndTest(unittest.TestCase):
         md = (out / "report.md").read_text(encoding="utf-8")
         self.assertIn(r["verdict"]["line"], md)
 
+    @full_only("the end to end call with loss; loss counting is PipelineTest, the plain call is in fast")
     def test_losses_are_counted_and_judged(self):
         rc, r, text, out = self.one("e2e_loss", "--stream-loss", "0.05", open_s=6.0)
         self.assertGreater(r["stream"]["down"]["lost"], 0)

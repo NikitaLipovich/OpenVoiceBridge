@@ -25,6 +25,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "bench"))
 sys.path.append(str(HERE.parent / "tests"))
 import procjob  # noqa: E402
+from tiers import full_only  # noqa: E402
 
 procjob.tie_this_process()      # the emulators started here die with this process, whatever way it ends (goal 107)
 
@@ -107,12 +108,15 @@ class Tools(unittest.TestCase):
         self.run_ok("u3_test_rollback", "u3", variant(U3, self.tmp.name, "u3-b"), "--test-rollback",
                     result="rolled_back")
 
-    def test_03_nodes_app(self):
-        self.run_ok("u1_app", "u1", U1 / "u1_hf.bin", result="done")
+    # test_03 in two (goal 110): the nodes are independent, so the two halves can run at the same time.
+    def test_03b_u2_app(self):
         self.run_ok("u2_app_dry_run", "u2", U2 / "u2_ag.bin", "--dry-run", result="dry_run_ok")
         self.run_ok("u2_app_test_rollback", "u2", variant(U2 / "u2_ag.bin", self.tmp.name, "u2-b"), "--test-rollback",
                     result="rolled_back")
         self.run_ok("u2_app_new_version", "u2", variant(U2 / "u2_ag.bin", self.tmp.name, "u2-c"), result="done")
+
+    def test_03_nodes_app(self):
+        self.run_ok("u1_app", "u1", U1 / "u1_hf.bin", result="done")
         # The wrong node's image: refused by the tool, and by U3 itself when sent past the tool.
         self.run_ok("u1_gets_u2_image_tool", "u1", U2 / "u2_ag.bin", want=1, result="bad_image")
         import ota
@@ -216,6 +220,7 @@ class RomFaults(unittest.TestCase):
 class LinkFaults(unittest.TestCase):
     """The app of U1 through U3 over a control UART with bit errors: lost frames are sent again (go-back-N)."""
 
+    @full_only("bit errors on the line; resending is in platform_rom and ota_protocol")
     def test_ber(self):
         with tempfile.TemporaryDirectory() as tmp:
             emu = Emu(tmp, "--uart-ber", "2e-5")

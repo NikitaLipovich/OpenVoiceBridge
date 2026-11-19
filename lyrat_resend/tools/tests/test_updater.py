@@ -20,6 +20,7 @@ sys.path.insert(0, str(HERE.parent / "bench"))
 import images  # noqa: E402
 import ota  # noqa: E402
 import simproc  # noqa: E402
+from tiers import full_only  # noqa: E402
 from simproc import last_json, run_tool  # noqa: E402
 
 OUT = simproc.TMP / "updater"
@@ -96,6 +97,7 @@ class Updater(unittest.TestCase):
         f = lyrat_ota_fields()
         self.assertEqual((f.get("mode"), f.get("elf"), f.get("img")), ("app", bad.elf[:16], "valid"))
 
+    @full_only("the UART way; test_4 takes it too (no Wi-Fi, then the UART by itself)")
     def test_3_no_wifi_then_uart_in_the_same_window(self):
         base = syn() / "lyrat-base" / "lyrat_resend.bin"
         rc, out, err, _ = ota_lyrat(base, "--test-no-wifi")

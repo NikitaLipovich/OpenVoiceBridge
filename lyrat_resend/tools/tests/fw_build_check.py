@@ -1,6 +1,7 @@
 """Both firmwares built as a check, in their own build folders, and what the images must hold. Goal 092.
 
-  python fw_build_check.py [--out DIR] [--only s3|lyrat] [--no-build]
+  python fw_build_check.py [--out DIR] [--only s3|lyrat] [--no-build] [--no-cache]
+  python fw_build_check.py --sources [--out DIR]     no build: the rules readable from the sources (goal 110, --fast)
 
 For each board: idf.py -B DIR/<board> -D SDKCONFIG=DIR/<board>.sdkconfig build (the working build/ and sdkconfig stay as
 they are, and the check proves it), then
@@ -15,11 +16,18 @@ they are, and the check proves it), then
              takes the network from lyrat_resend/main/wifi_secrets.h) are in the image, compared as bytes, never printed. A hit of the ccache trap of docs/OTA.md (old object without the header) is rebuilt once with
              CCACHE_RECACHE=1 and said so
   untouched  the working sdkconfig, sdkconfig.old and build/ of both projects and git status are the same as before
+Cache (goal 110): a board whose inputs are those of its last good build is not built again; its image is checked as it
+is. The inputs: every tracked or unignored file of both firmware trees (s3_eth_bridge, and lyrat_resend with updater/
+but without tools/, docs/, harness/: the S3 compiles C files of lyrat_resend/main), the SHA-256 of the secret files (never their values), the -D defines of the variant,
+IDF_PATH, ADF_PATH and the ESP-IDF version; kept in DIR/<board>.fingerprint. --no-cache builds anyway.
+--sources: the partition table of partitions_ota.csv against docs/OTA.md, rollback and the table file in
+sdkconfig.defaults, the pc define in main/CMakeLists.txt; no build, nothing written but DIR/fw_sources.json.
 Output: DIR/fw_build.json and the build logs; DIR defaults to goals_harness/bench_runs/tests/builds (outside git, kept
 between runs so that the next build is incremental). Exit code 0 when every check passed.
 ESP-IDF: IDF_PATH (default C:\\esp\\v5.5.2\\esp-idf) and IDF_TOOLS_PATH (default C:\\Espressif), as fw.py.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -140,6 +148,43 @@ def working_state():
     return state
 
 
+# --- cache (goal 110) -------------------------------------------------------------------------------------------------
+
+SKIP_DIRS = {"tools", "docs", "harness", "build", "managed_components"}
+
+
+def tree_files(root: Path):
+    """Tracked and unignored files under root as git lists them, without the tools, docs and build folders."""
+    rel_root = root.relative_to(REPO).as_posix()
+    r = subprocess.run(["git", "-C", str(REPO), "ls-files", "-co", "--exclude-standard", "-z", "--", rel_root],
+                       capture_output=True, timeout=60)
+    out = []
+    for rel in r.stdout.decode("utf-8", "replace").split("\0"):
+        if rel and not SKIP_DIRS & set(Path(rel).relative_to(rel_root).parts[:-1]):
+            out.append(rel)
+    return sorted(out)
+
+
+def idf_version():
+    p = Path(IDF_PATH) / "tools" / "cmake" / "version.cmake"
+    return p.read_text(encoding="utf-8", errors="replace") if p.exists() else "?"
+
+
+def fingerprint(board):
+    """SHA-256 over what a build of this board is made from; any change of them means a new build."""
+    b = BOARDS[board]
+    h = hashlib.sha256()
+    # Both trees for every board: the S3 compiles C files of lyrat_resend/main too, the updater those of its parent.
+    for rel in tree_files(REPO / "s3_eth_bridge") + tree_files(LYRAT):
+        p = REPO / rel
+        if p.is_file():
+            h.update(rel.encode() + b"\0" + hashlib.sha256(p.read_bytes()).digest())
+    for path in [S3_SECRETS, WIFI_SECRETS]:
+        h.update(path.name.encode() + b"\0" + (hashlib.sha256(path.read_bytes()).digest() if path.exists() else b"-"))
+    h.update(repr((board, b.get("defs"), IDF_PATH, os.environ.get("ADF_PATH"), idf_version())).encode())
+    return h.hexdigest()
+
+
 # --- build -----------------------------------------------------------------------------------------------------------
 
 def idf_build(board, out: Path, recache=False, timeout=3600):
@@ -234,14 +279,22 @@ def check_board(board, out: Path):
     return res
 
 
-def run(out: Path, boards=tuple(BOARDS), build=True):
+def run(out: Path, boards=tuple(BOARDS), build=True, cache=True):
     out.mkdir(parents=True, exist_ok=True)
     before = working_state()
     report = {"boards": {}, "out": str(out)}
     for board in boards:
         entry = {}
+        fp_file, fp = out / (board + ".fingerprint"), None
         if build:
-            entry["build"] = idf_build(board, out)
+            fp = fingerprint(board)
+            image = out / board / BOARDS[board]["bin"]
+            if cache and image.exists() and fp_file.exists() and fp_file.read_text(encoding="utf-8").strip() == fp:
+                entry["build"] = {"rc": 0, "seconds": 0.0, "cached": True}
+            else:
+                if fp_file.exists():
+                    fp_file.unlink()
+                entry["build"] = idf_build(board, out)
         if not build or entry["build"]["rc"] == 0:
             entry["checks"] = check_board(board, out)
             sec = entry["checks"].get("secrets")
@@ -251,6 +304,8 @@ def run(out: Path, boards=tuple(BOARDS), build=True):
                 if entry["rebuild"]["rc"] == 0:
                     entry["checks"] = check_board(board, out)
                     entry["checks"]["secrets"]["ccache_trap"] = True
+        if fp and entry["build"]["rc"] == 0 and "checks" in entry and all(c["pass"] for c in entry["checks"].values()):
+            fp_file.write_text(fp + "\n", encoding="utf-8")      # only a good build is reused
         report["boards"][board] = entry
     after = working_state()
     changed = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
@@ -264,13 +319,41 @@ def run(out: Path, boards=tuple(BOARDS), build=True):
     return report
 
 
+def sources(out: Path):
+    """The rules of the firmwares that need no build (goal 110, the fast level)."""
+    res = {}
+    for board, b in BOARDS.items():
+        if board == "lyrat_pc":
+            continue
+        defaults = (b["dir"] / "sdkconfig.defaults").read_text(encoding="utf-8")
+        csv, doc = table_from_csv(b["csv"]), table_from_doc(b["doc"])
+        res[board] = {
+            "table": {"pass": bool(csv) and csv == doc, "csv": csv, "doc_same": csv == doc},
+            "rollback": {"pass": "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y" in defaults and
+                         'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="%s"' % b["csv_conf"] in defaults},
+        }
+    cm = (LYRAT / "main" / "CMakeLists.txt").read_text(encoding="utf-8")
+    pc = re.search(r'LYRAT_DEFAULT_MODE STREQUAL "pc"\)\s*\n\s*target_compile_definitions\([^)]*BENCH_DEFAULT_MODE_PC', cm)
+    res["lyrat_pc"] = {"default_mode": {"pass": pc is not None}}
+    report = {"sources": res, "pass": all(c["pass"] for e in res.values() for c in e.values())}
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "fw_sources.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
+    return report
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--out", default=str(DEFAULT_OUT))
     ap.add_argument("--only", choices=list(BOARDS))
     ap.add_argument("--no-build", action="store_true", help="check the images of an earlier build only")
+    ap.add_argument("--no-cache", action="store_true", help="build even when the inputs are those of the last good build")
+    ap.add_argument("--sources", action="store_true", help="no build: the rules readable from the sources (goal 110)")
     args = ap.parse_args()
-    report = run(Path(args.out), (args.only,) if args.only else tuple(BOARDS), not args.no_build)
+    if args.sources:
+        report = sources(Path(args.out))
+        print(json.dumps(report, indent=1))
+        return 0 if report["pass"] else 1
+    report = run(Path(args.out), (args.only,) if args.only else tuple(BOARDS), not args.no_build, not args.no_cache)
     print(json.dumps(report, indent=1))
     return 0 if report["pass"] else 1
 

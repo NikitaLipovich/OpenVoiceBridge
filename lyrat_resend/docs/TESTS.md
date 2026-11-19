@@ -3,17 +3,48 @@
 Everything of this bench that can be checked without the boards, the phone, a COM port, adb or sound, with one command:
 
 ```
-python lyrat_resend/tools/run_tests.py            all checks, the firmware builds too (first run about 15 min, then minutes)
-python lyrat_resend/tools/run_tests.py --quick    without the builds of the firmwares and of the Android probe
-python lyrat_resend/tools/run_tests.py --only s3_sim,bench_tools
+python lyrat_resend/tools/run_tests.py --fast     during work: the behaviour only, no builds, about a minute (goal 110)
+python lyrat_resend/tools/run_tests.py            full: firmware builds (cached), the APK, real images through OTA, every
+                                                  variant; once before a push or a release
+python lyrat_resend/tools/run_tests.py --only s3_sim,bench_tools [--fast]
 python lyrat_resend/tools/run_tests.py --list
-python lyrat_resend/tools/run_tests.py --quick --port-offset 100   # BENCH_PORT_OFFSET: another worktree's run does not meet this one
+python lyrat_resend/tools/run_tests.py --fast --port-offset 100   # every port moved by 100 more; --jobs N (default 16)
 ```
+`--quick` is the old name of `--fast`.
 
-It prints PASS, FAIL or SKIP per check and writes `goals_harness/bench_runs/tests/<stamp>/summary.json` (status, time,
-counts of tests, notes) with the log of each check beside it. Exit code 0 only when every check that ran passed; a unittest
-case that skipped counts as a failure, because the runner provides whatever the case needs. `--quick` and `--only` may skip
-what they leave out on purpose.
+It prints PASS, FAIL or SKIP per check and writes `goals_harness/bench_runs/tests/<stamp>[-fast]/summary.json` (status,
+time, counts of tests, shards with their start, time and CPU seconds, notes) with the log of each check beside it. Exit
+code 0 only when every check that ran passed; a unittest case that skipped counts as a failure, because the runner
+provides whatever the case needs - except, in `--fast`, a case marked "full run only". `--fast` and `--only` may skip what
+they leave out on purpose.
+
+## When to run what (goal 110)
+
+- **During work** (every change, any goal): `run_tests.py --fast` (about 60 s), and `round.py smoke` when the bench was
+  touched. Nothing longer.
+- **Before a push or a release**, once on the final code: the full `run_tests.py` and the long bench regression
+  (`round.py link`, `sco --n`, `call_check --probe 3`). Not twice on the same code.
+
+`--fast` has every check of behaviour: protocol, mode rules, log parsing, commands, service, panel, updater and runner
+rules. It leaves out the builds (`fw_build`, `sco_probe`; `fw_rules` reads the firmware rules from the sources instead:
+partition tables = `OTA.md`, rollback, the pc define), takes small synthetic images for OTA (`BENCH_SYNTH_IMAGE_BYTES`,
+48 KB: the modelled UART takes seconds), and leaves to the full run the cases marked `full_only` in
+`tools/tests/tiers.py` - a long variant of a function whose short case it runs too (call_listen and call_check with loss,
+the updater's UART way, the platform's bit errors, bench_ui's copy of `bench_ui_check`).
+
+Parallel: checks and **shards** of the long ones (parts of a module, `tools/tests/shard.py`) run at once, the longest
+chain first (estimates from the last run of the same level). Each process has ports of its own (`BENCH_PORT_OFFSET` =
+`--port-offset` + 1700·k, a window with a port of another program - Windows' Delivery Optimization on 7680 - is
+skipped). `host_dll` builds `otahost.dll` first; the image checks of the full run wait for `fw_build`; the last case of
+`child_cleanup` runs after everything. `call_listen`, `call_check` and `child_cleanup` assert times measured in real
+time: their processes run at ABOVE_NORMAL priority (job object limit), so a loaded PC does not fail them.
+
+**A new check is one line** in `CHECKS` of `run_tests.py`: `ut("name", "what it proves", "test_module", TESTS, timeout,
+est_seconds)`; it is in both levels. A long one gets `shards=[(["ClassA"], s), (REST, s)]`; a case only for the full run
+gets `@full_only("why")` from `tiers.py`.
+
+`fw_build` builds a board only when its inputs changed (`fw_build_check.py`: fingerprint of both firmware trees, the
+secret files, defines and ESP-IDF; `--no-cache` builds anyway).
 
 Needs: Python 3.13 with numpy and pyserial, Visual Studio Build Tools 2022 (`cl`, path of `vcvars64.bat` in `OTA_VCVARS`
 if elsewhere), ESP-IDF v5.5.2 (`IDF_PATH`, `IDF_TOOLS_PATH`, as `tools/bench/fw.py`), the Android SDK with a JDK for
@@ -37,6 +68,7 @@ used to hold `ota_test/build/otahost.dll` and the next build failed with LNK1104
 | `platform_dll` | The ROM loader C code of the platform builds the same way | `tools/platform/build_host.cmd` |
 | `static` | No value of the ignored secret files in any tracked file (values never printed), the secret and local files not tracked and covered by `.gitignore`, the S3 defaults to `S3_NET_ETH 0` | `tools/tests/static_check.py` |
 | `fw_build` | S3 and LyraT (`lyrat`: the phone mode at a clean start, `lyrat_pc` with `-D LYRAT_DEFAULT_MODE=pc`, checked from the compile flags) built into `bench_runs/tests/builds/<board>` with their own sdkconfig: the partition table of the image = `partitions_ota.csv` = the tables of `OTA.md`, rollback on, image within 85 % of the slot and whole (checksum, hash), Wi-Fi name, password and token in the S3 image (bytes compared, never printed; a ccache trap is rebuilt once with `CCACHE_RECACHE=1`), the working `build/`, `sdkconfig` and git status unchanged | `tools/tests/fw_build_check.py` |
+| `fw_rules` | `--fast` only, no build: the partition table of `partitions_ota.csv` = the table of `OTA.md` for the S3, the LyraT and its updater, rollback and the table file in `sdkconfig.defaults`, the `pc` define in `main/CMakeLists.txt` (goal 110) | `tools/tests/fw_build_check.py --sources` |
 | `sco_probe` | The Android probe builds; it is not installed | `tools/android/build_apk.py --out <run>/apk` |
 | `c_ctl_frame` | UART framing in C: empty and largest payload, one byte too long, every single bit flip refused, garbage, a frame inside a false header, cut by a pause, clock wrap, repeated seq | `tools/tests/test_ctl_frame.py` |
 | `c_dbg_log` | Log ring in C: a line longer than a slot in parts and joined again, slot boundary, ring full mid-line, a repeated datagram; the stat line of old and new firmware; the S3's UDP sender keeps a datagram whose send failed (no IP) and sends it first when the network is back, a gap then counts only what the ring dropped (goal 094 #002) | `tools/tests/test_dbg_log.py` |

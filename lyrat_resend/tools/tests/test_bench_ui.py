@@ -47,6 +47,7 @@ OFFSET = BASE_OFFSET + 800
 os.environ["BENCH_PORT_OFFSET"] = str(OFFSET)
 import gen_bench_ui as G  # noqa: E402
 import simproc  # noqa: E402
+from tiers import full_only  # noqa: E402
 
 TMP = Path(tempfile.mkdtemp(prefix="t104_"))
 OTA_TOKEN = re.search(r'"(.+)"', simproc.TOKEN.read_text(encoding="utf-8")).group(1)
@@ -559,6 +560,7 @@ class Live(unittest.TestCase):
         self.assertRegex(dom, r'<span class="act" id="w-bt_mode">')            # shown: benchd has --bt-mode-cmd
         self.assertNotRegex(dom, r'id="w-bt_mode" hidden')
 
+    @full_only("the same command as the check bench_ui_check, which the fast level runs")
     def test_check_with_its_own_benchd_and_simulator(self):
         rc, out = gen("--check", timeout=180)
         self.assertEqual(rc, 0, out)
@@ -574,7 +576,8 @@ class Live(unittest.TestCase):
         code, ans = api(url, "POST", "/lock", {"owner": "lan", "ttl_s": 5})
         self.assertEqual(code, 401)
         self.assertIn("token", ans["error"])
-        h = {"X-Bench": "1", "Content-Type": "application/json", "X-Bench-Token": token[:-1] + "x"}
+        wrong = token[:-1] + ("y" if token.endswith("x") else "x")    # a token ending in "x" made it right (goal 110 #001)
+        h = {"X-Bench": "1", "Content-Type": "application/json", "X-Bench-Token": wrong}
         self.assertEqual(api(url, "POST", "/lock", {"owner": "lan", "ttl_s": 5}, headers=h)[0], 401)
         h["X-Bench-Token"] = token
         self.assertEqual(api(url, "POST", "/lock", {"owner": "lan", "ttl_s": 5}, headers=h)[0], 200)
