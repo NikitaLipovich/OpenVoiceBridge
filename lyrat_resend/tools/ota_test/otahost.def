@@ -83,3 +83,14 @@ EXPORTS
     afh_ctl_applied
     host_afh_ctl_new
     host_afh_ctl_info
+    hfm_init
+    hfm_on_paired
+    hfm_on_slc
+    hfm_next_target
+    hfm_command
+    hfm_forget_all
+    hfm_role
+    hfm_mode_name
+    hfm_slc_name
+    hfm_addr_short
+    host_sizeof_hfm

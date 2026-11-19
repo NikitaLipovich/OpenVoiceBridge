@@ -55,7 +55,7 @@ CHECKS = [
      ["cmd", "/c", str(PLATFORM / "build_host.cmd")], PLATFORM, 300, "base", False),
     ("static", "no secret in git, .gitignore covers the secret files, the S3 builds for Wi-Fi by default",
      [PY, str(TESTS / "static_check.py")], TESTS, 120, "base", False),
-    ("fw_build", "S3, LyraT and its updater built in their own folders: table, rollback, size in the slot, whole image, "
+    ("fw_build", "S3, LyraT (phone and pc builds) and its updater built in their own folders: default mode, table, rollback, size in the slot, whole image, "
                  "secrets, Wi-Fi only in the updater; working build untouched",
      [PY, str(TESTS / "fw_build_check.py"), "--out", str(BUILDS)], TESTS, 7200, "build", False),
     ("sco_probe", "the Android probe app builds with the plain SDK tools (never installed here)",
@@ -99,6 +99,11 @@ CHECKS = [
                       "the time line, no convergence), lost frames knocked out at known times found within 7.5 ms with "
                       "their type, files and report, the check against tone_blocks, call_check --compare plumbing (goal 099)",
      unittest_cmd("test_phone_compare"), TESTS, 300, "base", False),
+    ("dual_mode", "the LyraT's two modes, phone and PC (goal 102): the C rules of hf_mode.c, the scenarios of the bench "
+                  "on a model of the stack, a phone and Windows (switch, refusal during SCO, frequent app audio, link loss, "
+                  "pushy phone, first pairing, unknown AG, reboot, build pc), the phone mode line for line as phone-bringup, "
+                  "the audio path byte for byte, hfp_states.py on those logs",
+     unittest_cmd("test_dual_mode"), TESTS, 300, "base", False),
     ("updater", "the LyraT through its updater vs the simulator: image over Wi-Fi, a bad image kept out, no network "
                 "then the UART way, fw.py --via auto, every start through the updater (goal 096)",
      unittest_cmd("test_updater"), TESTS, 1500, "base", True),

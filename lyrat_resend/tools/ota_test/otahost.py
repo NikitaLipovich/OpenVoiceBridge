@@ -573,3 +573,93 @@ class CAfhCtl:
         d["mode"], d["applied_src"] = AFH_MODES[d["mode"]], AFH_SRCS[d["applied_src"]]
         d["applied"], d["excl"] = bytes(m), excl.value.decode()
         return d
+# --- the LyraT's two modes, phone and PC: the rules of hf_mode.c (goal 102) ---------------------------------------------
+
+ADDR = C.c_uint8 * 6
+lib.host_sizeof_hfm.restype = C.c_size_t
+lib.hfm_init.argtypes = [C.c_void_p, C.c_int, C.c_int, C.c_void_p, C.c_void_p, C.c_void_p]
+lib.hfm_on_paired.argtypes = [C.c_void_p, C.c_void_p]
+lib.hfm_on_slc.argtypes = [C.c_void_p, C.c_void_p]
+lib.hfm_next_target.argtypes = [C.c_void_p, C.c_void_p, C.c_int, C.c_void_p]
+lib.hfm_command.argtypes = [C.c_void_p, C.c_char_p, C.c_int, C.c_void_p, C.c_char_p, C.c_size_t]
+lib.hfm_forget_all.argtypes = [C.c_void_p]
+lib.hfm_role.argtypes = [C.c_void_p, C.c_void_p]
+lib.hfm_role.restype = C.c_char_p
+lib.hfm_mode_name.argtypes = [C.c_int]
+lib.hfm_mode_name.restype = C.c_char_p
+lib.hfm_slc_name.argtypes = [C.c_int]
+lib.hfm_slc_name.restype = C.c_char_p
+lib.hfm_addr_short.argtypes = [C.c_void_p, C.c_char_p, C.c_size_t]
+lib.hfm_addr_short.restype = C.c_char_p
+
+HFM_MODES = ("phone", "pc")
+HFM_DO_SAVE, HFM_DO_DROP, HFM_DO_KICK = 1, 2, 4
+
+
+def _addr(a):
+    return None if a is None else ADDR(*a)
+
+
+class CHfm:
+    """hfm_t of hf_mode.c. Addresses are 6-byte bytes; the NVS view (mode, slots) is read back from the struct."""
+
+    # layout of hfm_t (hf_mode.h): mode, src, have[2], peer[2][6], have_paired, paired[6], dirty, migrated, (pad), turn
+    class _S(C.Structure):
+        _fields_ = [("mode", C.c_uint8), ("src", C.c_uint8), ("have", C.c_uint8 * 2), ("peer", (C.c_uint8 * 6) * 2),
+                    ("have_paired", C.c_uint8), ("paired", C.c_uint8 * 6), ("dirty", C.c_uint8),
+                    ("migrated", C.c_uint8), ("turn", C.c_uint32)]
+
+    def __init__(self, nvs_mode=None, default_mode="phone", phone=None, pc=None, mru0=None):
+        assert C.sizeof(self._S) == lib.host_sizeof_hfm(), "hfm_t layout changed: update CHfm._S"
+        self.s = self._S()
+        lib.hfm_init(C.byref(self.s), -1 if nvs_mode is None else HFM_MODES.index(nvs_mode),
+                     HFM_MODES.index(default_mode), _addr(phone), _addr(pc), _addr(mru0))
+
+    @property
+    def mode(self):
+        return HFM_MODES[self.s.mode]
+
+    @property
+    def src(self):
+        return ("build", "nvs")[self.s.src]
+
+    def slot(self, mode):
+        i = HFM_MODES.index(mode)
+        return bytes(self.s.peer[i]) if self.s.have[i] else None
+
+    @property
+    def dirty(self):
+        return bool(self.s.dirty)
+
+    def saved(self):
+        """What a save writes to NVS, and clears dirty as the glue does after a good commit."""
+        self.s.dirty = 0
+        return {"mode": self.mode, "phone": self.slot("phone"), "pc": self.slot("pc")}
+
+    def on_paired(self, bda):
+        lib.hfm_on_paired(C.byref(self.s), _addr(bda))
+
+    def on_slc(self, bda):
+        return lib.hfm_slc_name(lib.hfm_on_slc(C.byref(self.s), _addr(bda))).decode()
+
+    def next_target(self, bonds):
+        arr = (ADDR * max(1, len(bonds)))(*[ADDR(*b) for b in bonds])
+        out = ADDR()
+        return bytes(out) if lib.hfm_next_target(C.byref(self.s), arr, len(bonds), out) else None
+
+    def command(self, args, sco_on=False, slc_bda=None):
+        """(action bits, reply text) of "mode <args>"."""
+        out = C.create_string_buffer(160)
+        act = lib.hfm_command(C.byref(self.s), args.encode(), int(sco_on), _addr(slc_bda), out, 160)
+        return act, out.value.decode()
+
+    def forget_all(self):
+        lib.hfm_forget_all(C.byref(self.s))
+
+    def role(self, bda):
+        return lib.hfm_role(C.byref(self.s), _addr(bda)).decode()
+
+
+def hfm_short(bda):
+    out = C.create_string_buffer(16)
+    return lib.hfm_addr_short(_addr(bda), out, 16).decode()

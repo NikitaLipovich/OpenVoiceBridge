@@ -1,6 +1,7 @@
 // PC build of the shared firmware code (build_host.cmd): exports for the Python tests what the headers keep inline,
 // and opaque constructors for the sender, the receiver and the log ring. Made by goal 090.
 #define __attribute__(x)
+#include "hf_mode.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -125,3 +126,5 @@ void host_afh_ctl_info(const afh_ctl_t *c, uint32_t *v, uint8_t *map10, char *ex
     memcpy(map10, c->applied, AFH_MAP_BYTES);
     snprintf(excl, cap, "%s", c->excl);
 }
+// goal 102: the size of the mode state, so that Python allocates it
+size_t host_sizeof_hfm(void) { return sizeof(hfm_t); }

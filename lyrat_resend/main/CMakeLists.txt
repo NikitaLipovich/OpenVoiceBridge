@@ -1,5 +1,5 @@
 idf_component_register(SRCS "voice_ns.c" "main.c" "aec.c" "spectral_ns.c" "msbc_codec.c" "plc.c" "link_power.c" "voice_ns.c"
-                         "ota_link.c" "ota_sha256.c" "dbg_log.c" "lyrat_ota.c" "lyrat_dbglog.c" "upd_mode.c" "esco_ctl.c" "afh_map.c"
+                         "ota_link.c" "ota_sha256.c" "dbg_log.c" "lyrat_ota.c" "lyrat_dbglog.c" "upd_mode.c" "esco_ctl.c" "afh_map.c" "hf_mode.c"
                     INCLUDE_DIRS "."
                     REQUIRES
                         nvs_flash
@@ -21,3 +21,8 @@ set_source_files_properties(msbc_codec.c PROPERTIES INCLUDE_DIRECTORIES
 # Goal 100: the eSCO answer of the board and the settled link parameters, without changing ESP-IDF (esco_ctl.c).
 target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=BTM_EScoConnRsp" "-Wl,--wrap=btm_sco_connected"
                       "-Wl,--wrap=btm_esco_proc_conn_chg")
+# Goal 102: the build "pc" starts in the PC mode while NVS holds no mode (idf.py -D LYRAT_DEFAULT_MODE=pc); the
+# default build starts in the phone mode. fw.py --variant pc does the same through bench_variant.h.
+if(DEFINED LYRAT_DEFAULT_MODE AND LYRAT_DEFAULT_MODE STREQUAL "pc")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE BENCH_DEFAULT_MODE_PC=1)
+endif()

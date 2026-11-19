@@ -6,6 +6,7 @@ For each board: idf.py -B DIR/<board> -D SDKCONFIG=DIR/<board>.sdkconfig build (
 they are, and the check proves it), then
   table      the partition table in the built partition-table.bin = partitions_ota.csv = the table of docs/OTA.md
   rollback   CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y in the sdkconfig of this build
+  default_mode  LyraT (goal 102): "lyrat" starts in the phone mode, "lyrat_pc" (-D LYRAT_DEFAULT_MODE=pc) in the PC mode
   size       the app image within 85 % of its slot (docs/OTA.md): ota_0 for the LyraT's headset firmware, factory for
              its updater (goal 096), ota_0 for the S3
   wifi       LyraT (goal 096): the headset firmware links no Wi-Fi (R13), the updater does; read from the link map
@@ -48,7 +49,12 @@ BOARDS = {
            "csv": REPO / "s3_eth_bridge" / "partitions_ota.csv", "csv_conf": "partitions_ota.csv",
            "secrets": [(S3_SECRETS, ("OTA_TOKEN", "WIFI_SSID", "WIFI_PASS"))]},
     "lyrat": {"dir": LYRAT, "bin": "lyrat_resend.bin", "doc": "LyraT", "slot": "ota_0", "wifi": False,
-              "csv": LYRAT / "partitions_ota.csv", "csv_conf": "partitions_ota.csv", "secrets": None},
+              "csv": LYRAT / "partitions_ota.csv", "csv_conf": "partitions_ota.csv", "secrets": None,
+              "default_mode": "phone"},
+    # Goal 102: the same headset firmware built to start in the PC mode while NVS holds no mode (main/CMakeLists.txt)
+    "lyrat_pc": {"dir": LYRAT, "bin": "lyrat_resend.bin", "doc": "LyraT", "slot": "ota_0", "wifi": False,
+                 "csv": LYRAT / "partitions_ota.csv", "csv_conf": "partitions_ota.csv", "secrets": None,
+                 "defs": ["LYRAT_DEFAULT_MODE=pc"], "default_mode": "pc"},
     "lyrat_updater": {"dir": LYRAT / "updater", "bin": "lyrat_updater.bin", "doc": "LyraT", "slot": "factory", "wifi": True,
                       "csv": LYRAT / "partitions_ota.csv", "csv_conf": "../partitions_ota.csv",
                       "secrets": [(S3_SECRETS, ("OTA_TOKEN",)), (WIFI_SECRETS, ("WIFI_SSID", "WIFI_PASS"))]},
@@ -141,8 +147,9 @@ def idf_build(board, out: Path, recache=False, timeout=3600):
     build_dir, sdk = out / board, out / (board + ".sdkconfig")
     log = out / (board + "_build.log")
     script = ("$env:IDF_TOOLS_PATH='%s'; . '%s\\export.ps1' | Out-Null; %s"
-              "idf.py -C '%s' -B '%s' -D 'SDKCONFIG=%s' build; exit $LASTEXITCODE"
-              % (IDF_TOOLS, IDF_PATH, "$env:CCACHE_RECACHE='1'; " if recache else "", b["dir"], build_dir, sdk))
+              "idf.py -C '%s' -B '%s' -D 'SDKCONFIG=%s'%s build; exit $LASTEXITCODE"
+              % (IDF_TOOLS, IDF_PATH, "$env:CCACHE_RECACHE='1'; " if recache else "", b["dir"], build_dir, sdk,
+                 "".join(" -D '%s'" % d for d in b.get("defs", []))))
     t0 = time.monotonic()
     env = {k: v for k, v in os.environ.items() if k != "MSYSTEM"}    # ESP-IDF refuses to start under Git Bash's MSYSTEM
     with open(log, "w", encoding="utf-8", errors="replace") as f:
@@ -171,6 +178,18 @@ def wifi_linked(map_path: Path):
     return re.search(r"^\s+0x[0-9a-f]+\s+esp_wifi_init\s*$", text, re.M) is not None
 
 
+def default_mode_of(build_dir: Path):
+    """"pc" when main.c of this build was compiled with BENCH_DEFAULT_MODE_PC, else "phone"; None without the
+    compile database."""
+    db = build_dir / "compile_commands.json"
+    if not db.exists():
+        return None
+    for e in json.loads(db.read_text(encoding="utf-8")):
+        if e.get("file", "").replace("\\", "/").endswith("lyrat_resend/main/main.c"):
+            return "pc" if "BENCH_DEFAULT_MODE_PC" in e.get("command", "") else "phone"
+    return None
+
+
 def secrets_check(image: bytes, values):
     """Per key: True when its value is in the image (an empty or absent value: False)."""
     return {k: bool(v) and v in image for k, v in values.items()}
@@ -194,6 +213,10 @@ def check_board(board, out: Path):
     if b["wifi"] is not None:
         linked = wifi_linked(build_dir / (b["bin"][:-4] + ".map"))
         res["wifi"] = {"pass": linked == b["wifi"], "linked": linked, "want": b["wifi"]}
+    if "default_mode" in b:
+        # Goal 102: the mode of a start without a mode in NVS, from the flags main.c was compiled with
+        got = default_mode_of(build_dir)
+        res["default_mode"] = {"pass": got == b["default_mode"], "got": got, "want": b["default_mode"]}
     why = images.check(image)
     res["image"] = {"pass": why is None, "problem": why}
     if b["secrets"] is not None:
