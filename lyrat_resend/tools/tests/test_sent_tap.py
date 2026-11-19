@@ -129,6 +129,8 @@ class Placement(unittest.TestCase):
             r = self.build(pk, up, d)
             self.assertTrue(Path(r["paths"]["sent"]).exists() and Path(r["paths"]["sent_both"]).exists())
         self.assertEqual(r["stats"]["lost_frames"], 8)
+        import json
+        json.dumps({k: v for k, v in r.items() if k != "pcm"})   # report.json takes it as it is
         self.assertEqual(len(r["gaps"]), 8)
         self.assertEqual(r["align"]["method"], "xcorr")
         # The stamps put the frames late by the least UART delay plus the codec; the content brings them back to up.

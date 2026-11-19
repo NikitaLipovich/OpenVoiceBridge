@@ -322,7 +322,7 @@ def build(out, prefix, raw_packets, mic_first_frame, file_start, length, up=None
            "loss_pct": round(100.0 * stats["lost_frames"] / total, 3) if total else None,
            "seconds": round(placed * SPF / RATE, 2), "levels": levels(part),
            "levels_unmuted": levels(sent[have & ~muted]),
-           "muted": _spans(muted[::SPF], SPF / RATE), "silent": bool(placed) and (levels(part)["rms_dbfs"] or -200) < -70}
+           "muted": _spans(muted[::SPF], SPF / RATE), "silent": bool(placed and (levels(part)["rms_dbfs"] or -200) < -70)}
     if write:
         paths = {"sent": out / ("%s_sent.wav" % prefix), "sent_both": out / ("%s_sent_both.wav" % prefix)}
         _write(paths["sent"], sent, 1)

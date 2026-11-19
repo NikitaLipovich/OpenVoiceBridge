@@ -473,20 +473,11 @@ def build_sent(out, prefix, files, packets):
     pcm = r.pop("pcm")
     files["sent"] = pcm
     files["paths"].update(r.get("paths") or {})
-    r["dominant_hz"] = dominant_hz(pcm[pcm != 0])
     r["enabled"] = True
     r["packets"] = r["stats"]["packets"]
     r["file_start"] = {"sm": files["sm"], "mic_first_frame": files["mic_first_frame"]}
     return r
 
-
-def dominant_hz(x):
-    """The strongest frequency of a line, for the probe's tone (None under 0.5 s)."""
-    if len(x) < RATE // 2:
-        return None
-    f = np.abs(np.fft.rfft(x.astype(np.float64) * np.hanning(len(x))))
-    f[:int(len(f) * 50 / (RATE / 2))] = 0      # below 50 Hz
-    return round(float(np.argmax(f)) * RATE / len(x), 1)
 
 
 # --- report ------------------------------------------------------------------------------------------------------------------
@@ -715,6 +706,15 @@ def directions(report):
         snr = [t.get("snr_db") for t in res["tones"].values() if t.get("snr_db") is not None]
         out[key] = {"tones": bool(res["pass"]), "min_snr_db": min(snr) if snr else None}
     out["ok"] = out["down"]["tones"] and not out["up"]["tones"]
+    se = report.get("sent") or {}
+    if se.get("seconds") and Path((se.get("paths") or {}).get("sent", "")).exists():
+        # Goal 112, for information: what the LyraT sent; it carries tones only when its own `tone 1` replaced the mic.
+        x = mono(_read(se["paths"]["sent"]))
+        part = x[int((sco[0][0] + 2) * RATE):int((sco[0][1] - 2) * RATE)]
+        res = audio_check.check(list(map(int, part)), RATE, PROBE_TONES, 20.0, 1.0) if len(part) > RATE else {"pass": False, "tones": {}}
+        snr = [t.get("snr_db") for t in res["tones"].values() if t.get("snr_db") is not None]
+        out["sent"] = {"tones": bool(res["pass"]), "min_snr_db": min(snr) if snr else None,
+                       "per_tone": {k: {kk: t.get(kk) for kk in ("snr_db", "freq_hz", "seconds")} for k, t in res["tones"].items()}}
     return out
 
 
